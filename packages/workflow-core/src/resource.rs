@@ -15,7 +15,7 @@ struct GateInner {
 /// a physical resource (halving VRAM pressure in LocalDub).
 ///
 /// `try_acquire` never blocks: the scheduler makes the dispatch decision
-/// synchronously, so busy resources just leave the node queued while other
+/// synchronously, so busy resources just leave the step queued while other
 /// ready nodes are considered (avoiding head-of-line blocking).
 #[derive(Default)]
 pub struct Gate {
@@ -45,9 +45,9 @@ impl Gate {
     }
 }
 
-/// Holds one unit of a resource for the lifetime of a running node. Released
+/// Holds one unit of a resource for the lifetime of a running step. Released
 /// on drop (before the worker signals completion, so dependents can start as
-/// soon as the node finishes).
+/// soon as the step finishes).
 pub struct GateGuard {
     gate: Arc<Gate>,
     key: ResourceKey,

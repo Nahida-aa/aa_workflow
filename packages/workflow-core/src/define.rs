@@ -3,21 +3,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::WorkflowError;
-use crate::event::NodeState;
-use crate::scheduler::RunCtx;
+use crate::event::StepState;
+use crate::scheduler::StepContext;
 
-/// The per-node execution function. Nodes write artifacts to disk and read
-/// from the frozen input / other nodes' outputs they depend on; the engine
+/// The per-step execution function. Steps write artifacts to disk and read
+/// from the frozen input / other steps' outputs they depend on; the engine
 /// only cares about success/failure.
-pub type NodeRunFn = Arc<dyn Fn(RunCtx) -> anyhow::Result<Option<serde_json::Value>> + Send + Sync>;
+pub type StepRunFn = Arc<dyn Fn(StepContext) -> anyhow::Result<Option<serde_json::Value>> + Send + Sync>;
 /// Per-run filter; `None` means "always enabled". This is the LocalDub
 /// `get_steps`-style selection carrier.
-pub type NodeEnabledFn = Arc<dyn Fn(&RunCtx) -> bool + Send + Sync>;
+pub type StepEnabledFn = Arc<dyn Fn(&StepContext) -> bool + Send + Sync>;
 /// Maps a run to the [`crate::resource::ResourceKey`] it holds while running.
-pub type NodeResourceFn = Arc<dyn Fn(&RunCtx) -> String + Send + Sync>;
+pub type StepResourceFn = Arc<dyn Fn(&StepContext) -> String + Send + Sync>;
 /// Make-style freshness check: `Ok(true)` means "already up to date, skip
 /// re-running". Mirrors LocalDub's mtime / pipeline-fingerprint staleness.
-pub type NodeUpToDateFn = Arc<dyn Fn(&RunCtx, &NodeState) -> bool + Send + Sync>;
+pub type StepUpToDateFn = Arc<dyn Fn(&StepContext, &StepState) -> bool + Send + Sync>;
 
 /// Fixed | exponential | custom backoff. `attempt` is 1-based: after attempt
 /// #N fails, we wait `delay_ms(N)` before attempt N+1 (exponential: base * 2^(N-1)).
@@ -54,24 +54,24 @@ impl RetryPolicy {
     }
 }
 
-/// A single node in the workflow graph. Edges are the explicit `needs` list;
-/// if a `needs` node is filtered out by `enabled`, that edge is ignored (so a
+/// A single step in the workflow graph. Edges are the explicit `needs` list;
+/// if a `needs` step is filtered out by `enabled`, that edge is ignored (so a
 /// conditional dependency like LocalDub's asr↔separate_after just vanishes).
 #[derive(Clone)]
-pub struct NodeSpec {
+pub struct StepSpec {
     pub id: String,
     pub label: Option<String>,
     pub needs: Vec<String>,
-    pub enabled: Option<NodeEnabledFn>,
-    pub resource: Option<NodeResourceFn>,
+    pub enabled: Option<StepEnabledFn>,
+    pub resource: Option<StepResourceFn>,
     pub retry: Option<RetryPolicy>,
     pub timeout: Option<Duration>,
-    pub up_to_date: Option<NodeUpToDateFn>,
-    pub run: NodeRunFn,
+    pub up_to_date: Option<StepUpToDateFn>,
+    pub run: StepRunFn,
 }
 
-impl NodeSpec {
-    pub fn new(id: impl Into<String>, run: NodeRunFn) -> Self {
+impl StepSpec {
+    pub fn new(id: impl Into<String>, run: StepRunFn) -> Self {
         Self {
             id: id.into(),
             label: None,
@@ -95,12 +95,12 @@ impl NodeSpec {
         self
     }
 
-    pub fn enabled(mut self, enabled: impl Fn(&RunCtx) -> bool + Send + Sync + 'static) -> Self {
+    pub fn enabled(mut self, enabled: impl Fn(&StepContext) -> bool + Send + Sync + 'static) -> Self {
         self.enabled = Some(Arc::new(enabled));
         self
     }
 
-    pub fn resource(mut self, resource: impl Fn(&RunCtx) -> String + Send + Sync + 'static) -> Self {
+    pub fn resource(mut self, resource: impl Fn(&StepContext) -> String + Send + Sync + 'static) -> Self {
         self.resource = Some(Arc::new(resource));
         self
     }
@@ -117,21 +117,21 @@ impl NodeSpec {
 
     pub fn up_to_date(
         mut self,
-        up_to_date: impl Fn(&RunCtx, &NodeState) -> bool + Send + Sync + 'static,
+        up_to_date: impl Fn(&StepContext, &StepState) -> bool + Send + Sync + 'static,
     ) -> Self {
         self.up_to_date = Some(Arc::new(up_to_date));
         self
     }
 }
 
-/// A declared workflow: an immutable graph of [`NodeSpec`]s plus an optional
-/// finalize step that derives the run output from the completed node states.
+/// A declared workflow: an immutable graph of [`StepSpec`]s plus an optional
+/// finalize step that derives the run output from the completed step states.
 #[derive(Clone)]
 pub struct Workflow {
     pub id: String,
     pub version: Option<String>,
-    pub nodes: Vec<NodeSpec>,
-    pub finalize: Option<Arc<dyn Fn(&HashMap<String, NodeState>) -> anyhow::Result<Option<serde_json::Value>> + Send + Sync>>,
+    pub steps: Vec<StepSpec>,
+    pub finalize: Option<Arc<dyn Fn(&HashMap<String, StepState>) -> anyhow::Result<Option<serde_json::Value>> + Send + Sync>>,
     validated: bool,
 }
 
@@ -140,7 +140,7 @@ impl Workflow {
         Self {
             id: id.into(),
             version: None,
-            nodes: Vec::new(),
+            steps: Vec::new(),
             finalize: None,
             validated: false,
         }
@@ -151,20 +151,20 @@ impl Workflow {
         self
     }
 
-    pub fn node(mut self, spec: NodeSpec) -> Self {
-        self.nodes.push(spec);
+    pub fn step(mut self, spec: StepSpec) -> Self {
+        self.steps.push(spec);
         self
     }
 
     pub fn finalize_with(
         mut self,
-        f: impl Fn(&HashMap<String, NodeState>) -> anyhow::Result<Option<serde_json::Value>> + Send + Sync + 'static,
+        f: impl Fn(&HashMap<String, StepState>) -> anyhow::Result<Option<serde_json::Value>> + Send + Sync + 'static,
     ) -> Self {
         self.finalize = Some(Arc::new(f));
         self
     }
 
-    /// Structural validation: unique ids, all `needs` reference known nodes,
+    /// Structural validation: unique ids, all `needs` reference known steps,
     /// and the full graph is acyclic. Called at `run` time (and idempotent,
     /// so safe to call defensively).
     pub fn validate(&mut self) -> Result<(), WorkflowError> {
@@ -172,20 +172,20 @@ impl Workflow {
             return Ok(());
         }
         let mut ids: HashSet<&str> = HashSet::new();
-        for node in &self.nodes {
-            if !ids.insert(node.id.as_str()) {
+        for step in &self.steps {
+            if !ids.insert(step.id.as_str()) {
                 return Err(WorkflowError::Validation(format!(
-                    "duplicate node id `{}`",
-                    node.id
+                    "duplicate step id `{}`",
+                    step.id
                 )));
             }
         }
-        for node in &self.nodes {
-            for need in &node.needs {
+        for step in &self.steps {
+            for need in &step.needs {
                 if !ids.contains(need.as_str()) {
                     return Err(WorkflowError::Validation(format!(
-                        "node `{}` needs unknown node `{}`",
-                        node.id, need
+                        "step `{}` needs unknown step `{}`",
+                        step.id, need
                     )));
                 }
             }
@@ -193,10 +193,10 @@ impl Workflow {
         // Cycle detection via Kahn's algorithm over all edges.
         let mut in_degree: HashMap<&str, usize> = ids.iter().map(|id| (*id, 0usize)).collect();
         let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
-        for node in &self.nodes {
-            for need in &node.needs {
-                in_degree.entry(node.id.as_str()).and_modify(|d| *d += 1);
-                dependents.entry(need.as_str()).or_default().push(node.id.as_str());
+        for step in &self.steps {
+            for need in &step.needs {
+                in_degree.entry(step.id.as_str()).and_modify(|d| *d += 1);
+                dependents.entry(need.as_str()).or_default().push(step.id.as_str());
             }
         }
         let mut queue: Vec<&str> = ids
@@ -224,7 +224,7 @@ impl Workflow {
                 .copied()
                 .collect();
             return Err(WorkflowError::Validation(format!(
-                "cycle detected involving nodes: {}",
+                "cycle detected involving steps: {}",
                 cyclic.join(", ")
             )));
         }

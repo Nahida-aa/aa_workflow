@@ -31,8 +31,8 @@ impl std::error::Error for StoreError {}
 pub enum WorkflowError {
     /// The workflow graph is invalid (duplicate ids, unknown `needs`, cycle).
     Validation(String),
-    /// A workflow node failed after exhausting its retry policy.
-    Node { node_id: String, error: String },
+    /// A workflow step failed after exhausting its retry policy.
+    Step { step_id: String, error: String },
     /// The finalize step failed.
     Finalize(String),
     /// Transport/persistence error while talking to the store.
@@ -47,8 +47,8 @@ impl fmt::Display for WorkflowError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             WorkflowError::Validation(msg) => write!(f, "workflow validation failed: {msg}"),
-            WorkflowError::Node { node_id, error } => {
-                write!(f, "node `{node_id}` failed: {error}")
+            WorkflowError::Step { step_id, error } => {
+                write!(f, "step `{step_id}` failed: {error}")
             }
             WorkflowError::Finalize(msg) => write!(f, "finalize failed: {msg}"),
             WorkflowError::Store(e) => write!(f, "store error: {e}"),

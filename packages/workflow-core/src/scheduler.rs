@@ -1,48 +1,48 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::define::{NodeRunFn, NodeSpec, Workflow};
+use crate::define::{StepRunFn, StepSpec, Workflow};
 use crate::error::WorkflowError;
-use crate::event::{fold_node_states, NodeAttempt, NodeState, NodeStatus, RunEvent, RunStatus};
+use crate::event::{StepAttempt, StepState, StepStatus, RunEvent, RunStatus, fold_step_states};
 use crate::resource::Gate;
 use crate::store::{RunState, RunStore};
 
 /// Messages sent from worker threads back to the scheduler.
 pub(crate) enum WorkerMsg {
     Done {
-        node_id: String,
+        step_id: String,
         result: Option<serde_json::Value>,
-        attempts: Vec<NodeAttempt>,
+        attempts: Vec<StepAttempt>,
     },
     Failed {
-        node_id: String,
+        step_id: String,
         error: String,
-        attempts: Vec<NodeAttempt>,
+        attempts: Vec<StepAttempt>,
     },
     Progress {
-        node_id: String,
+        step_id: String,
         value: f64,
     },
 }
 
-/// Per-invocation view handed to node closures. Nodes do real work on disk /
+/// Per-invocation view handed step closures. Steps do real work on disk /
 /// subprocesses, so this is intentionally minimal; `progress` is an
 /// emit-only observability signal.
 #[derive(Clone)]
-pub struct RunCtx {
+pub struct StepContext {
     pub run_id: String,
-    pub node_id: String,
+    pub step_id: String,
     pub input: serde_json::Value,
     pub(crate) scheduler_tx: Option<Sender<WorkerMsg>>,
 }
 
-impl RunCtx {
+impl StepContext {
     pub fn progress(&self, value: f64) {
         if let Some(tx) = &self.scheduler_tx {
             let _ = tx.send(WorkerMsg::Progress {
-                node_id: self.node_id.clone(),
+                step_id: self.step_id.clone(),
                 value,
             });
         }
@@ -107,7 +107,7 @@ pub(crate) fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// All downstream nodes reachable from `start` following `dependents` edges
+/// All downstream steps reachable from `start` following `dependents` edges
 /// (start itself included). Used by `continue_from` to reset a suffix of the
 /// graph.
 fn closure_downstream(start: &str, dependents: &HashMap<String, Vec<String>>) -> HashSet<String> {
@@ -126,43 +126,47 @@ fn closure_downstream(start: &str, dependents: &HashMap<String, Vec<String>>) ->
     out
 }
 
-fn ready(node_id: &str, needs_of: &HashMap<String, Vec<String>>, remaining: &HashSet<String>) -> bool {
+fn ready(
+    step_id: &str,
+    needs_of: &HashMap<String, Vec<String>>,
+    remaining: &HashSet<String>,
+) -> bool {
     needs_of
-        .get(node_id)
+        .get(step_id)
         .map_or(true, |deps| deps.iter().all(|d| !remaining.contains(d)))
 }
 
-/// Produces a per-node probe context (scheduler_tx = None) for the
+/// Produces a per-step probe context (scheduler_tx = None) for the
 /// `enabled` / `resource` / `up_to_date` selector closures.
-fn probe(run_id: &str, node_id: &str, input: &serde_json::Value) -> RunCtx {
-    RunCtx {
+fn probe(run_id: &str, step_id: &str, input: &serde_json::Value) -> StepContext {
+    StepContext {
         run_id: run_id.to_string(),
-        node_id: node_id.to_string(),
+        step_id: step_id.to_string(),
         input: input.clone(),
         scheduler_tx: None,
     }
 }
 
-/// Executes a node's `run` fn with retry + optional wall-clock timeout.
-/// Timeout uses `recv_timeout`: on expiry the node is marked failed and the
+/// Executes a step's `run` fn with retry + optional wall-clock timeout.
+/// Timeout uses `recv_timeout`: on expiry the step is marked failed and the
 /// egger thread is left running (documented limitation — subprocesses cannot
 /// be force-killed from Rust anyway).
-fn run_node_with_retry(
-    node: &NodeSpec,
-    ctx: &RunCtx,
-) -> (Result<Option<serde_json::Value>, String>, Vec<NodeAttempt>) {
-    let max = node.retry.as_ref().map(|p| p.max_attempts).unwrap_or(1);
+fn run_step_with_retry(
+    step: &StepSpec,
+    ctx: &StepContext,
+) -> (Result<Option<serde_json::Value>, String>, Vec<StepAttempt>) {
+    let max = step.retry.as_ref().map(|p| p.max_attempts).unwrap_or(1);
     let mut attempts = Vec::with_capacity(max);
     for attempt in 1..=max {
         let started_at = now_ms();
-        let outcome = match node.timeout {
-            Some(t) => run_with_timeout(&node.run, ctx, t).map_err(|e| e.to_string()),
-            None => (node.run)(ctx.clone()).map_err(|e| e.to_string()),
+        let outcome = match step.timeout {
+            Some(t) => run_with_timeout(&step.run, ctx, t).map_err(|e| e.to_string()),
+            None => (step.run)(ctx.clone()).map_err(|e| e.to_string()),
         };
         let finished_at = now_ms();
         match outcome {
             Ok(result) => {
-                attempts.push(NodeAttempt {
+                attempts.push(StepAttempt {
                     attempt,
                     started_at,
                     finished_at,
@@ -172,15 +176,15 @@ fn run_node_with_retry(
                 return (Ok(result), attempts);
             }
             Err(err) => {
-                attempts.push(NodeAttempt {
+                attempts.push(StepAttempt {
                     attempt,
                     started_at,
                     finished_at,
                     result: None,
                     error: Some(err.clone()),
                 });
-                if node.retry.is_some() && attempt < max {
-                    let delay = node
+                if step.retry.is_some() && attempt < max {
+                    let delay = step
                         .retry
                         .as_ref()
                         .map(|p| p.backoff.delay_ms(attempt))
@@ -196,8 +200,8 @@ fn run_node_with_retry(
 }
 
 fn run_with_timeout(
-    run: &NodeRunFn,
-    ctx: &RunCtx,
+    run: &StepRunFn,
+    ctx: &StepContext,
     timeout: Duration,
 ) -> anyhow::Result<Option<serde_json::Value>> {
     let (tx, rx) = mpsc::channel();
@@ -222,7 +226,7 @@ fn handle_worker(
     msg: WorkerMsg,
     running: &mut HashSet<String>,
     remaining: &mut HashSet<String>,
-    live: &mut HashMap<String, NodeState>,
+    live: &mut HashMap<String, StepState>,
     store: &dyn RunStore,
     run_id: &str,
     log_len: &mut usize,
@@ -237,39 +241,47 @@ fn handle_worker(
         }
     };
     match msg {
-        WorkerMsg::Done { node_id, result, attempts } => {
-            running.remove(&node_id);
-            remaining.remove(&node_id);
-            let st = live.entry(node_id.clone()).or_default();
-            st.status = NodeStatus::Success;
+        WorkerMsg::Done {
+            step_id,
+            result,
+            attempts,
+        } => {
+            running.remove(&step_id);
+            remaining.remove(&step_id);
+            let st = live.entry(step_id.clone()).or_default();
+            st.status = StepStatus::Success;
             st.result = result.clone();
             st.error = None;
             st.finished_at = Some(now_ms());
-            let ev = RunEvent::NodeFinished {
+            let ev = RunEvent::StepFinished {
                 ts: now_ms(),
                 run_id: run_id.to_string(),
-                node_id: node_id.clone(),
+                step_id: step_id.clone(),
                 result,
                 attempts,
             };
             store.append_event(run_id, *log_len, &ev)?;
             *log_len += 1;
             publish(&ev);
-            if target_step == Some(node_id.as_str()) {
+            if target_step == Some(step_id.as_str()) {
                 *target_reached = true;
             }
         }
-        WorkerMsg::Failed { node_id, error, attempts } => {
-            running.remove(&node_id);
-            remaining.remove(&node_id);
-            let st = live.entry(node_id.clone()).or_default();
-            st.status = NodeStatus::Failed;
+        WorkerMsg::Failed {
+            step_id,
+            error,
+            attempts,
+        } => {
+            running.remove(&step_id);
+            remaining.remove(&step_id);
+            let st = live.entry(step_id.clone()).or_default();
+            st.status = StepStatus::Failed;
             st.error = Some(error.clone());
             st.finished_at = Some(now_ms());
-            let ev = RunEvent::NodeFailed {
+            let ev = RunEvent::StepFailed {
                 ts: now_ms(),
                 run_id: run_id.to_string(),
-                node_id: node_id.clone(),
+                step_id: step_id.clone(),
                 error: error.clone(),
                 attempts,
             };
@@ -280,11 +292,11 @@ fn handle_worker(
                 *run_error = Some(error);
             }
         }
-        WorkerMsg::Progress { node_id, value } => {
-            publish(&RunEvent::NodeProgress {
+        WorkerMsg::Progress { step_id, value } => {
+            publish(&RunEvent::StepProgress {
                 ts: now_ms(),
                 run_id: run_id.to_string(),
-                node_id,
+                step_id,
                 value,
             });
         }
@@ -295,18 +307,18 @@ fn handle_worker(
 /// Runs (or resumes) a workflow.
 ///
 /// Resume semantics:
-/// - Load the run's event log and fold it into per-node states.
-/// - `continue_from`: reset that node + all its downstream descendants and run
+/// - Load the run's event log and fold it into per-step states.
+/// - `continue_from`: reset that step + all its downstream descendants and run
 ///   only that suffix, leaving the (successful) prefix untouched.
-/// - Otherwise: run every active, non-Success node (failed nodes get a fresh
-///   attempt) plus any Success node whose `up_to_date` hook reports stale.
-/// - `target_step`: stop scheduling once that node succeeds (downstream never
+/// - Otherwise: run every active, non-Success step (failed steps get a fresh
+///   attempt) plus any Success step whose `up_to_date` hook reports stale.
+/// - `target_step`: stop scheduling once that step succeeds (downstream never
 ///   runs); the run still finishes as `Finished`.
 ///
-/// On the first terminal node failure the run stops scheduling and reports
-/// `Errored`. `max_concurrency` caps simultaneously-running nodes; resource
+/// On the first terminal step failure the run stops scheduling and reports
+/// `Errored`. `max_concurrency` caps simultaneously-running steps; resource
 /// gates (e.g. GPU) are honored during dispatch.
-pub fn run(
+pub fn run_workflow(
     workflow: &mut Workflow,
     store: &dyn RunStore,
     opts: &RunOptions,
@@ -314,7 +326,10 @@ pub fn run(
 ) -> Result<RunOutcome, WorkflowError> {
     workflow.validate()?;
 
-    let run_id = opts.run_id.clone().unwrap_or_else(|| format!("run_{}", now_ms()));
+    let run_id = opts
+        .run_id
+        .clone()
+        .unwrap_or_else(|| format!("run_{}", now_ms()));
     let ts = now_ms();
 
     let run_state = match store.get_run_state(&run_id)? {
@@ -349,18 +364,18 @@ pub fn run(
 
     // ---- derive current state from the persisted log (resume) ----
     let events = store.get_events(&run_id)?;
-    let mut live = fold_node_states(&events);
+    let mut live = fold_step_states(&events);
     let mut log_len = events.len();
 
-    // ---- active set: `enabled` filters (LocalDub get_stages selection) ----
-    let mut active: Vec<NodeSpec> = Vec::new();
-    for node in &workflow.nodes {
-        let on = node
+    // ---- active set: `enabled` filters (LocalDub get_steps selection) ----
+    let mut active: Vec<StepSpec> = Vec::new();
+    for step in &workflow.steps {
+        let on = step
             .enabled
             .as_ref()
-            .map_or(true, |f| f(&probe(&run_id, &node.id, &opts.input)));
+            .map_or(true, |f| f(&probe(&run_id, &step.id, &opts.input)));
         if on {
-            active.push(node.clone());
+            active.push(step.clone());
         }
     }
 
@@ -375,7 +390,10 @@ pub fn run(
             .cloned()
             .collect();
         for d in &deps {
-            dependents_of.entry(d.clone()).or_default().push(n.id.clone());
+            dependents_of
+                .entry(d.clone())
+                .or_default()
+                .push(n.id.clone());
         }
         needs_of.insert(n.id.clone(), deps);
     }
@@ -383,17 +401,17 @@ pub fn run(
     if let Some(t) = &opts.target_step {
         if !active_ids.contains(t) {
             return Err(WorkflowError::Validation(format!(
-                "target_step `{t}` is not an active node"
+                "target_step `{t}` is not an active step"
             )));
         }
     }
 
-    // ---- decide which nodes need to run ----
+    // ---- decide which steps need to run ----
     let mut remaining: HashSet<String> = HashSet::new();
     if let Some(cf) = &opts.continue_from {
         if !active_ids.contains(cf) {
             return Err(WorkflowError::Validation(format!(
-                "continue_from `{cf}` is not an active node"
+                "continue_from `{cf}` is not an active step"
             )));
         }
         remaining = closure_downstream(cf, &dependents_of);
@@ -401,12 +419,10 @@ pub fn run(
         for n in &active {
             let st = live.get(n.id.as_str());
             let stale = match (st, &n.up_to_date) {
-                (Some(st), Some(f)) => {
-                    !f(&probe(&run_id, &n.id, &opts.input), st)
-                }
+                (Some(st), Some(f)) => !f(&probe(&run_id, &n.id, &opts.input), st),
                 _ => false,
             };
-            let needs_rerun = st.map(|s| s.status != NodeStatus::Success).unwrap_or(true) || stale;
+            let needs_rerun = st.map(|s| s.status != StepStatus::Success).unwrap_or(true) || stale;
             if needs_rerun {
                 remaining.insert(n.id.clone());
             }
@@ -440,7 +456,7 @@ pub fn run(
             )?;
         }
 
-        // 2. dispatch ready nodes
+        // 2. dispatch ready steps
         if run_error.is_none() && !target_reached {
             for n in &active {
                 if running.len() >= cap {
@@ -452,26 +468,29 @@ pub fn run(
                 if !ready(&n.id, &needs_of, &remaining) {
                     continue;
                 }
-                let rkey_opt = n.resource.as_ref().map(|f| f(&probe(&run_id, &n.id, &opts.input)));
+                let rkey_opt = n
+                    .resource
+                    .as_ref()
+                    .map(|f| f(&probe(&run_id, &n.id, &opts.input)));
                 let guard = match rkey_opt {
                     Some(rkey) => match gate.try_acquire(&rkey) {
                         Some(g) => Some(g),
-                        None => continue, // resource busy: try next ready node
+                        None => continue, // resource busy: try next ready step
                     },
                     None => None, // no resource spec: no serialization
                 };
-                let ctx = RunCtx {
+                let ctx = StepContext {
                     run_id: run_id.clone(),
-                    node_id: n.id.clone(),
+                    step_id: n.id.clone(),
                     input: opts.input.clone(),
                     scheduler_tx: Some(tx.clone()),
                 };
-                let node = n.clone();
+                let step = n.clone();
                 let tx = tx.clone();
                 std::thread::spawn(move || {
-                    let _guard = guard; // held for the node's whole run
+                    let _guard = guard; // held for the step's whole run
                     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        run_node_with_retry(&node, &ctx)
+                        run_step_with_retry(&step, &ctx)
                     }));
                     drop(_guard);
                     let (res, attempts) = match run {
@@ -481,18 +500,18 @@ pub fn run(
                                 .downcast_ref::<&str>()
                                 .map(|s| s.to_string())
                                 .or_else(|| payload.downcast_ref::<String>().cloned())
-                                .unwrap_or_else(|| "node panicked".to_string());
+                                .unwrap_or_else(|| "step panicked".to_string());
                             (Err(msg), Vec::new())
                         }
                     };
                     let msg = match res {
                         Ok(result) => WorkerMsg::Done {
-                            node_id: node.id.clone(),
+                            step_id: step.id.clone(),
                             result,
                             attempts,
                         },
                         Err(error) => WorkerMsg::Failed {
-                            node_id: node.id.clone(),
+                            step_id: step.id.clone(),
                             error,
                             attempts,
                         },
@@ -500,10 +519,10 @@ pub fn run(
                     let _ = tx.send(msg);
                 });
                 running.insert(n.id.clone());
-                publish(&RunEvent::NodeStarted {
+                publish(&RunEvent::StepStarted {
                     ts: now_ms(),
                     run_id: run_id.clone(),
-                    node_id: n.id.clone(),
+                    step_id: n.id.clone(),
                 });
             }
         }
@@ -513,10 +532,10 @@ pub fn run(
             if run_error.is_some() || remaining.is_empty() || target_reached {
                 break;
             }
-            // Invariant: any remaining ready node must have a free gate when
+            // Invariant: any remaining ready step must have a free gate when
             // nothing is running, so this is a schedule bug.
             return Err(WorkflowError::Internal(format!(
-                "deadlock guard: nothing running but {} nodes remain",
+                "deadlock guard: nothing running but {} steps remain",
                 remaining.len()
             )));
         }
@@ -536,7 +555,11 @@ pub fn run(
                     &mut run_error,
                 )?;
             }
-            Err(_) => return Err(WorkflowError::Internal("worker channel disconnected".into())),
+            Err(_) => {
+                return Err(WorkflowError::Internal(
+                    "worker channel disconnected".into(),
+                ));
+            }
         }
     }
 
@@ -613,8 +636,8 @@ mod tests {
     use crate::define::{Backoff, RetryPolicy};
     use crate::error::StoreError;
     use crate::store::InMemoryStore;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[derive(Default)]
     struct TestLog {
@@ -642,25 +665,28 @@ mod tests {
         }
     }
 
-    fn rec_node(
+    fn rec_step(
         id: &str,
         log: &std::sync::Arc<Mutex<TestLog>>,
         work: impl Fn() + Send + Sync + 'static,
-    ) -> NodeSpec {
+    ) -> StepSpec {
         let log = log.clone();
         let id = id.to_string();
-        NodeSpec::new(id.clone(), std::sync::Arc::new(move |_ctx: RunCtx| {
-            {
-                let mut l = log.lock().unwrap();
-                l.note_start(&id);
-            }
-            work();
-            {
-                let mut l = log.lock().unwrap();
-                l.note_finish(&id);
-            }
-            Ok(None)
-        }))
+        StepSpec::new(
+            id.clone(),
+            std::sync::Arc::new(move |_ctx: StepContext| {
+                {
+                    let mut l = log.lock().unwrap();
+                    l.note_start(&id);
+                }
+                work();
+                {
+                    let mut l = log.lock().unwrap();
+                    l.note_finish(&id);
+                }
+                Ok(None)
+            }),
+        )
     }
 
     fn idx(v: &[String], s: &str) -> usize {
@@ -672,7 +698,7 @@ mod tests {
         store: &dyn RunStore,
         opts: RunOptions,
     ) -> Result<RunOutcome, WorkflowError> {
-        run(wf, store, &opts, None)
+        run_workflow(wf, store, &opts, None)
     }
 
     #[test]
@@ -680,11 +706,15 @@ mod tests {
         let store = InMemoryStore::new();
         let log = std::sync::Arc::new(Mutex::new(TestLog::default()));
         let mut wf = Workflow::new("w")
-            .node(rec_node("a", &log, || {}))
-            .node(rec_node("b", &log, || {}).needs(["a"]))
-            .node(rec_node("c", &log, || {}).needs(["b"]));
-        let out = simple_run(&mut wf, &store, RunOptions::new(serde_json::json!({})).max_concurrency(2))
-            .unwrap();
+            .step(rec_step("a", &log, || {}))
+            .step(rec_step("b", &log, || {}).needs(["a"]))
+            .step(rec_step("c", &log, || {}).needs(["b"]));
+        let out = simple_run(
+            &mut wf,
+            &store,
+            RunOptions::new(serde_json::json!({})).max_concurrency(2),
+        )
+        .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let l = log.lock().unwrap();
         assert_eq!(l.runs["a"], 1);
@@ -701,10 +731,15 @@ mod tests {
         let store = InMemoryStore::new();
         let log = std::sync::Arc::new(Mutex::new(TestLog::default()));
         let mut wf = Workflow::new("w")
-            .node(rec_node("a", &log, || {}))
-            .node(rec_node("b", &log, || {}).needs(["a"]))
-            .node(rec_node("c", &log, || {}).needs(["a", "b"]));
-        simple_run(&mut wf, &store, RunOptions::new(serde_json::json!({})).max_concurrency(2)).unwrap();
+            .step(rec_step("a", &log, || {}))
+            .step(rec_step("b", &log, || {}).needs(["a"]))
+            .step(rec_step("c", &log, || {}).needs(["a", "b"]));
+        simple_run(
+            &mut wf,
+            &store,
+            RunOptions::new(serde_json::json!({})).max_concurrency(2),
+        )
+        .unwrap();
         let l = log.lock().unwrap();
         assert_eq!(l.runs["a"], 1);
         assert_eq!(l.runs["b"], 1);
@@ -718,10 +753,19 @@ mod tests {
         let store = InMemoryStore::new();
         let log = std::sync::Arc::new(Mutex::new(TestLog::default()));
         let mut wf = Workflow::new("w")
-            .node(rec_node("a", &log, || {}))
-            .node(rec_node("b", &log, || std::thread::sleep(Duration::from_millis(60))).needs(["a"]))
-            .node(rec_node("c", &log, || std::thread::sleep(Duration::from_millis(60))).needs(["a"]));
-        simple_run(&mut wf, &store, RunOptions::new(serde_json::json!({})).max_concurrency(3)).unwrap();
+            .step(rec_step("a", &log, || {}))
+            .step(
+                rec_step("b", &log, || std::thread::sleep(Duration::from_millis(60))).needs(["a"]),
+            )
+            .step(
+                rec_step("c", &log, || std::thread::sleep(Duration::from_millis(60))).needs(["a"]),
+            );
+        simple_run(
+            &mut wf,
+            &store,
+            RunOptions::new(serde_json::json!({})).max_concurrency(3),
+        )
+        .unwrap();
         let l = log.lock().unwrap();
         // both siblings overlap: each starts before the other finishes
         assert!(idx(&l.timeline, ">b") < idx(&l.timeline, "<c"));
@@ -736,43 +780,52 @@ mod tests {
         let fail_ref = fail_once.clone();
         let b_id = "b".to_string();
         let b_log = log.clone();
-        let node_b = NodeSpec::new("b", std::sync::Arc::new(move |_ctx: RunCtx| {
-            {
-                let mut l = b_log.lock().unwrap();
-                l.note_start(&b_id);
-            }
-            let res = if fail_ref.swap(false, Ordering::SeqCst) {
-                Err(anyhow::anyhow!("boom"))
-            } else {
-                Ok(None)
-            };
-            {
-                let mut l = b_log.lock().unwrap();
-                l.note_finish(&b_id);
-            }
-            res
-        }))
+        let node_b = StepSpec::new(
+            "b",
+            std::sync::Arc::new(move |_ctx: StepContext| {
+                {
+                    let mut l = b_log.lock().unwrap();
+                    l.note_start(&b_id);
+                }
+                let res = if fail_ref.swap(false, Ordering::SeqCst) {
+                    Err(anyhow::anyhow!("boom"))
+                } else {
+                    Ok(None)
+                };
+                {
+                    let mut l = b_log.lock().unwrap();
+                    l.note_finish(&b_id);
+                }
+                res
+            }),
+        )
         .needs(["a"]);
         let mut wf = Workflow::new("w")
-            .node(rec_node("a", &log, || {}))
-            .node(node_b)
-            .node(rec_node("c", &log, || {}).needs(["b"]));
+            .step(rec_step("a", &log, || {}))
+            .step(node_b)
+            .step(rec_step("c", &log, || {}).needs(["b"]));
 
         // first run: b fails, c never starts
-        let out = simple_run(&mut wf, &store, RunOptions::new(serde_json::json!({})).max_concurrency(2))
-            .unwrap();
+        let out = simple_run(
+            &mut wf,
+            &store,
+            RunOptions::new(serde_json::json!({})).max_concurrency(2),
+        )
+        .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
         // resume with the same run_id: only b+c rerun
         let out = simple_run(
             &mut wf,
             &store,
-            RunOptions::new(serde_json::json!({})).run_id(out.run_id).max_concurrency(2),
+            RunOptions::new(serde_json::json!({}))
+                .run_id(out.run_id)
+                .max_concurrency(2),
         )
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let l = log.lock().unwrap();
         assert_eq!(l.runs["a"], 1, "successful prefix not re-run");
-        assert_eq!(l.runs["b"], 2, "failed node re-attempted");
+        assert_eq!(l.runs["b"], 2, "failed step re-attempted");
         assert_eq!(l.runs["c"], 1);
     }
 
@@ -781,8 +834,8 @@ mod tests {
         let store = InMemoryStore::new();
         let log = std::sync::Arc::new(Mutex::new(TestLog::default()));
         let mut wf = Workflow::new("w")
-            .node(rec_node("a", &log, || {}))
-            .node(rec_node("b", &log, || {}).needs(["a"]));
+            .step(rec_step("a", &log, || {}))
+            .step(rec_step("b", &log, || {}).needs(["a"]));
         let out = simple_run(&mut wf, &store, RunOptions::new(serde_json::json!({}))).unwrap();
         let second = simple_run(
             &mut wf,
@@ -801,14 +854,16 @@ mod tests {
         let store = InMemoryStore::new();
         let log = std::sync::Arc::new(Mutex::new(TestLog::default()));
         let mut wf = Workflow::new("w")
-            .node(rec_node("a", &log, || {}))
-            .node(rec_node("b", &log, || {}).needs(["a"]))
-            .node(rec_node("c", &log, || {}).needs(["b"]));
+            .step(rec_step("a", &log, || {}))
+            .step(rec_step("b", &log, || {}).needs(["a"]))
+            .step(rec_step("c", &log, || {}).needs(["b"]));
         let out = simple_run(&mut wf, &store, RunOptions::new(serde_json::json!({}))).unwrap();
         let second = simple_run(
             &mut wf,
             &store,
-            RunOptions::new(serde_json::json!({})).run_id(out.run_id).continue_from("b"),
+            RunOptions::new(serde_json::json!({}))
+                .run_id(out.run_id)
+                .continue_from("b"),
         )
         .unwrap();
         assert_eq!(second.status, RunStatus::Finished);
@@ -826,8 +881,14 @@ mod tests {
         let fresh_b = std::sync::Arc::new(AtomicBool::new(true));
         let (fresh_a_ref, fresh_b_ref) = (fresh_a.clone(), fresh_b.clone());
         let mut wf = Workflow::new("w")
-            .node(rec_node("a", &log, || {}).up_to_date(move |_, _| fresh_a_ref.load(Ordering::SeqCst)))
-            .node(rec_node("b", &log, || {}).up_to_date(move |_, _| fresh_b_ref.load(Ordering::SeqCst)));
+            .step(
+                rec_step("a", &log, || {})
+                    .up_to_date(move |_, _| fresh_a_ref.load(Ordering::SeqCst)),
+            )
+            .step(
+                rec_step("b", &log, || {})
+                    .up_to_date(move |_, _| fresh_b_ref.load(Ordering::SeqCst)),
+            );
         let out = simple_run(&mut wf, &store, RunOptions::new(serde_json::json!({}))).unwrap();
         // mark a as stale, rerun: a must rerun, b stays
         fresh_a.store(false, Ordering::SeqCst);
@@ -839,8 +900,8 @@ mod tests {
         .unwrap();
         assert_eq!(second.status, RunStatus::Finished);
         let l = log.lock().unwrap();
-        assert_eq!(l.runs["a"], 2, "stale node re-ran");
-        assert_eq!(l.runs["b"], 1, "up-to-date node skipped");
+        assert_eq!(l.runs["a"], 2, "stale step re-ran");
+        assert_eq!(l.runs["b"], 1, "up-to-date step skipped");
     }
 
     #[test]
@@ -848,20 +909,26 @@ mod tests {
         let store = InMemoryStore::new();
         let log = std::sync::Arc::new(Mutex::new(TestLog::default()));
         let mut wf = Workflow::new("w")
-            .node(rec_node("a", &log, || {}))
-            .node(rec_node("b", &log, || {}).needs(["a"]))
-            .node(rec_node("c", &log, || {}).needs(["b"]));
+            .step(rec_step("a", &log, || {}))
+            .step(rec_step("b", &log, || {}).needs(["a"]))
+            .step(rec_step("c", &log, || {}).needs(["b"]));
         let out = simple_run(
             &mut wf,
             &store,
-            RunOptions::new(serde_json::json!({})).target_step("b").max_concurrency(2),
+            RunOptions::new(serde_json::json!({}))
+                .target_step("b")
+                .max_concurrency(2),
         )
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let l = log.lock().unwrap();
         assert_eq!(l.runs["a"], 1);
         assert_eq!(l.runs["b"], 1);
-        assert_eq!(l.runs.get("c").copied().unwrap_or(0), 0, "downstream never ran");
+        assert_eq!(
+            l.runs.get("c").copied().unwrap_or(0),
+            0,
+            "downstream never ran"
+        );
     }
 
     #[test]
@@ -869,14 +936,25 @@ mod tests {
         let store = InMemoryStore::new();
         let log = std::sync::Arc::new(Mutex::new(TestLog::default()));
         let mut wf = Workflow::new("w")
-            .node(rec_node("x", &log, || std::thread::sleep(Duration::from_millis(60))).resource(|_| "gpu:0".into()))
-            .node(rec_node("y", &log, || std::thread::sleep(Duration::from_millis(60))).resource(|_| "gpu:0".into()));
-        simple_run(&mut wf, &store, RunOptions::new(serde_json::json!({})).max_concurrency(2)).unwrap();
+            .step(
+                rec_step("x", &log, || std::thread::sleep(Duration::from_millis(60)))
+                    .resource(|_| "gpu:0".into()),
+            )
+            .step(
+                rec_step("y", &log, || std::thread::sleep(Duration::from_millis(60)))
+                    .resource(|_| "gpu:0".into()),
+            );
+        simple_run(
+            &mut wf,
+            &store,
+            RunOptions::new(serde_json::json!({})).max_concurrency(2),
+        )
+        .unwrap();
         let l = log.lock().unwrap();
         // y (workflow-order second) must not start until x fully finished
         assert!(
             idx(&l.timeline, ">y") > idx(&l.timeline, "<x"),
-            "same-resource nodes must not overlap"
+            "same-resource steps must not overlap"
         );
         assert_eq!(l.runs["x"], 1);
         assert_eq!(l.runs["y"], 1);
@@ -889,9 +967,16 @@ mod tests {
         let mut wf = Workflow::new("w");
         for i in 0..5 {
             let id = format!("n{i}");
-            wf = wf.node(rec_node(&id, &log, || std::thread::sleep(Duration::from_millis(30))));
+            wf = wf.step(rec_step(&id, &log, || {
+                std::thread::sleep(Duration::from_millis(30))
+            }));
         }
-        simple_run(&mut wf, &store, RunOptions::new(serde_json::json!({})).max_concurrency(2)).unwrap();
+        simple_run(
+            &mut wf,
+            &store,
+            RunOptions::new(serde_json::json!({})).max_concurrency(2),
+        )
+        .unwrap();
         let l = log.lock().unwrap();
         let peak = l.peaks.iter().copied().max().unwrap_or(0);
         assert!(peak <= 2, "peak concurrency was {peak}");
@@ -903,21 +988,26 @@ mod tests {
         let store = InMemoryStore::new();
         let fail = std::sync::Arc::new(AtomicBool::new(true));
         let fail_ref = fail.clone();
-        let mut wf = Workflow::new("w").node(
-            NodeSpec::new("a", std::sync::Arc::new(move |_ctx: RunCtx| {
-                if fail_ref.swap(false, Ordering::SeqCst) {
-                    Err(anyhow::anyhow!("transient"))
-                } else {
-                    Ok(None)
-                }
-            }))
+        let mut wf = Workflow::new("w").step(
+            StepSpec::new(
+                "a",
+                std::sync::Arc::new(move |_ctx: StepContext| {
+                    if fail_ref.swap(false, Ordering::SeqCst) {
+                        Err(anyhow::anyhow!("transient"))
+                    } else {
+                        Ok(None)
+                    }
+                }),
+            )
             .retry(RetryPolicy::new(2, Backoff::Fixed { base_ms: 1 })),
         );
         let out = simple_run(&mut wf, &store, RunOptions::new(serde_json::json!({}))).unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let events = store.get_events(&out.run_id).unwrap();
         let fin = events.iter().find_map(|e| match e {
-            RunEvent::NodeFinished { node_id, attempts, .. } if node_id == "a" => Some(attempts),
+            RunEvent::StepFinished {
+                step_id, attempts, ..
+            } if step_id == "a" => Some(attempts),
             _ => None,
         });
         assert_eq!(fin.map(|a| a.len()), Some(2));
@@ -926,10 +1016,11 @@ mod tests {
     #[test]
     fn exhausted_retries_error() {
         let store = InMemoryStore::new();
-        let mut wf = Workflow::new("w").node(
-            NodeSpec::new("a", std::sync::Arc::new(move |_ctx: RunCtx| {
-                Err(anyhow::anyhow!("boom"))
-            }))
+        let mut wf = Workflow::new("w").step(
+            StepSpec::new(
+                "a",
+                std::sync::Arc::new(move |_ctx: StepContext| Err(anyhow::anyhow!("boom"))),
+            )
             .retry(RetryPolicy::new(2, Backoff::Fixed { base_ms: 1 })),
         );
         let out = simple_run(&mut wf, &store, RunOptions::new(serde_json::json!({}))).unwrap();
@@ -937,7 +1028,9 @@ mod tests {
         assert!(out.error.as_deref().unwrap().contains("boom"));
         let events = store.get_events(&out.run_id).unwrap();
         let failed = events.iter().find_map(|e| match e {
-            RunEvent::NodeFailed { node_id, attempts, .. } if node_id == "a" => Some(attempts),
+            RunEvent::StepFailed {
+                step_id, attempts, ..
+            } if step_id == "a" => Some(attempts),
             _ => None,
         });
         assert_eq!(failed.map(|a| a.len()), Some(2));
@@ -948,8 +1041,8 @@ mod tests {
         let store = InMemoryStore::new();
         let log = std::sync::Arc::new(Mutex::new(TestLog::default()));
         let mut wf = Workflow::new("w")
-            .node(rec_node("a", &log, || {}).enabled(|_| false))
-            .node(rec_node("b", &log, || {}).needs(["a"]));
+            .step(rec_step("a", &log, || {}).enabled(|_| false))
+            .step(rec_step("b", &log, || {}).needs(["a"]));
         let out = simple_run(&mut wf, &store, RunOptions::new(serde_json::json!({}))).unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let l = log.lock().unwrap();
@@ -963,14 +1056,14 @@ mod tests {
         let rx = store.subscribe("prog_run").unwrap();
         let events = std::sync::Arc::new(Mutex::new(Vec::new()));
         let sink = events.clone();
-        let mut wf = Workflow::new("w").node(NodeSpec::new(
+        let mut wf = Workflow::new("w").step(StepSpec::new(
             "a",
-            std::sync::Arc::new(move |ctx: RunCtx| {
+            std::sync::Arc::new(move |ctx: StepContext| {
                 ctx.progress(0.5);
                 Ok(None)
             }),
         ));
-        let out = run(
+        let out = run_workflow(
             &mut wf,
             &store,
             &RunOptions::new(serde_json::json!({})).run_id("prog_run"),
@@ -981,20 +1074,28 @@ mod tests {
 
         // publisher saw the emit-only progress + all checkpoints
         let evs = events.lock().unwrap();
-        assert!(evs.iter().any(|e| matches!(e, RunEvent::NodeProgress { value: 0.5, .. })));
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, RunEvent::StepProgress { value: 0.5, .. }))
+        );
         assert!(evs.iter().any(|e| matches!(e, RunEvent::RunStarted { .. })));
-        assert!(evs.iter().any(|e| matches!(e, RunEvent::NodeFinished { .. })));
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, RunEvent::StepFinished { .. }))
+        );
 
         // subscriber (store log) saw checkpoints but NOT emit-only events
         let mut saw_finish = false;
         let mut saw_shared = false;
-        let first = rx.recv_timeout(Duration::from_secs(2)).expect("got first event");
-        saw_finish |= matches!(first, RunEvent::NodeFinished { .. });
-        assert!(saw_finish, "first appended event should be NodeFinished");
+        let first = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("got first event");
+        saw_finish |= matches!(first, RunEvent::StepFinished { .. });
+        assert!(saw_finish, "first appended event should be StepFinished");
         while let Ok(e) = rx.try_recv() {
             match e {
-                RunEvent::NodeFinished { .. } => saw_finish = true,
-                RunEvent::NodeProgress { .. } | RunEvent::NodeStarted { .. } => saw_shared = true,
+                RunEvent::StepFinished { .. } => saw_finish = true,
+                RunEvent::StepProgress { .. } | RunEvent::StepStarted { .. } => saw_shared = true,
                 _ => {}
             }
         }
@@ -1005,10 +1106,10 @@ mod tests {
     #[test]
     fn cas_conflict_detected() {
         let store = InMemoryStore::new();
-        let ev = RunEvent::NodeFinished {
+        let ev = RunEvent::StepFinished {
             ts: 1,
             run_id: "r1".into(),
-            node_id: "a".into(),
+            step_id: "a".into(),
             result: None,
             attempts: vec![],
         };
@@ -1016,7 +1117,9 @@ mod tests {
         store.append_event("r1", 1, &ev).unwrap();
         let err = store.append_event("r1", 1, &ev).unwrap_err();
         match err {
-            StoreError::Conflict { expected, actual, .. } => {
+            StoreError::Conflict {
+                expected, actual, ..
+            } => {
                 assert_eq!(expected, 1);
                 assert_eq!(actual, 2);
             }
@@ -1028,7 +1131,10 @@ mod tests {
     fn finalize_produces_output() {
         let store = InMemoryStore::new();
         let mut wf = Workflow::new("w")
-            .node(NodeSpec::new("a", std::sync::Arc::new(|_ctx: RunCtx| Ok(Some(serde_json::json!({"x": 1}))))))
+            .step(StepSpec::new(
+                "a",
+                std::sync::Arc::new(|_ctx: StepContext| Ok(Some(serde_json::json!({"x": 1})))),
+            ))
             .finalize_with(|states| {
                 let r = states
                     .get("a")
@@ -1047,29 +1153,31 @@ mod tests {
     #[test]
     fn validation_errors() {
         let mut dup = Workflow::new("w")
-            .node(NodeSpec::new("a", std::sync::Arc::new(|_| Ok(None))))
-            .node(NodeSpec::new("a", std::sync::Arc::new(|_| Ok(None))));
+            .step(StepSpec::new("a", std::sync::Arc::new(|_| Ok(None))))
+            .step(StepSpec::new("a", std::sync::Arc::new(|_| Ok(None))));
         assert!(dup.validate().is_err());
 
-        let mut unknown = Workflow::new("w").node(
-            NodeSpec::new("a", std::sync::Arc::new(|_| Ok(None))).needs(["ghost"]),
-        );
+        let mut unknown = Workflow::new("w")
+            .step(StepSpec::new("a", std::sync::Arc::new(|_| Ok(None))).needs(["ghost"]));
         assert!(unknown.validate().is_err());
 
         let mut cycle = Workflow::new("w")
-            .node(NodeSpec::new("a", std::sync::Arc::new(|_| Ok(None))).needs(["b"]))
-            .node(NodeSpec::new("b", std::sync::Arc::new(|_| Ok(None))).needs(["a"]));
+            .step(StepSpec::new("a", std::sync::Arc::new(|_| Ok(None))).needs(["b"]))
+            .step(StepSpec::new("b", std::sync::Arc::new(|_| Ok(None))).needs(["a"]));
         assert!(cycle.validate().is_err());
     }
 
     #[test]
     fn timeout_marks_node_failed() {
         let store = InMemoryStore::new();
-        let mut wf = Workflow::new("w").node(
-            NodeSpec::new("a", std::sync::Arc::new(|_ctx: RunCtx| {
-                std::thread::sleep(Duration::from_millis(200));
-                Ok(None)
-            }))
+        let mut wf = Workflow::new("w").step(
+            StepSpec::new(
+                "a",
+                std::sync::Arc::new(|_ctx: StepContext| {
+                    std::thread::sleep(Duration::from_millis(200));
+                    Ok(None)
+                }),
+            )
             .timeout(Duration::from_millis(5)),
         );
         let out = simple_run(&mut wf, &store, RunOptions::new(serde_json::json!({}))).unwrap();
@@ -1080,7 +1188,7 @@ mod tests {
     #[test]
     fn continue_from_unknown_rejected() {
         let store = InMemoryStore::new();
-        let mut wf = Workflow::new("w").node(NodeSpec::new("a", std::sync::Arc::new(|_| Ok(None))));
+        let mut wf = Workflow::new("w").step(StepSpec::new("a", std::sync::Arc::new(|_| Ok(None))));
         let err = simple_run(
             &mut wf,
             &store,
