@@ -11,7 +11,7 @@ use crate::scheduler::RunCtx;
 /// only cares about success/failure.
 pub type NodeRunFn = Arc<dyn Fn(RunCtx) -> anyhow::Result<Option<serde_json::Value>> + Send + Sync>;
 /// Per-run filter; `None` means "always enabled". This is the LocalDub
-/// `get_stages`-style selection carrier.
+/// `get_steps`-style selection carrier.
 pub type NodeEnabledFn = Arc<dyn Fn(&RunCtx) -> bool + Send + Sync>;
 /// Maps a run to the [`crate::resource::ResourceKey`] it holds while running.
 pub type NodeResourceFn = Arc<dyn Fn(&RunCtx) -> String + Send + Sync>;

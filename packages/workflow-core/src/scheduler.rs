@@ -49,13 +49,13 @@ impl RunCtx {
     }
 }
 
-/// Per-invocation options. `run_id`, `continue_from`, `target_stage` and
+/// Per-invocation options. `run_id`, `continue_from`, `target_step` and
 /// `max_concurrency` are invocation options, NOT persisted — persistent state
 /// lives in the event log.
 pub struct RunOptions {
     pub run_id: Option<String>,
     pub input: serde_json::Value,
-    pub target_stage: Option<String>,
+    pub target_step: Option<String>,
     pub continue_from: Option<String>,
     pub max_concurrency: Option<usize>,
 }
@@ -65,7 +65,7 @@ impl RunOptions {
         Self {
             run_id: None,
             input,
-            target_stage: None,
+            target_step: None,
             continue_from: None,
             max_concurrency: None,
         }
@@ -76,8 +76,8 @@ impl RunOptions {
         self
     }
 
-    pub fn target_stage(mut self, v: impl Into<String>) -> Self {
-        self.target_stage = Some(v.into());
+    pub fn target_step(mut self, v: impl Into<String>) -> Self {
+        self.target_step = Some(v.into());
         self
     }
 
@@ -227,7 +227,7 @@ fn handle_worker(
     run_id: &str,
     log_len: &mut usize,
     publisher: Option<&dyn Fn(&RunEvent)>,
-    target_stage: Option<&str>,
+    target_step: Option<&str>,
     target_reached: &mut bool,
     run_error: &mut Option<String>,
 ) -> Result<(), WorkflowError> {
@@ -255,7 +255,7 @@ fn handle_worker(
             store.append_event(run_id, *log_len, &ev)?;
             *log_len += 1;
             publish(&ev);
-            if target_stage == Some(node_id.as_str()) {
+            if target_step == Some(node_id.as_str()) {
                 *target_reached = true;
             }
         }
@@ -300,7 +300,7 @@ fn handle_worker(
 ///   only that suffix, leaving the (successful) prefix untouched.
 /// - Otherwise: run every active, non-Success node (failed nodes get a fresh
 ///   attempt) plus any Success node whose `up_to_date` hook reports stale.
-/// - `target_stage`: stop scheduling once that node succeeds (downstream never
+/// - `target_step`: stop scheduling once that node succeeds (downstream never
 ///   runs); the run still finishes as `Finished`.
 ///
 /// On the first terminal node failure the run stops scheduling and reports
@@ -380,10 +380,10 @@ pub fn run(
         needs_of.insert(n.id.clone(), deps);
     }
 
-    if let Some(t) = &opts.target_stage {
+    if let Some(t) = &opts.target_step {
         if !active_ids.contains(t) {
             return Err(WorkflowError::Validation(format!(
-                "target_stage `{t}` is not an active node"
+                "target_step `{t}` is not an active node"
             )));
         }
     }
@@ -434,7 +434,7 @@ pub fn run(
                 &run_id,
                 &mut log_len,
                 publisher,
-                opts.target_stage.as_deref(),
+                opts.target_step.as_deref(),
                 &mut target_reached,
                 &mut run_error,
             )?;
@@ -531,7 +531,7 @@ pub fn run(
                     &run_id,
                     &mut log_len,
                     publisher,
-                    opts.target_stage.as_deref(),
+                    opts.target_step.as_deref(),
                     &mut target_reached,
                     &mut run_error,
                 )?;
@@ -844,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn target_stage_stops_downstream() {
+    fn target_step_stops_downstream() {
         let store = InMemoryStore::new();
         let log = std::sync::Arc::new(Mutex::new(TestLog::default()));
         let mut wf = Workflow::new("w")
@@ -854,7 +854,7 @@ mod tests {
         let out = simple_run(
             &mut wf,
             &store,
-            RunOptions::new(serde_json::json!({})).target_stage("b").max_concurrency(2),
+            RunOptions::new(serde_json::json!({})).target_step("b").max_concurrency(2),
         )
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
