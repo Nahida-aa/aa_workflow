@@ -2,14 +2,14 @@ use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::StoreError;
 use crate::event::{RunEvent, RunStatus};
 
 /// Minimal, durable metadata for a run. The heavy state lives in the event
 /// log; this is just the envelope the launcher needs to locate runs.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunState {
     pub run_id: String,
     pub workflow_id: String,

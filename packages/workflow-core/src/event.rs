@@ -1,9 +1,9 @@
+use serde::{Deserialize, Serialize};
+
 use std::collections::HashMap;
 
-use serde::Serialize;
-
 /// Overall lifecycle status of a run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RunStatus {
     Running,
@@ -26,7 +26,7 @@ pub enum NodeStatus {
 }
 
 /// A single execution attempt of one node (used for retry bookkeeping).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeAttempt {
     /// 1-based attempt number.
     pub attempt: usize,
@@ -38,7 +38,7 @@ pub struct NodeAttempt {
 
 /// Append-only persisted events. Each event is immutable; the log is the
 /// engine's source of truth and doubling as the resume checkpoint.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RunEvent {
     /// Observability only (not persisted): marks the start of a run.
