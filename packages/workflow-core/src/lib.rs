@@ -3,6 +3,14 @@
 //! closures are plain sync functions writing artifacts to disk, and the
 //! schedule is simply the explicit `needs` graph.
 //!
+//! ## TanStack Workflow 对照
+//!
+//! 我们采纳其命名与 store/event 契约（含 `STEP_*` 事件、`tag="type"`、CAS append），
+//! 但保留显式 DAG 而非 handler 代码重放，并提供 TanStack 官方没有的
+//! `continue_from` / `target_step` / `up_to_date` / resource 门。完整论证（含
+//! "用户层面能否 hack 出 continue_from" 和领域取舍）见
+//! `docs/tanstack-alignment.md`。
+//!
 //! ## Persistence model
 //!
 //! The engine's source of truth is an **append-only event log** behind the

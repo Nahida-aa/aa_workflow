@@ -30,7 +30,7 @@ pub struct RunState {
 ///    fan-out.
 ///
 /// The engine never mutates events; state is always derived by replaying the
-/// log (see [`crate::event::fold_node_states`]).
+/// log (see [`crate::event::fold_step_states`]).
 pub trait RunStore: Send + Sync {
     fn get_run_state(&self, run_id: &str) -> Result<Option<RunState>, StoreError>;
     fn set_run_state(&self, run_id: &str, state: &RunState) -> Result<(), StoreError>;
