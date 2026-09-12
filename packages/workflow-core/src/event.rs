@@ -73,14 +73,19 @@ pub enum RunEvent {
         attempts: Vec<StepAttempt>,
     },
     /// Checkpoint (persisted): the run parked at a durable wait point
-    /// (`ctx.approve` / `ctx.sleep`). `step_id` is the deterministic pause
-    /// key (== the signal id [`signal_run`](crate::engine::signal_run) targets);
-    /// `due_at` is `Some` (wall-clock ms) for sleeps so a timer host could
-    /// auto-deliver, `None` for approvals that need an external decision.
+    /// (`ctx.approve` / `ctx.sleep` / `ctx.sleep_until` / `ctx.wait_for_event`).
+    /// `step_id` is the deterministic pause key (== the signal id
+    /// [`signal_run`](crate::engine::signal_run) / [`signal_event`](crate::engine::signal_event)
+    /// targets); `signal_name` is the channel the run is parked on
+    /// (`"__timer"` for sleeps, `"__approval"` for approvals, a user event
+    /// name for named waits). `due_at` is `Some` (wall-clock ms) for sleep-like
+    /// waits so a timer host could auto-deliver, `None` for waits that need an
+    /// external decision.
     StepPaused {
         ts: i64,
         run_id: String,
         step_id: String,
+        signal_name: String,
         due_at: Option<i64>,
         reason: String,
     },
@@ -96,12 +101,19 @@ pub enum RunEvent {
     },
     /// Observability only (not persisted): 0.0..=1.0 progress signal.
     StepProgress { ts: i64, run_id: String, step_id: String, value: f64 },
+    /// Observability only (not persisted): `ctx.emit` fan-out. Reaches only
+    /// the publisher, never the log — so it never becomes part of replay
+    /// (mirrors TanStack's `CUSTOM` event).
+    Custom { ts: i64, run_id: String, name: String, value: serde_json::Value },
 }
 
 impl RunEvent {
     pub fn step_id(&self) -> Option<&str> {
         match self {
-            RunEvent::RunStarted { .. } | RunEvent::RunFinished { .. } | RunEvent::RunErrored { .. } => None,
+            RunEvent::RunStarted { .. }
+            | RunEvent::RunFinished { .. }
+            | RunEvent::RunErrored { .. }
+            | RunEvent::Custom { .. } => None,
             RunEvent::StepStarted { step_id, .. }
             | RunEvent::StepFinished { step_id, .. }
             | RunEvent::StepFailed { step_id, .. }

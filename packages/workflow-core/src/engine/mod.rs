@@ -81,7 +81,7 @@ impl DrvInner {
         }
     }
 
-    fn publish(&self, ev: &RunEvent) {
+    pub(crate) fn publish(&self, ev: &RunEvent) {
         if let Some(p) = &self.publisher {
             p(ev);
         }
@@ -293,18 +293,23 @@ where
 const RESUME_POLL_MS: Duration = Duration::from_millis(25);
 
 /// Durable wait implemented by [`WorkflowCtx::approve`](crate::define::WorkflowCtx::approve)
-/// / [`WorkflowCtx::sleep`](crate::define::WorkflowCtx::sleep). `step_id` is the
-/// pause key == signal id; it must not collide with any step id.
+/// / [`WorkflowCtx::sleep`](crate::define::WorkflowCtx::sleep) /
+/// [`WorkflowCtx::wait_for_event`](crate::define::WorkflowCtx::wait_for_event).
+/// `step_id` is the pause key == signal id; it must not collide with any step
+/// id. `signal_name` is the channel the run parks on (`"__approval"` for
+/// approvals, `"__timer"` for sleeps, a user event name for named waits).
 ///
 /// Replay fast path: a `StepResume` already in the log resolves immediately,
 /// so a crashed-paused run re-waits exactly once and never re-appends its
 /// `StepPaused`. Otherwise the pause checkpoint is persisted (idempotently),
 /// the run state flips to `Paused`, and the handler parks:
 /// - approvals wait until an external [`signal_run`] appends `StepResume`;
+/// - named waits wait until an external [`signal_event`] appends `StepResume`;
 /// - sleeps also arm a `tokio` timer that auto-delivers the resume.
 pub async fn exec_pause(
     inner: &Arc<DrvInner>,
     step_id: &str,
+    signal_name: &str,
     reason: &str,
     dur: Option<Duration>,
 ) -> anyhow::Result<serde_json::Value> {
@@ -326,6 +331,7 @@ pub async fn exec_pause(
             ts: now_ms(),
             run_id: inner.run_id.clone(),
             step_id: step_id.to_string(),
+            signal_name: signal_name.to_string(),
             due_at,
             reason: reason.to_string(),
         };
@@ -336,18 +342,19 @@ pub async fn exec_pause(
     project_run_wait(
         &inner.store,
         &inner.run_id,
-        match dur {
-            Some(_) => WaitKind::Signal {
-                step_id: step_id.to_string(),
-                signal_name: step_id.to_string(),
-                deadline: due_at,
-            },
-            None => WaitKind::Approval {
+        if signal_name == "__approval" {
+            WaitKind::Approval {
                 step_id: step_id.to_string(),
                 approval_id: step_id.to_string(),
                 title: reason.to_string(),
                 description: None,
-            },
+            }
+        } else {
+            WaitKind::Signal {
+                step_id: step_id.to_string(),
+                signal_name: signal_name.to_string(),
+                deadline: due_at,
+            }
         },
     );
 
@@ -449,7 +456,7 @@ fn clear_run_wait(store: &Arc<dyn RunStore>, run_id: &str) {
     }
 }
 
-/// Appends a `StepResume` checkpoint for a paused run — the external side of
+/// Appends a `StepResume` for a paused run — the external side of
 /// [`WorkflowCtx::approve`](crate::define::WorkflowCtx::approve). Safe to call
 /// any time: a live instance picks it up via polling, and a later replay
 /// resolves from the log without re-waiting. The first append per
@@ -474,6 +481,33 @@ pub fn signal_run(
             Err(StoreError::Conflict { .. }) => continue,
             Err(e) => return Err(e.into()),
         }
+    }
+}
+
+/// Appends a `StepResume` for the run currently parked waiting for the event
+/// `event_name` — the external side of
+/// [`WorkflowCtx::wait_for_event`](crate::define::WorkflowCtx::wait_for_event).
+/// Locates the paused step via its `signal_name` (the channel, not the pause
+/// key), so a host needs only the event name. Fails with
+/// [`WorkflowError::SignalLost`] when nothing is parked on that name.
+pub fn signal_event(
+    store: &dyn RunStore,
+    run_id: &str,
+    event_name: &str,
+    payload: serde_json::Value,
+) -> Result<(), WorkflowError> {
+    let events = store.get_events(run_id)?;
+    let step_id = events.iter().rev().find_map(|ev| match ev {
+        RunEvent::StepPaused { step_id, signal_name, .. } if signal_name == event_name => {
+            Some(step_id.clone())
+        }
+        _ => None,
+    });
+    match step_id {
+        Some(step_id) => signal_run(store, run_id, &step_id, payload),
+        None => Err(WorkflowError::SignalLost(format!(
+            "no step in run `{run_id}` is paused waiting on event `{event_name}`"
+        ))),
     }
 }
 
@@ -1373,7 +1407,8 @@ mod tests {
         }
         let paused = paused.expect("sleep 中应投影 status=Paused + waiting_for");
         let wf2_state = paused.waiting_for.as_ref().unwrap();
-        assert_eq!(wf2_state.signal_name, "cooldown");
+        assert_eq!(wf2_state.step_id, "cooldown", "sleep 的 step_id 是 pause key");
+        assert_eq!(wf2_state.signal_name, "__timer", "sleep 的通道是内部 __timer");
         assert!(wf2_state.deadline.is_some(), "sleep 的 due_at 应投影为 deadline");
 
         let out = task.await.unwrap().unwrap();
@@ -1447,6 +1482,196 @@ mod tests {
                 RunEvent::StepResume { step_id, .. } if step_id == "gate"
             )),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_event_fulfilled_by_signal_event() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let received = Arc::new(Mutex::new(None::<serde_json::Value>));
+        let rx = received.clone();
+        let wf = Workflow::new("named-event").handler(move |ctx: WorkflowCtx| {
+            let rx = rx.clone();
+            async move {
+                let v = ctx.wait_for_event("review", "review-approved").await?;
+                *rx.lock().unwrap() = Some(v.clone());
+                Ok(v)
+            }
+        });
+        let store2 = store.clone();
+        let wf2 = wf.clone();
+        let task = tokio::spawn(async move {
+            run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id("ne1"), None).await
+        });
+        wait_until(
+            &store,
+            "ne1",
+            |e| matches!(e, RunEvent::StepPaused { signal_name, .. } if signal_name == "review-approved"),
+        )
+        .await;
+        let st = store.get_run_state("ne1").unwrap().unwrap();
+        assert_eq!(st.status, RunStatus::Paused);
+        let w = st.waiting_for.as_ref().expect("named wait 投影 waiting_for");
+        assert_eq!(w.signal_name, "review-approved");
+        assert_eq!(w.step_id, "review");
+        assert!(st.pending_approval.is_none(), "named event 不是 approval");
+
+        signal_event(store.as_ref(), "ne1", "review-approved", serde_json::json!({ "ok": true })).unwrap();
+        let out = task.await.unwrap().unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        assert_eq!(out.output, Some(serde_json::json!({ "ok": true })));
+        assert_eq!(received.lock().unwrap().as_ref(), Some(&serde_json::json!({ "ok": true })));
+    }
+
+    #[tokio::test]
+    async fn wait_for_event_resolves_from_log_on_replay() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("named-event").handler(|ctx: WorkflowCtx| async move {
+            let v = ctx.wait_for_event("gate", "go").await?;
+            let out = v.clone();
+            ctx.step("consume", move |_sc| async move { Ok(v.clone()) }).await?;
+            Ok(out)
+        });
+        let store2 = store.clone();
+        let wf2 = wf.clone();
+        let t = tokio::spawn(async move {
+            run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id("ne2"), None).await
+        });
+        wait_until(
+            &store,
+            "ne2",
+            |e| matches!(e, RunEvent::StepPaused { signal_name, .. } if signal_name == "go"),
+        )
+        .await;
+        signal_event(store.as_ref(), "ne2", "go", serde_json::json!(42)).unwrap();
+        let out = t.await.unwrap().unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        assert_eq!(out.output, Some(serde_json::json!(42)));
+
+        // 同名 run 重跑：StepResume 已在日志，replay 从日志取，不重新等待或加 checkpoint
+        let store3 = store.clone();
+        let wf3 = wf.clone();
+        let out2 = run_workflow(
+            &wf3,
+            store3,
+            &RunOptions::new(serde_json::json!({})).run_id("ne2"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out2.status, RunStatus::Finished);
+        assert_eq!(out2.output, Some(serde_json::json!(42)));
+        assert_eq!(
+            count_events(&store, "ne2", |e| matches!(
+                e,
+                RunEvent::StepPaused { signal_name, .. } if signal_name == "go"
+            )),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn sleep_until_past_resolves_immediately() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("sleeper").handler(|ctx: WorkflowCtx| async move {
+            let ts = crate::engine::now_ms() - 5000;
+            ctx.sleep_until("cooldown", ts).await?;
+            ctx.step("after", move |_sc: StepCtx| async move {
+                Ok(serde_json::json!({ "done": true }))
+            })
+            .await?;
+            Ok(serde_json::Value::Null)
+        });
+        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
+            .await
+            .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        let evs = store.get_events(&out.run_id).unwrap();
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            RunEvent::StepFinished { step_id, .. } if step_id == "after"
+        )));
+        // 过去时间点 → 引擎自我投递 "__timer" resume，立即放行
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            RunEvent::StepResume { step_id, .. } if step_id == "cooldown"
+        )));
+    }
+
+    #[tokio::test]
+    async fn sleep_until_schedules_timer() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("sleeper").handler(|ctx: WorkflowCtx| async move {
+            let ts = crate::engine::now_ms() + 300;
+            ctx.sleep_until("cooldown", ts).await?;
+            Ok(serde_json::Value::Null)
+        });
+        let store2 = store.clone();
+        let wf2 = wf.clone();
+        let task = tokio::spawn(async move {
+            run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id("stu1"), None).await
+        });
+        let mut saw_deadline = false;
+        for _ in 0..2000 {
+            if let Some(st) = store.get_run_state("stu1").unwrap()
+                && let Some(w) = &st.waiting_for
+                && w.step_id == "cooldown"
+                && w.signal_name == "__timer"
+                && w.deadline.is_some()
+            {
+                saw_deadline = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(saw_deadline, "sleep_until 应投影 waiting_for + deadline");
+        let out = task.await.unwrap().unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+    }
+
+    #[tokio::test]
+    async fn emit_reaches_publisher_but_not_log() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let wf = Workflow::new("emitter").handler(|ctx: WorkflowCtx| async move {
+            ctx.emit("ping", serde_json::json!({ "x": 1 }));
+            ctx.step("a", move |_sc: StepCtx| async move {
+                Ok(serde_json::Value::Null)
+            })
+            .await?;
+            Ok(serde_json::Value::Null)
+        });
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("em1"),
+            Some(Arc::new(move |e: &RunEvent| sink.lock().unwrap().push(e.clone()))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        assert!(seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, RunEvent::Custom { name, .. } if name == "ping")));
+        assert!(store
+            .get_events("em1")
+            .unwrap()
+            .iter()
+            .all(|e| !matches!(e, RunEvent::Custom { .. })));
+    }
+
+    #[tokio::test]
+    async fn signal_event_without_awaiter_errors() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let err =
+            signal_event(store.as_ref(), "nowhere", "ghost", serde_json::Value::Null).unwrap_err();
+        assert!(matches!(err, crate::error::WorkflowError::SignalLost(_)));
+        assert!(
+            store.get_events("nowhere").unwrap().is_empty(),
+            "失败时不 append StepResume"
         );
     }
 }

@@ -39,6 +39,9 @@ pub enum WorkflowError {
     Store(StoreError),
     /// No `RunState` exists for the requested run id.
     RunNotFound(String),
+    /// A delivered signal could not be matched to a parked wait point (from
+    /// [`crate::engine::signal_event`]: nothing was paused on that event name).
+    SignalLost(String),
     /// An internal invariant was violated (deadlock guard, channel closed).
     Internal(String),
 }
@@ -53,6 +56,7 @@ impl fmt::Display for WorkflowError {
             WorkflowError::Finalize(msg) => write!(f, "finalize failed: {msg}"),
             WorkflowError::Store(e) => write!(f, "store error: {e}"),
             WorkflowError::RunNotFound(id) => write!(f, "run `{id}` not found"),
+            WorkflowError::SignalLost(msg) => write!(f, "signal lost: {msg}"),
             WorkflowError::Internal(msg) => write!(f, "engine internal error: {msg}"),
         }
     }

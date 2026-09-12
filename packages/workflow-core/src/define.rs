@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::engine::DrvInner;
-use crate::event::StepState;
+use crate::event::{RunEvent, StepState};
 
 /// Boxed async step-returning future. Steps are spawned inside the engine's
 /// driver; the async world is the default (mirrors `Promise.all` in JS).
@@ -114,7 +114,7 @@ impl WorkflowCtx {
         key: impl Into<String>,
         reason: impl AsRef<str>,
     ) -> anyhow::Result<serde_json::Value> {
-        crate::engine::exec_pause(&self.inner, &key.into(), reason.as_ref(), None).await
+        crate::engine::exec_pause(&self.inner, &key.into(), "__approval", reason.as_ref(), None).await
     }
 
     /// Durable sleep: pauses the run until `dur` elapses. `key` is the
@@ -126,7 +126,46 @@ impl WorkflowCtx {
         key: impl Into<String>,
         dur: std::time::Duration,
     ) -> anyhow::Result<serde_json::Value> {
-        crate::engine::exec_pause(&self.inner, &key.into(), "sleep", Some(dur)).await
+        crate::engine::exec_pause(&self.inner, &key.into(), "__timer", "sleep", Some(dur)).await
+    }
+
+    /// Durable absolute-time wait: pauses until wall-clock `ts_ms` (equivalent
+    /// to TanStack's `sleepUntil`). A timestamp in the past resolves
+    /// immediately. `key` is the deterministic pause identity.
+    pub async fn sleep_until(
+        &self,
+        key: impl Into<String>,
+        ts_ms: i64,
+    ) -> anyhow::Result<serde_json::Value> {
+        let rem =
+            Duration::from_millis(i64::saturating_sub(ts_ms, crate::engine::now_ms()).max(0) as u64);
+        self.sleep(key, rem).await
+    }
+
+    /// Durable named wait: pauses the run until [`signal_event`](crate::engine::signal_event)
+    /// delivers a payload for `event_name`. `key` is the deterministic pause
+    /// identity (must not collide with step ids); `event_name` is the channel
+    /// a host signals on (`run.json` `waiting_for.signal_name`). On replay a
+    /// previously delivered resume short-circuits from the log.
+    pub async fn wait_for_event(
+        &self,
+        key: impl Into<String>,
+        event_name: impl AsRef<str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let name = event_name.as_ref();
+        crate::engine::exec_pause(&self.inner, &key.into(), name, "event", None).await
+    }
+
+    /// Emit an observability event to the publisher. Never appended to the
+    /// log, so it is outside replay — `fold_step_states` and resume ignore it
+    /// (mirrors TanStack's `emit` / `CUSTOM`).
+    pub fn emit(&self, name: impl AsRef<str>, value: serde_json::Value) {
+        self.inner.publish(&RunEvent::Custom {
+            ts: crate::engine::now_ms(),
+            run_id: self.inner.run_id.clone(),
+            name: name.as_ref().to_string(),
+            value,
+        });
     }
 
     /// [`step`](Self::step) with per-step options (retry policy, timeout,
@@ -398,6 +437,29 @@ impl<In> TypedCtx<In> {
         dur: std::time::Duration,
     ) -> anyhow::Result<serde_json::Value> {
         self.inner.sleep(key, dur).await
+    }
+
+    /// Durable absolute-time wait (see [`WorkflowCtx::sleep_until`]).
+    pub async fn sleep_until(
+        &self,
+        key: impl Into<String>,
+        ts_ms: i64,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.sleep_until(key, ts_ms).await
+    }
+
+    /// Durable named wait (see [`WorkflowCtx::wait_for_event`]).
+    pub async fn wait_for_event(
+        &self,
+        key: impl Into<String>,
+        event_name: impl AsRef<str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.wait_for_event(key, event_name).await
+    }
+
+    /// Emit an observability event (see [`WorkflowCtx::emit`]).
+    pub fn emit(&self, name: impl AsRef<str>, value: serde_json::Value) {
+        self.inner.emit(name, value)
     }
 }
 

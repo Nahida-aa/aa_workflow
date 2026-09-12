@@ -3,8 +3,8 @@
 use workflow_core::Workflow;
 
 use crate::workflows::{
-    approval_order, approval_review, compliance, email_digest, fulfillment, fulfillment_saga,
-    invoice, refund, state_demo,
+    approval_order, approval_review, compliance, email_digest, event_gate, fulfillment,
+    fulfillment_saga, invoice, refund, state_demo,
 };
 
 /// 全部注册示例 workflow（类型擦除：进注册表的都是引擎 `Workflow`）。
@@ -19,6 +19,7 @@ pub fn all() -> Vec<Workflow> {
         compliance().into_workflow(),
         refund().into_workflow(),
         state_demo().into_workflow(),
+        event_gate().into_workflow(),
     ]
 }
 
@@ -47,6 +48,7 @@ mod tests {
                 "compliance",
                 "refund",
                 "state-demo",
+                "event-gate",
             ]
         );
         for id in [

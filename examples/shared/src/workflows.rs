@@ -646,13 +646,58 @@ pub fn state_demo() -> TypedWorkflow<StateDemoInput, serde_json::Value> {
         })
 }
 
+/// 事件闸门 demo（对齐 TanStack `waitForEvent` / `sleepUntil` / `emit`）：
+/// 1. `ctx.emit` 广播可观测事件（不进日志，publisher 可见）；
+/// 2. `ctx.wait_for_event` 按事件名挂起，外部 `signal_event` 按名投递；
+/// 3. `ctx.sleep_until` 等绝对时间点（predictedAt 靠后成立，否则立即放行）。
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventGateInput {
+    pub market: String,
+    pub predicted_at: i64,
+}
+
+pub fn event_gate() -> TypedWorkflow<EventGateInput, serde_json::Value> {
+    Workflow::new("event-gate")
+        .input_schema::<EventGateInput>()
+        .handler(|ctx: TypedCtx<EventGateInput>| async move {
+            let market = ctx.input().market.clone();
+            let predicted_at = ctx.input().predicted_at;
+
+            ctx.emit(
+                "gate-opened",
+                serde_json::json!({ "market": market, "predictedAt": predicted_at }),
+            );
+
+            // 按名挂起：host 只认识 "price-settled" 事件，不需要知道 pause key。
+            let settlement = ctx.wait_for_event("price-wait", "price-settled").await?;
+
+            // 绝对时间闸门：预测时间未到则睡到那一刻。
+            ctx.sleep_until("settle-wait", predicted_at).await?;
+
+            let market_finalize = market.clone();
+            ctx.step("finalize", move |_sc: StepCtx| {
+                let market = market_finalize;
+                async move { Ok(serde_json::json!({ "market": market })) }
+            })
+            .await?;
+
+            Ok(serde_json::json!({
+                "market": market,
+                "settlement": settlement,
+                "finalized": true,
+            }))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, LazyLock};
     use std::time::Duration;
     use workflow_core::{
-        run_workflow, signal_run, InMemoryStore, RunEvent, RunOptions, RunStatus, RunStore,
+        run_workflow, signal_event, signal_run, InMemoryStore, RunEvent, RunOptions, RunStatus,
+        RunStore,
     };
 
     /// 序列化共享全局网关状态的测试（tokio 各 test 默认并行跑）。
@@ -1467,5 +1512,104 @@ mod tests {
             "bump-inside 的 +1 在重启重放时丢失（闭包被短路），只保留 initialize 的 base"
         );
         assert_eq!(o["settleEvents"], serde_json::json!(["outside"]), "闭包之外的 mutation 重放");
+    }
+
+    /// Typed ctx 的完整基元组合：emit（publisher 可见、日志无）→ wait_for_event
+    /// （按名挂起 + signal_event 按名投递）→ sleep_until（绝对时间点）。
+    #[tokio::test]
+    async fn event_gate_emit_wait_then_sleep_until() {
+        let store = Arc::new(InMemoryStore::new());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let wf = event_gate().into_workflow();
+        let wf2 = wf.clone();
+        let store2 = store.clone();
+        let task = tokio::spawn(async move {
+            run_workflow(
+                &wf2,
+                store2,
+                &RunOptions::new(serde_json::json!({
+                    "market": "btc",
+                    "predictedAt": 0, // 过去 → sleep_until 立即放行
+                }))
+                .run_id("event:gate"),
+                Some(Arc::new(move |e: &RunEvent| sink.lock().unwrap().push(e.clone()))),
+            )
+            .await
+        });
+        wait_paused(&store, "event:gate", "price-wait").await;
+
+        // 挂起投影：waiting_for.signal_name = 事件通道（≠ pause key）。
+        let st = store.get_run_state("event:gate").unwrap().unwrap();
+        assert_eq!(st.status, RunStatus::Paused);
+        let w = st.waiting_for.as_ref().unwrap();
+        assert_eq!(w.step_id, "price-wait");
+        assert_eq!(w.signal_name, "price-settled");
+        assert!(st.pending_approval.is_none());
+
+        signal_event(store.as_ref(), "event:gate", "price-settled", serde_json::json!({ "px": 62000 })).unwrap();
+        let out = task.await.unwrap().unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        assert_eq!(out.output.clone().unwrap()["settlement"], serde_json::json!({ "px": 62000 }));
+        assert_eq!(out.output.clone().unwrap()["finalized"], serde_json::json!(true));
+
+        // emit 进 publisher 但不进日志。
+        assert!(seen.lock().unwrap().iter().any(|e| matches!(
+            e,
+            RunEvent::Custom { name, .. } if name == "gate-opened"
+        )));
+        assert!(store.get_events("event:gate").unwrap().iter().all(|e| !matches!(e, RunEvent::Custom { .. })));
+    }
+
+    /// wait_for_event 后崩溃 → 同 run_id 重跑：StepResume 已在日志，按名信号
+    /// 重放即可完成，不重新挂起。
+    #[tokio::test]
+    async fn event_gate_named_signal_replays_after_crash() {
+        let store = Arc::new(InMemoryStore::new());
+        let wf = event_gate().into_workflow();
+        let store2 = store.clone();
+        let wf2 = wf.clone();
+        let task_a = tokio::spawn(async move {
+            run_workflow(
+                &wf2,
+                store2,
+                &RunOptions::new(serde_json::json!({
+                    "market": "eth",
+                    "predictedAt": 0, // 过去 → sleep_until 重放时立即放行
+                }))
+                .run_id("event:crash"),
+                None,
+            )
+            .await
+        });
+        wait_paused(&store, "event:crash", "price-wait").await;
+        task_a.abort();
+        let _ = task_a.await;
+
+        signal_event(store.as_ref(), "event:crash", "price-settled", serde_json::json!({ "px": 3000 })).unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({
+                "market": "eth",
+                "predictedAt": 0,
+            }))
+            .run_id("event:crash"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        assert_eq!(out.output.clone().unwrap()["settlement"], serde_json::json!({ "px": 3000 }));
+        assert_eq!(
+            store
+                .get_events("event:crash")
+                .unwrap()
+                .iter()
+                .filter(|e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "price-wait"))
+                .count(),
+            1,
+            "重跑不重 append pause checkpoint"
+        );
     }
 }
