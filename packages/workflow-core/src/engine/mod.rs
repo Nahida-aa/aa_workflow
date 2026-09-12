@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::define::{StepCtx, StepOptions};
 use crate::error::{RunError, StoreError, WorkflowError};
-use crate::event::{RunEvent, RunStatus, StepAttempt, StepState, StepStatus};
+use crate::event::{RunStatus, StepAttempt, StepState, StepStatus, WorkflowEvent};
 use crate::resource::Gate;
 use crate::run_store::RunStore;
 
@@ -127,7 +127,7 @@ pub struct EngineRuntime {
     pub yield_resume_at: Option<i64>,
     /// Positional counter for `__yield-{n}` pause keys (per-invocation).
     pub(crate) yield_counter: AtomicUsize,
-    pub publisher: Option<Arc<dyn Fn(&RunEvent) + Send + Sync>>,
+    pub publisher: Option<Arc<dyn Fn(&WorkflowEvent) + Send + Sync>>,
     /// Workflow-level fallback retry (TanStack `defaultStepRetry`); steps that
     /// declare their own [`StepOptions::retry`](crate::define::StepOptions::retry)
     /// win.
@@ -137,7 +137,7 @@ pub struct EngineRuntime {
 impl EngineRuntime {
     /// Appends a checkpoint with optimistic CAS; on a lost race re-bases the
     /// cursor and retries (the other writer won, its event precedes ours).
-    fn append(&self, ev: &RunEvent) -> Result<(), WorkflowError> {
+    fn append(&self, ev: &WorkflowEvent) -> Result<(), WorkflowError> {
         loop {
             let idx = self.log_len.load(Ordering::Acquire);
             match self.store.append_event(&self.run_id, idx, ev) {
@@ -153,14 +153,14 @@ impl EngineRuntime {
         }
     }
 
-    pub(crate) fn publish(&self, ev: &RunEvent) {
+    pub(crate) fn publish(&self, ev: &WorkflowEvent) {
         if let Some(p) = &self.publisher {
             p(ev);
         }
     }
 
     pub fn publish_progress(&self, step_id: &str, value: f64) {
-        self.publish(&RunEvent::StepProgress {
+        self.publish(&WorkflowEvent::StepProgress {
             ts: now_ms(),
             run_id: self.run_id.clone(),
             step_id: step_id.to_string(),
@@ -257,7 +257,7 @@ where
     };
     inner.set_live(step_id, running_marker.clone());
 
-    inner.publish(&RunEvent::StepStarted {
+    inner.publish(&WorkflowEvent::StepStarted {
         ts: now_ms(),
         run_id: inner.run_id.clone(),
         step_id: step_id.to_string(),
@@ -309,7 +309,7 @@ where
                     result: Some(result.clone()),
                     error: None,
                 });
-                let ev = RunEvent::StepFinished {
+                let ev = WorkflowEvent::StepFinished {
                     ts: now_ms(),
                     run_id: inner.run_id.clone(),
                     step_id: step_id.to_string(),
@@ -353,7 +353,7 @@ where
                     continue;
                 }
                 let msg = format!("step `{step_id}` failed: {err}");
-                let ev = RunEvent::StepFailed {
+                let ev = WorkflowEvent::StepFailed {
                     ts: now_ms(),
                     run_id: inner.run_id.clone(),
                     step_id: step_id.to_string(),
@@ -398,7 +398,7 @@ pub fn exec_now(inner: &Arc<EngineRuntime>) -> anyhow::Result<i64> {
     let k = inner.now_counter.fetch_add(1, Ordering::SeqCst);
     let step_id = format!("__now-{k}");
     for ev in inner.store.get_events(&inner.run_id)? {
-        if let RunEvent::NowRecorded {
+        if let WorkflowEvent::NowRecorded {
             step_id: id, value, ..
         } = &ev
             && id == &step_id
@@ -407,7 +407,7 @@ pub fn exec_now(inner: &Arc<EngineRuntime>) -> anyhow::Result<i64> {
         }
     }
     let value = now_ms();
-    let ev = RunEvent::NowRecorded {
+    let ev = WorkflowEvent::NowRecorded {
         ts: value,
         run_id: inner.run_id.clone(),
         step_id,
@@ -425,7 +425,7 @@ pub fn exec_uuid(inner: &Arc<EngineRuntime>) -> anyhow::Result<String> {
     let k = inner.uuid_counter.fetch_add(1, Ordering::SeqCst);
     let step_id = format!("__uuid-{k}");
     for ev in inner.store.get_events(&inner.run_id)? {
-        if let RunEvent::UuidRecorded {
+        if let WorkflowEvent::UuidRecorded {
             step_id: id, value, ..
         } = &ev
             && id == &step_id
@@ -434,7 +434,7 @@ pub fn exec_uuid(inner: &Arc<EngineRuntime>) -> anyhow::Result<String> {
         }
     }
     let value = uuid::Uuid::new_v4().to_string();
-    let ev = RunEvent::UuidRecorded {
+    let ev = WorkflowEvent::UuidRecorded {
         ts: now_ms(),
         run_id: inner.run_id.clone(),
         step_id,
@@ -477,10 +477,10 @@ pub async fn exec_pause(
         let events = inner.store.get_events(&inner.run_id)?;
         events
             .iter()
-            .any(|ev| matches!(ev, RunEvent::StepPaused { step_id: id, .. } if id == step_id))
+            .any(|ev| matches!(ev, WorkflowEvent::StepPaused { step_id: id, .. } if id == step_id))
     };
     if !already_paused {
-        let ev = RunEvent::StepPaused {
+        let ev = WorkflowEvent::StepPaused {
             ts: now_ms(),
             run_id: inner.run_id.clone(),
             step_id: step_id.to_string(),
@@ -557,7 +557,7 @@ fn find_resume(
 ) -> Option<serde_json::Value> {
     let events = store.get_events(run_id).ok()?;
     events.iter().find_map(|ev| match ev {
-        RunEvent::StepResume {
+        WorkflowEvent::StepResume {
             step_id: id,
             payload,
             ..
@@ -653,7 +653,7 @@ pub fn signal_run(
 ) -> Result<(), WorkflowError> {
     loop {
         let n = store.get_events(run_id)?.len();
-        let ev = RunEvent::StepResume {
+        let ev = WorkflowEvent::StepResume {
             ts: now_ms(),
             run_id: run_id.to_string(),
             step_id: step_id.to_string(),
@@ -681,7 +681,7 @@ pub fn signal_event(
 ) -> Result<(), WorkflowError> {
     let events = store.get_events(run_id)?;
     let step_id = events.iter().rev().find_map(|ev| match ev {
-        RunEvent::StepPaused {
+        WorkflowEvent::StepPaused {
             step_id,
             signal_name,
             ..
@@ -1131,7 +1131,7 @@ mod tests {
         assert_eq!(out.status, RunStatus::Finished);
         let events = store.get_events(&out.run_id).unwrap();
         let fin = events.iter().find_map(|e| match e {
-            RunEvent::StepFinished {
+            WorkflowEvent::StepFinished {
                 step_id, attempts, ..
             } if step_id == "a" => Some(attempts),
             _ => None,
@@ -1166,7 +1166,7 @@ mod tests {
         let attempts = events
             .iter()
             .find_map(|e| match e {
-                RunEvent::StepFailed { attempts, .. } => Some(attempts),
+                WorkflowEvent::StepFailed { attempts, .. } => Some(attempts),
                 _ => None,
             })
             .expect("应有 StepFailed");
@@ -1184,9 +1184,9 @@ mod tests {
         }
 
         // 结构化错误会随事件日志持久化，replay 能读回。
-        let back: Vec<RunEvent> = store.get_events(&out.run_id).unwrap();
+        let back: Vec<WorkflowEvent> = store.get_events(&out.run_id).unwrap();
         let again = back.iter().find_map(|e| match e {
-            RunEvent::StepFailed { attempts, .. } => Some(attempts),
+            WorkflowEvent::StepFailed { attempts, .. } => Some(attempts),
             _ => None,
         });
         assert_eq!(
@@ -1219,7 +1219,7 @@ mod tests {
         assert!(out.error.as_deref().unwrap().contains("boom"));
         let events = store.get_events(&out.run_id).unwrap();
         let failed = events.iter().find_map(|e| match e {
-            RunEvent::StepFailed {
+            WorkflowEvent::StepFailed {
                 step_id, attempts, ..
             } if step_id == "a" => Some(attempts),
             _ => None,
@@ -1272,7 +1272,7 @@ mod tests {
             &wf,
             store.clone(),
             &RunOptions::new(serde_json::json!({})).run_id("prog_run"),
-            Some(Arc::new(move |e: &RunEvent| {
+            Some(Arc::new(move |e: &WorkflowEvent| {
                 sink.lock().unwrap().push(e.clone())
             })),
         )
@@ -1284,12 +1284,15 @@ mod tests {
         let evs = events.lock().unwrap();
         assert!(
             evs.iter()
-                .any(|e| matches!(e, RunEvent::StepProgress { value: 0.5, .. }))
+                .any(|e| matches!(e, WorkflowEvent::StepProgress { value: 0.5, .. }))
         );
-        assert!(evs.iter().any(|e| matches!(e, RunEvent::RunStarted { .. })));
         assert!(
             evs.iter()
-                .any(|e| matches!(e, RunEvent::StepFinished { .. }))
+                .any(|e| matches!(e, WorkflowEvent::RunStarted { .. }))
+        );
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, WorkflowEvent::StepFinished { .. }))
         );
 
         // subscriber (store log) saw the checkpoint but not emit-only events
@@ -1298,12 +1301,14 @@ mod tests {
         let first = rx
             .recv_timeout(Duration::from_secs(2))
             .expect("got first event");
-        saw_finish |= matches!(first, RunEvent::StepFinished { .. });
+        saw_finish |= matches!(first, WorkflowEvent::StepFinished { .. });
         assert!(saw_finish, "first appended event should be StepFinished");
         while let Ok(e) = rx.try_recv() {
             match e {
-                RunEvent::StepFinished { .. } => saw_finish = true,
-                RunEvent::StepProgress { .. } | RunEvent::StepStarted { .. } => saw_shared = true,
+                WorkflowEvent::StepFinished { .. } => saw_finish = true,
+                WorkflowEvent::StepProgress { .. } | WorkflowEvent::StepStarted { .. } => {
+                    saw_shared = true
+                }
                 _ => {}
             }
         }
@@ -1314,7 +1319,7 @@ mod tests {
     #[tokio::test]
     async fn cas_conflict_detected() {
         let store = Arc::new(InMemoryStore::new());
-        let ev = RunEvent::StepFinished {
+        let ev = WorkflowEvent::StepFinished {
             ts: 1,
             run_id: "r1".into(),
             step_id: "a".into(),
@@ -1335,7 +1340,11 @@ mod tests {
         }
     }
 
-    async fn wait_until(store: &Arc<dyn RunStore>, run_id: &str, pred: impl Fn(&RunEvent) -> bool) {
+    async fn wait_until(
+        store: &Arc<dyn RunStore>,
+        run_id: &str,
+        pred: impl Fn(&WorkflowEvent) -> bool,
+    ) {
         for _ in 0..2000 {
             if store.get_events(run_id).unwrap().iter().any(|e| pred(e)) {
                 return;
@@ -1348,7 +1357,7 @@ mod tests {
     fn count_events(
         store: &Arc<dyn RunStore>,
         run_id: &str,
-        pred: impl Fn(&RunEvent) -> bool,
+        pred: impl Fn(&WorkflowEvent) -> bool,
     ) -> usize {
         store
             .get_events(run_id)
@@ -1393,7 +1402,7 @@ mod tests {
         wait_until(
             &store,
             "r1",
-            |e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "release"),
+            |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "release"),
         )
         .await;
         let st = store.get_run_state("r1").unwrap().unwrap();
@@ -1428,20 +1437,20 @@ mod tests {
         assert_eq!(
             count_events(&store, "r1", |e| matches!(
                 e,
-                RunEvent::StepPaused { step_id, .. } if step_id == "release"
+                WorkflowEvent::StepPaused { step_id, .. } if step_id == "release"
             )),
             1
         );
         assert_eq!(
             count_events(&store, "r1", |e| matches!(
                 e,
-                RunEvent::StepResume { step_id, .. } if step_id == "release"
+                WorkflowEvent::StepResume { step_id, .. } if step_id == "release"
             )),
             1
         );
         assert!(store.get_events("r1").unwrap().iter().any(|e| matches!(
             e,
-            RunEvent::StepFinished { step_id, .. } if step_id == "ship"
+            WorkflowEvent::StepFinished { step_id, .. } if step_id == "ship"
         )));
     }
 
@@ -1478,7 +1487,7 @@ mod tests {
         wait_until(
             &store,
             "r2",
-            |e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "release"),
+            |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "release"),
         )
         .await;
         t1.abort();
@@ -1500,13 +1509,13 @@ mod tests {
         wait_until(
             &store,
             "r2",
-            |e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "release"),
+            |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "release"),
         )
         .await;
         assert_eq!(
             count_events(&store, "r2", |e| matches!(
                 e,
-                RunEvent::StepPaused { step_id, .. } if step_id == "release"
+                WorkflowEvent::StepPaused { step_id, .. } if step_id == "release"
             )),
             1,
             "replay must not re-append the pause checkpoint"
@@ -1525,7 +1534,7 @@ mod tests {
         assert_eq!(
             count_events(&store, "r2", |e| matches!(
                 e,
-                RunEvent::StepFinished { step_id, .. } if step_id == "charge"
+                WorkflowEvent::StepFinished { step_id, .. } if step_id == "charge"
             )),
             1,
             "replay must short-circuit the succeeded step"
@@ -1533,7 +1542,7 @@ mod tests {
         assert_eq!(
             count_events(&store, "r2", |e| matches!(
                 e,
-                RunEvent::StepResume { step_id, .. } if step_id == "release"
+                WorkflowEvent::StepResume { step_id, .. } if step_id == "release"
             )),
             1
         );
@@ -1599,7 +1608,7 @@ mod tests {
 
         let evs = store.get_events("s1").unwrap();
         let resume = evs.iter().find_map(|e| match e {
-            RunEvent::StepResume {
+            WorkflowEvent::StepResume {
                 step_id, payload, ..
             } if step_id == "cooldown" => payload.clone(),
             _ => None,
@@ -1607,7 +1616,7 @@ mod tests {
         assert_eq!(resume, Some(serde_json::Value::Null));
         assert!(evs.iter().any(|e| matches!(
             e,
-            RunEvent::StepFinished { step_id, .. } if step_id == "after"
+            WorkflowEvent::StepFinished { step_id, .. } if step_id == "after"
         )));
     }
 
@@ -1638,7 +1647,7 @@ mod tests {
         wait_until(
             &store,
             "r3",
-            |e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "gate"),
+            |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "gate"),
         )
         .await;
         signal_run(
@@ -1669,14 +1678,14 @@ mod tests {
         assert_eq!(
             count_events(&store, "r3", |e| matches!(
                 e,
-                RunEvent::StepPaused { step_id, .. } if step_id == "gate"
+                WorkflowEvent::StepPaused { step_id, .. } if step_id == "gate"
             )),
             1
         );
         assert_eq!(
             count_events(&store, "r3", |e| matches!(
                 e,
-                RunEvent::StepResume { step_id, .. } if step_id == "gate"
+                WorkflowEvent::StepResume { step_id, .. } if step_id == "gate"
             )),
             1
         );
@@ -1709,7 +1718,7 @@ mod tests {
         wait_until(
             &store,
             "ne1",
-            |e| matches!(e, RunEvent::StepPaused { signal_name, .. } if signal_name == "review-approved"),
+            |e| matches!(e, WorkflowEvent::StepPaused { signal_name, .. } if signal_name == "review-approved"),
         )
         .await;
         let st = store.get_run_state("ne1").unwrap().unwrap();
@@ -1762,7 +1771,7 @@ mod tests {
         wait_until(
             &store,
             "ne2",
-            |e| matches!(e, RunEvent::StepPaused { signal_name, .. } if signal_name == "go"),
+            |e| matches!(e, WorkflowEvent::StepPaused { signal_name, .. } if signal_name == "go"),
         )
         .await;
         signal_event(store.as_ref(), "ne2", "go", serde_json::json!(42)).unwrap();
@@ -1786,7 +1795,7 @@ mod tests {
         assert_eq!(
             count_events(&store, "ne2", |e| matches!(
                 e,
-                RunEvent::StepPaused { signal_name, .. } if signal_name == "go"
+                WorkflowEvent::StepPaused { signal_name, .. } if signal_name == "go"
             )),
             1
         );
@@ -1816,12 +1825,12 @@ mod tests {
         let evs = store.get_events(&out.run_id).unwrap();
         assert!(evs.iter().any(|e| matches!(
             e,
-            RunEvent::StepFinished { step_id, .. } if step_id == "after"
+            WorkflowEvent::StepFinished { step_id, .. } if step_id == "after"
         )));
         // 过去时间点 → 引擎自我投递 "__timer" resume，立即放行
         assert!(evs.iter().any(|e| matches!(
             e,
-            RunEvent::StepResume { step_id, .. } if step_id == "cooldown"
+            WorkflowEvent::StepResume { step_id, .. } if step_id == "cooldown"
         )));
     }
 
@@ -1879,7 +1888,7 @@ mod tests {
             &wf,
             store.clone(),
             &RunOptions::new(serde_json::json!({})).run_id("em1"),
-            Some(Arc::new(move |e: &RunEvent| {
+            Some(Arc::new(move |e: &WorkflowEvent| {
                 sink.lock().unwrap().push(e.clone())
             })),
         )
@@ -1890,14 +1899,14 @@ mod tests {
             seen.lock()
                 .unwrap()
                 .iter()
-                .any(|e| matches!(e, RunEvent::Custom { name, .. } if name == "ping"))
+                .any(|e| matches!(e, WorkflowEvent::Custom { name, .. } if name == "ping"))
         );
         assert!(
             store
                 .get_events("em1")
                 .unwrap()
                 .iter()
-                .all(|e| !matches!(e, RunEvent::Custom { .. }))
+                .all(|e| !matches!(e, WorkflowEvent::Custom { .. }))
         );
     }
 
@@ -1939,7 +1948,7 @@ mod tests {
         wait_until(
             &store,
             "det1",
-            |e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "gate"),
+            |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "gate"),
         )
         .await;
         signal_run(store.as_ref(), "det1", "gate", serde_json::json!(true)).unwrap();
@@ -1967,7 +1976,7 @@ mod tests {
         assert_eq!(
             count_events(&store, "det1", |e| matches!(
                 e,
-                RunEvent::NowRecorded { .. }
+                WorkflowEvent::NowRecorded { .. }
             )),
             2,
             "每个调用位点只记录一次，replay 不重复 append"
@@ -1975,7 +1984,7 @@ mod tests {
         assert_eq!(
             count_events(&store, "det1", |e| matches!(
                 e,
-                RunEvent::UuidRecorded { .. }
+                WorkflowEvent::UuidRecorded { .. }
             )),
             2
         );
@@ -1985,8 +1994,8 @@ mod tests {
             .unwrap()
             .iter()
             .filter_map(|e| match e {
-                RunEvent::NowRecorded { step_id, .. } => Some(format!("now:{step_id}")),
-                RunEvent::UuidRecorded { step_id, .. } => Some(format!("uuid:{step_id}")),
+                WorkflowEvent::NowRecorded { step_id, .. } => Some(format!("now:{step_id}")),
+                WorkflowEvent::UuidRecorded { step_id, .. } => Some(format!("uuid:{step_id}")),
                 _ => None,
             })
             .collect();
@@ -2024,7 +2033,7 @@ mod tests {
         assert_eq!(
             count_events(&store, &out.run_id, |e| matches!(
                 e,
-                RunEvent::NowRecorded { .. }
+                WorkflowEvent::NowRecorded { .. }
             )),
             2,
             "并发调用各自落一个 NowRecorded，无重复 id"
@@ -2046,7 +2055,7 @@ mod tests {
         assert_eq!(
             count_events(&store, &out.run_id, |e| matches!(
                 e,
-                RunEvent::NowRecorded { .. }
+                WorkflowEvent::NowRecorded { .. }
             )),
             2
         );
@@ -2077,7 +2086,7 @@ mod tests {
         wait_until(
             &store,
             "ca1",
-            |e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "release"),
+            |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "release"),
         )
         .await;
         let st = store.get_run_state("ca1").unwrap().unwrap();
@@ -2106,7 +2115,7 @@ mod tests {
             .unwrap()
             .iter()
             .find_map(|e| match e {
-                RunEvent::RunErrored { code, .. } => Some(*code),
+                WorkflowEvent::RunErrored { code, .. } => Some(*code),
                 _ => None,
             })
             .expect("终局事件应为 RunErrored");
@@ -2117,11 +2126,11 @@ mod tests {
         let evs = store.get_events("ca1").unwrap();
         let terminal_finished = evs
             .iter()
-            .any(|e| matches!(e, RunEvent::RunFinished { .. }));
+            .any(|e| matches!(e, WorkflowEvent::RunFinished { .. }));
         assert!(!terminal_finished);
         assert!(!evs.iter().any(|e| matches!(
             e,
-            RunEvent::StepFinished { step_id, .. } if step_id == "ship"
+            WorkflowEvent::StepFinished { step_id, .. } if step_id == "ship"
         )));
     }
 
@@ -2196,7 +2205,7 @@ mod tests {
         wait_until(
             &store,
             "ca2",
-            |e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "hold"),
+            |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "hold"),
         )
         .await;
         cancel_run(store.as_ref(), "ca2").unwrap();
@@ -2315,19 +2324,15 @@ mod tests {
         wait_until(
             &store,
             "y1",
-            |e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id.starts_with("__yield-")),
+            |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id.starts_with("__yield-")),
         )
         .await;
         // 到期自动 resume（timer 自动投递）→ 继续跑完
         let out = task.await.unwrap().unwrap();
         assert_eq!(out.status, RunStatus::Finished);
-        assert!(
-            store
-                .get_events("y1")
-                .unwrap()
-                .iter()
-                .any(|e| matches!(e, RunEvent::StepFinished { step_id, .. } if step_id == "after"))
-        );
+        assert!(store.get_events("y1").unwrap().iter().any(
+            |e| matches!(e, WorkflowEvent::StepFinished { step_id, .. } if step_id == "after")
+        ));
 
         // replay：yield 的 StepResume 已在日志 → 短路径立即放行，不新增 checkpoint
         let store3 = store.clone();
@@ -2342,7 +2347,10 @@ mod tests {
         .unwrap();
         assert_eq!(out2.status, RunStatus::Finished);
         assert_eq!(
-            count_events(&store, "y1", |e| matches!(e, RunEvent::StepPaused { .. })),
+            count_events(&store, "y1", |e| matches!(
+                e,
+                WorkflowEvent::StepPaused { .. }
+            )),
             1,
             "replay 不重复 yield 的 pause"
         );
@@ -2373,7 +2381,7 @@ mod tests {
         wait_until(
             &store,
             "y2",
-            |e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id.starts_with("__yield-")),
+            |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id.starts_with("__yield-")),
         )
         .await;
         let out = task.await.unwrap().unwrap();
@@ -2431,7 +2439,7 @@ mod tests {
         assert_eq!(
             count_events(&store, out.run_id.as_str(), |e| matches!(
                 e,
-                RunEvent::StepFinished { attempts, .. } if attempts.len() == 2
+                WorkflowEvent::StepFinished { attempts, .. } if attempts.len() == 2
             )),
             1,
             "flaky step 应留 2 次 attempt"
@@ -2481,7 +2489,7 @@ mod tests {
             st.status == RunStatus::Errored
                 && count_events(&store2, &out2.run_id, |e| matches!(
                     e,
-                    RunEvent::StepFailed { attempts, .. } if attempts.len() == 1
+                    WorkflowEvent::StepFailed { attempts, .. } if attempts.len() == 1
                 )) == 1,
             "per-step retry 覆盖 workflow 兜底"
         );

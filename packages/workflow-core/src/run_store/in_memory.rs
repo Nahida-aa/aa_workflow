@@ -10,15 +10,15 @@ use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use crate::error::StoreError;
-use crate::event::RunEvent;
+use crate::event::WorkflowEvent;
 
 use super::{DeleteReason, RunState, RunStore};
 
 #[derive(Default)]
 struct Inner {
     runs: HashMap<String, RunState>,
-    logs: HashMap<String, Vec<RunEvent>>,
-    subs: HashMap<String, Vec<Sender<RunEvent>>>,
+    logs: HashMap<String, Vec<WorkflowEvent>>,
+    subs: HashMap<String, Vec<Sender<WorkflowEvent>>>,
 }
 
 /// In-memory [`RunStore`] for phase 0. Provides the full contract surface
@@ -70,7 +70,7 @@ impl RunStore for InMemoryStore {
         &self,
         run_id: &str,
         expected_next_index: usize,
-        event: &RunEvent,
+        event: &WorkflowEvent,
     ) -> Result<(), StoreError> {
         let mut inner = self
             .inner
@@ -92,7 +92,7 @@ impl RunStore for InMemoryStore {
         Ok(())
     }
 
-    fn get_events(&self, run_id: &str) -> Result<Vec<RunEvent>, StoreError> {
+    fn get_events(&self, run_id: &str) -> Result<Vec<WorkflowEvent>, StoreError> {
         Ok(self
             .inner
             .lock()
@@ -113,8 +113,8 @@ impl RunStore for InMemoryStore {
         };
         // Latest terminal checkpoint for step_id (success or failure).
         let cut = log.iter().rposition(|ev| match ev {
-            RunEvent::StepFinished { step_id: id, .. }
-            | RunEvent::StepFailed { step_id: id, .. } => id == step_id,
+            WorkflowEvent::StepFinished { step_id: id, .. }
+            | WorkflowEvent::StepFailed { step_id: id, .. } => id == step_id,
             _ => false,
         });
         if let Some(i) = cut {
@@ -123,7 +123,7 @@ impl RunStore for InMemoryStore {
         Ok(())
     }
 
-    fn subscribe(&self, run_id: &str) -> Option<Receiver<RunEvent>> {
+    fn subscribe(&self, run_id: &str) -> Option<Receiver<WorkflowEvent>> {
         let (tx, rx) = mpsc::channel();
         let mut inner = self.inner.lock().ok()?;
         inner.subs.entry(run_id.to_string()).or_default().push(tx);

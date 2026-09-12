@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use workflow_core::{DeleteReason, RunEvent, RunState, RunStore, StoreError};
+use workflow_core::{DeleteReason, RunState, RunStore, StoreError, WorkflowEvent};
 
 fn map_io(e: std::io::Error) -> StoreError {
     StoreError::Io(e.to_string())
@@ -29,7 +29,7 @@ pub struct FileRunStore {
     // 串行化读-改-写 (append / truncate)；单进程内引擎只有调度该 run 的任务写，
     // 此锁是防御性的，真正的并发一致性由 expected_next_index CAS 保证。
     lock: Mutex<()>,
-    subs: Mutex<HashMap<String, Vec<Sender<RunEvent>>>>,
+    subs: Mutex<HashMap<String, Vec<Sender<WorkflowEvent>>>>,
 }
 
 impl FileRunStore {
@@ -59,7 +59,7 @@ impl FileRunStore {
     }
 
     /// 读 events.jsonl；文件缺失视为空日志。
-    fn read_events(&self, run_id: &str) -> Result<Vec<RunEvent>, StoreError> {
+    fn read_events(&self, run_id: &str) -> Result<Vec<WorkflowEvent>, StoreError> {
         let raw = match fs::read_to_string(self.events_path(run_id)) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -78,7 +78,7 @@ impl FileRunStore {
         Ok(events)
     }
 
-    fn broadcast(&self, run_id: &str, ev: &RunEvent) {
+    fn broadcast(&self, run_id: &str, ev: &WorkflowEvent) {
         if let Ok(mut subs) = self.subs.lock() {
             if let Some(senders) = subs.get_mut(run_id) {
                 senders.retain(|s| s.send(ev.clone()).is_ok());
@@ -125,7 +125,7 @@ impl RunStore for FileRunStore {
         &self,
         run_id: &str,
         expected_next_index: usize,
-        event: &RunEvent,
+        event: &WorkflowEvent,
     ) -> Result<(), StoreError> {
         let _guard = self
             .lock
@@ -159,7 +159,7 @@ impl RunStore for FileRunStore {
         Ok(())
     }
 
-    fn get_events(&self, run_id: &str) -> Result<Vec<RunEvent>, StoreError> {
+    fn get_events(&self, run_id: &str) -> Result<Vec<WorkflowEvent>, StoreError> {
         self.read_events(run_id)
     }
 
@@ -171,8 +171,8 @@ impl RunStore for FileRunStore {
         let events = self.read_events(run_id)?;
         // 对齐 InMemoryStore：裁到 step_id 最新终态 checkpoint（含）之前的保留。
         let Some(cut) = events.iter().rposition(|ev| match ev {
-            RunEvent::StepFinished { step_id: id, .. }
-            | RunEvent::StepFailed { step_id: id, .. } => id == step_id,
+            WorkflowEvent::StepFinished { step_id: id, .. }
+            | WorkflowEvent::StepFailed { step_id: id, .. } => id == step_id,
             _ => false,
         }) else {
             return Ok(());
@@ -188,7 +188,7 @@ impl RunStore for FileRunStore {
         Self::atomic_write(&self.events_path(run_id), &out)
     }
 
-    fn subscribe(&self, run_id: &str) -> Option<Receiver<RunEvent>> {
+    fn subscribe(&self, run_id: &str) -> Option<Receiver<WorkflowEvent>> {
         let (tx, rx) = mpsc::channel();
         self.subs
             .lock()
@@ -228,8 +228,8 @@ mod tests {
         }
     }
 
-    fn finished(run_id: &str, step: &str) -> RunEvent {
-        RunEvent::StepFinished {
+    fn finished(run_id: &str, step: &str) -> WorkflowEvent {
+        WorkflowEvent::StepFinished {
             ts: 1,
             run_id: run_id.into(),
             step_id: step.into(),

@@ -56,7 +56,7 @@ pub use engine::{
     signal_event, signal_run,
 };
 pub use error::{RunError, RunErrorCode, StoreError, WorkflowError};
-pub use event::{RunEvent, RunStatus, StepAttempt, StepState, StepStatus, fold_step_states};
+pub use event::{RunStatus, StepAttempt, StepState, StepStatus, WorkflowEvent, fold_step_states};
 pub use resource::{Gate, GateGuard, ResourceKey};
 pub use run_store::{
     DeleteReason, InMemoryStore, PendingApproval, RunState, RunStore, WaitForState,

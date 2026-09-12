@@ -28,7 +28,7 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunOptions.runtime�
 | `approve({id,title,description})` | `approve(key, title)` | ◐ | 对象参数 → 位置参数；TS 有 `description`，Rust 暂无（后续补 `Ok`/`Err` 语义已具备） |
 | `now()` | `now() -> Result<i64>` | ◐ | 返回值锁定为**确定性 checkpoint**（`NowRecorded`），跨 resume 一致 —— 语义强于 TS 的 per-run engine counter；仅在 store 失败时 Err |
 | `uuid()` | `uuid() -> Result<String>` | ◐ | 同上；TS 为 Promise 纯净值，Rust 包 `Result`（PARITY delta，仅 store 失败时 Err） |
-| `emit(name, value)` | `emit(name, value: Value)` | ✅ | 不进日志、不参与 replay（RunEvent::Custom 仅投递 publisher） |
+| `emit(name, value)` | `emit(name, value: Value)` | ✅ | 不进日志、不参与 replay（WorkflowEvent::Custom 仅投递 publisher） |
 
 ## step 闭包参数（StepContext）
 
@@ -122,7 +122,7 @@ L198）+ `types.ts`（`Ctx<TIn, TState, TExt>` L386）。
 | `middleware wrap(ctx, next)` | `Middleware::wrap(ctx, BoxFuture)` → `BoxFuture` | ✅ | 从外向内组合；注册序 = 从外向内（最外先注册） |
 | `selectWorkflowVersion(persisted, registry)` | `select_workflow_version(workflow, persisted_version)` | ✅ | `.previous_versions` 替代 registry map；持久化版本 = `RunState.workflow_version` |
 | `run.id` (handler) | `ctx.run_id` | ✅ | |
-| 输出存储 | handler 返回 → `serde_json::to_value(out)` → `output_validator` 校验 → `RunEvent::RunFinished` → `RunOutcome.output` | ✅ | |
+| 输出存储 | handler 返回 → `serde_json::to_value(out)` → `output_validator` 校验 → `WorkflowEvent::RunFinished` → `RunOutcome.output` | ✅ | |
 
 ## 验证覆盖
 

@@ -50,7 +50,7 @@ pub struct StepAttempt {
 /// engine's source of truth and doubling as the resume checkpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum RunEvent {
+pub enum WorkflowEvent {
     /// Observability only (not persisted): marks the start of a run.
     RunStarted { ts: i64, run_id: String },
     /// Checkpoint (persisted): final state of a completed run.
@@ -153,21 +153,21 @@ pub enum RunEvent {
     },
 }
 
-impl RunEvent {
+impl WorkflowEvent {
     pub fn step_id(&self) -> Option<&str> {
         match self {
-            RunEvent::RunStarted { .. }
-            | RunEvent::RunFinished { .. }
-            | RunEvent::RunErrored { .. }
-            | RunEvent::Custom { .. } => None,
-            RunEvent::StepStarted { step_id, .. }
-            | RunEvent::StepFinished { step_id, .. }
-            | RunEvent::StepFailed { step_id, .. }
-            | RunEvent::StepPaused { step_id, .. }
-            | RunEvent::StepResume { step_id, .. }
-            | RunEvent::StepProgress { step_id, .. }
-            | RunEvent::NowRecorded { step_id, .. }
-            | RunEvent::UuidRecorded { step_id, .. } => Some(step_id),
+            WorkflowEvent::RunStarted { .. }
+            | WorkflowEvent::RunFinished { .. }
+            | WorkflowEvent::RunErrored { .. }
+            | WorkflowEvent::Custom { .. } => None,
+            WorkflowEvent::StepStarted { step_id, .. }
+            | WorkflowEvent::StepFinished { step_id, .. }
+            | WorkflowEvent::StepFailed { step_id, .. }
+            | WorkflowEvent::StepPaused { step_id, .. }
+            | WorkflowEvent::StepResume { step_id, .. }
+            | WorkflowEvent::StepProgress { step_id, .. }
+            | WorkflowEvent::NowRecorded { step_id, .. }
+            | WorkflowEvent::UuidRecorded { step_id, .. } => Some(step_id),
         }
     }
 }
@@ -188,16 +188,16 @@ pub struct StepState {
 /// This is the resume mechanism: the log's terminal checkpoints
 /// (`StepFinished`/`StepFailed`) fully determine which steps still need to
 /// run. No application code is re-executed here.
-pub fn fold_step_states(events: &[RunEvent]) -> HashMap<String, StepState> {
+pub fn fold_step_states(events: &[WorkflowEvent]) -> HashMap<String, StepState> {
     let mut states: HashMap<String, StepState> = HashMap::new();
     for ev in events {
         match ev {
-            RunEvent::StepStarted { step_id, ts, .. } => {
+            WorkflowEvent::StepStarted { step_id, ts, .. } => {
                 let st = states.entry(step_id.clone()).or_default();
                 st.status = StepStatus::Running;
                 st.started_at = Some(*ts);
             }
-            RunEvent::StepFinished {
+            WorkflowEvent::StepFinished {
                 step_id,
                 result,
                 ts,
@@ -209,7 +209,7 @@ pub fn fold_step_states(events: &[RunEvent]) -> HashMap<String, StepState> {
                 st.error = None;
                 st.finished_at = Some(*ts);
             }
-            RunEvent::StepFailed {
+            WorkflowEvent::StepFailed {
                 step_id, error, ts, ..
             } => {
                 let st = states.entry(step_id.clone()).or_default();
@@ -217,7 +217,7 @@ pub fn fold_step_states(events: &[RunEvent]) -> HashMap<String, StepState> {
                 st.error = Some(error.clone());
                 st.finished_at = Some(*ts);
             }
-            RunEvent::StepPaused {
+            WorkflowEvent::StepPaused {
                 step_id,
                 ts,
                 due_at,
@@ -228,7 +228,7 @@ pub fn fold_step_states(events: &[RunEvent]) -> HashMap<String, StepState> {
                 st.started_at = st.started_at.or(Some(*ts));
                 st.finished_at = due_at.or(st.finished_at);
             }
-            RunEvent::StepResume {
+            WorkflowEvent::StepResume {
                 step_id, payload, ..
             } => {
                 // A delivered signal exposes its payload as the paused step's

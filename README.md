@@ -191,10 +191,10 @@ pub trait RunStore: Send + Sync {
     fn delete_run(&self, run_id: &str, reason: DeleteReason) -> Result<(), StoreError>;
     // 2. append-only log
     fn append_event(&self, run_id: &str, expected_next_index: usize,
-                    event: &RunEvent) -> Result<(), StoreError>;   // MUST CAS
-    fn get_events(&self, run_id: &str) -> Result<Vec<RunEvent>, StoreError>;
+                    event: &WorkflowEvent) -> Result<(), StoreError>;   // MUST CAS
+    fn get_events(&self, run_id: &str) -> Result<Vec<WorkflowEvent>, StoreError>;
     fn truncate_runs(&self, run_id: &str, step_id: &str) -> Result<(), StoreError>;
-    fn subscribe(&self, run_id: &str) -> Option<Receiver<RunEvent>> { None }
+    fn subscribe(&self, run_id: &str) -> Option<Receiver<WorkflowEvent>> { None }
 }
 ```
 
@@ -252,7 +252,7 @@ packages/workflow-core/     引擎本体
   src/define.rs             Workflow / WorkflowBuilder / BaseCtx / StepOptions
   src/engine/mod.rs         EngineRuntime、exec_step / exec_pause、signal_*
   src/engine/run_workflow.rs  单次 drive 的顶层编排、RunOptions
-  src/event.rs              RunEvent / RunStatus / fold_step_states
+  src/event.rs              WorkflowEvent / RunStatus / fold_step_states
   src/run_store/mod.rs      RunStore trait + RunState 信封
   src/run_store/in_memory.rs  InMemoryStore
   src/resource.rs           容量-1 的资源门
@@ -281,7 +281,7 @@ docs/tanstack-alignment.md  对齐决策记录（含推翻第一轮的论证）
   是全量读 + 全量重写（O(n²)），且 `Mutex` 只在单进程内有效。
 - **性能是平方级**：25ms 轮询 × 每次全量反序列化日志 × 全量线性扫。长 run 需注意。
 - **确定性契约未强制**：引擎不检测 handler 的非确定性写法（TanStack 同样不检测）。
-- **无 observability 集成**：`publisher` 是裸 `Arc<dyn Fn(&RunEvent)>`，core 不依赖
+- **无 observability 集成**：`publisher` 是裸 `Arc<dyn Fn(&WorkflowEvent)>`，core 不依赖
   tracing，接入要自己搭桥。
 - `subscribe` 返回 `std::sync::mpsc::Receiver`（阻塞通道），async 上下文里要用
   `try_recv()`。

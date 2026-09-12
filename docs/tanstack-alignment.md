@@ -18,7 +18,7 @@
 | aa-workflow | TanStack |
 | ----------- | -------- |
 | `Workflow` / `WorkflowCtx` / `StepCtx` / `StepState` / `StepStatus` / `StepAttempt` | `Workflow` / handler ctx / `StepContext` / 派生 / — / `StepAttempt` |
-| `RunEvent` 变体 `STEP_*`；serde tag `type` | `WorkflowEvent` 的 `type: 'STEP_FINISHED'` 等 |
+| `WorkflowEvent` 变体 `STEP_*`；serde tag `type` | `WorkflowEvent` 的 `type: 'STEP_FINISHED'` 等 |
 | `RunStore` trait（CAS append + subscribe） | `RunStore` interface |
 | `RunState` 信封 | `RunState`（runId/status/workflowId/input/output/error/...） |
 | `run_workflow` / `run_workflow_sync` | `runWorkflow` |

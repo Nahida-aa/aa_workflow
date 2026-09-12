@@ -14,7 +14,7 @@ use crate::engine::{
     DEFAULT_MIN_YIELD_REMAINING_MS, EngineRuntime, StepHalt, WorkflowCancelled, now_ms,
 };
 use crate::error::{RunError, RunErrorCode, WorkflowError};
-use crate::event::{RunEvent, RunStatus, StepStatus, fold_step_states};
+use crate::event::{RunStatus, StepStatus, WorkflowEvent, fold_step_states};
 use crate::resource::Gate;
 use crate::run_store::{RunState, RunStore};
 
@@ -131,7 +131,7 @@ pub async fn run_workflow(
     workflow: &Workflow,
     store: Arc<dyn RunStore>,
     opts: &RunOptions,
-    publisher: Option<Arc<dyn Fn(&RunEvent) + Send + Sync>>,
+    publisher: Option<Arc<dyn Fn(&WorkflowEvent) + Send + Sync>>,
 ) -> Result<RunOutcome, WorkflowError> {
     let run_id = opts
         .run_id
@@ -225,7 +225,7 @@ pub async fn run_workflow(
         yield_counter: AtomicUsize::new(0),
         default_step_retry: active.default_step_retry.clone(),
     });
-    inner.publish(&RunEvent::RunStarted {
+    inner.publish(&WorkflowEvent::RunStarted {
         ts,
         run_id: run_id.clone(),
     });
@@ -252,13 +252,13 @@ pub async fn run_workflow(
     };
 
     let terminal = match &failure {
-        Some((err, code)) => RunEvent::RunErrored {
+        Some((err, code)) => WorkflowEvent::RunErrored {
             ts: now_ms(),
             run_id: run_id.clone(),
             error: err.clone(),
             code: *code,
         },
-        None => RunEvent::RunFinished {
+        None => WorkflowEvent::RunFinished {
             ts: now_ms(),
             run_id: run_id.clone(),
             output: output.clone(),
@@ -296,7 +296,7 @@ fn init_failed(
     mut run_state: RunState,
     run_id: &str,
     err: &anyhow::Error,
-    publisher: Option<&Arc<dyn Fn(&RunEvent) + Send + Sync>>,
+    publisher: Option<&Arc<dyn Fn(&WorkflowEvent) + Send + Sync>>,
 ) -> Result<RunOutcome, WorkflowError> {
     let run_err = RunError::from_anyhow(err);
     let msg = run_err.message.clone();
@@ -305,7 +305,7 @@ fn init_failed(
     run_state.updated_at = now_ms();
     store.set_run_state(run_id, &run_state)?;
     if let Some(publish) = publisher {
-        publish(&RunEvent::RunErrored {
+        publish(&WorkflowEvent::RunErrored {
             ts: now_ms(),
             run_id: run_id.to_string(),
             error: run_err,
@@ -326,7 +326,7 @@ pub fn run_workflow_sync(
     workflow: &Workflow,
     store: Arc<dyn RunStore>,
     opts: &RunOptions,
-    publisher: Option<Arc<dyn Fn(&RunEvent) + Send + Sync>>,
+    publisher: Option<Arc<dyn Fn(&WorkflowEvent) + Send + Sync>>,
 ) -> Result<RunOutcome, WorkflowError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_time()
@@ -472,7 +472,7 @@ mod tests {
             .unwrap()
             .iter()
             .find_map(|e| match e {
-                RunEvent::RunErrored { error, code, .. } => Some((error.clone(), *code)),
+                WorkflowEvent::RunErrored { error, code, .. } => Some((error.clone(), *code)),
                 _ => None,
             })
             .expect("终局事件应为 RunErrored");
@@ -502,7 +502,7 @@ mod tests {
             .unwrap()
             .iter()
             .find_map(|e| match e {
-                RunEvent::RunErrored { error, code, .. } => Some((error.clone(), *code)),
+                WorkflowEvent::RunErrored { error, code, .. } => Some((error.clone(), *code)),
                 _ => None,
             })
             .expect("终局事件应为 RunErrored");
@@ -515,8 +515,8 @@ mod tests {
     #[tokio::test]
     async fn init_failure_publishes_validation_code_without_appending() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let seen: Arc<Mutex<Vec<RunEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let publisher: Arc<dyn Fn(&RunEvent) + Send + Sync> = {
+        let seen: Arc<Mutex<Vec<WorkflowEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let publisher: Arc<dyn Fn(&WorkflowEvent) + Send + Sync> = {
             let seen = seen.clone();
             Arc::new(move |ev| seen.lock().unwrap().push(ev.clone()))
         };
@@ -542,7 +542,7 @@ mod tests {
             .unwrap()
             .iter()
             .find_map(|e| match e {
-                RunEvent::RunErrored { error, code, .. } => Some((error.clone(), *code)),
+                WorkflowEvent::RunErrored { error, code, .. } => Some((error.clone(), *code)),
                 _ => None,
             })
             .expect("应 publish RunErrored");

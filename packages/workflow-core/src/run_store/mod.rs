@@ -8,7 +8,7 @@ use std::sync::mpsc::Receiver;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{RunError, StoreError};
-use crate::event::{RunEvent, RunStatus};
+use crate::event::{RunStatus, WorkflowEvent};
 
 mod in_memory;
 pub use in_memory::InMemoryStore;
@@ -148,9 +148,9 @@ pub trait RunStore: Send + Sync {
         &self,
         run_id: &str,
         expected_next_index: usize,
-        event: &RunEvent,
+        event: &WorkflowEvent,
     ) -> Result<(), StoreError>;
-    fn get_events(&self, run_id: &str) -> Result<Vec<RunEvent>, StoreError>;
+    fn get_events(&self, run_id: &str) -> Result<Vec<WorkflowEvent>, StoreError>;
 
     /// Cuts the log at `step_id`'s **latest terminal checkpoint** (inclusive):
     /// that checkpoint and every later event are dropped, the prefix is kept.
@@ -163,7 +163,7 @@ pub trait RunStore: Send + Sync {
 
     /// Live subscription: a receiver that sees every future event appended to
     /// this run's log. `None` if the store does not support subscriptions.
-    fn subscribe(&self, run_id: &str) -> Option<Receiver<RunEvent>> {
+    fn subscribe(&self, run_id: &str) -> Option<Receiver<WorkflowEvent>> {
         let _ = run_id;
         None
     }

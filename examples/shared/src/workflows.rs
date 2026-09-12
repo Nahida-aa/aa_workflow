@@ -678,7 +678,7 @@ mod tests {
     use std::sync::{Arc, LazyLock};
     use std::time::Duration;
     use workflow_core::{
-        InMemoryStore, RunEvent, RunOptions, RunStatus, RunStore, run_workflow, signal_event,
+        InMemoryStore, RunOptions, RunStatus, RunStore, WorkflowEvent, run_workflow, signal_event,
         signal_run,
     };
 
@@ -686,18 +686,18 @@ mod tests {
     static GATEWAY_TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
         LazyLock::new(|| tokio::sync::Mutex::new(()));
 
-    fn finished_count(events: &[RunEvent], step: &str) -> usize {
+    fn finished_count(events: &[WorkflowEvent], step: &str) -> usize {
         events
             .iter()
-            .filter(|e| matches!(e, RunEvent::StepFinished { step_id, .. } if step_id == step))
+            .filter(|e| matches!(e, WorkflowEvent::StepFinished { step_id, .. } if step_id == step))
             .count()
     }
 
-    fn sf_ts(events: &[RunEvent], step: &str) -> i64 {
+    fn sf_ts(events: &[WorkflowEvent], step: &str) -> i64 {
         events
             .iter()
             .find_map(|e| match e {
-                RunEvent::StepFinished { step_id, ts, .. } if step_id == step => Some(*ts),
+                WorkflowEvent::StepFinished { step_id, ts, .. } if step_id == step => Some(*ts),
                 _ => None,
             })
             .expect("应有 StepFinished")
@@ -707,10 +707,9 @@ mod tests {
     async fn wait_paused<S: RunStore + ?Sized>(store: &Arc<S>, run_id: &str, step_id: &str) {
         for _ in 0..2000 {
             let evs = store.get_events(run_id).unwrap();
-            if evs
-                .iter()
-                .any(|e| matches!(e, RunEvent::StepPaused { step_id: id, .. } if id == step_id))
-            {
+            if evs.iter().any(
+                |e| matches!(e, WorkflowEvent::StepPaused { step_id: id, .. } if id == step_id),
+            ) {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -743,7 +742,7 @@ mod tests {
         let charge_fin = events
             .iter()
             .find_map(|e| match e {
-                RunEvent::StepFinished {
+                WorkflowEvent::StepFinished {
                     step_id, attempts, ..
                 } if step_id == "charge" => Some(attempts),
                 _ => None,
@@ -911,10 +910,9 @@ mod tests {
 
         for _ in 0..2000 {
             let evs = store.get_events("approve:r").unwrap();
-            if evs
-                .iter()
-                .any(|e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "review"))
-            {
+            if evs.iter().any(
+                |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "review"),
+            ) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -942,7 +940,7 @@ mod tests {
         assert_eq!(
             evs.iter()
                 .filter(
-                    |e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "review")
+                    |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "review")
                 )
                 .count(),
             1
@@ -950,7 +948,7 @@ mod tests {
         assert_eq!(
             evs.iter()
                 .filter(
-                    |e| matches!(e, RunEvent::StepResume { step_id, .. } if step_id == "review")
+                    |e| matches!(e, WorkflowEvent::StepResume { step_id, .. } if step_id == "review")
                 )
                 .count(),
             1
@@ -995,7 +993,9 @@ mod tests {
         assert_eq!(finished_count(&events, "ship-order"), 1);
         let ready_sleep = events
             .iter()
-            .filter(|e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "ready"))
+            .filter(
+                |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "ready"),
+            )
             .count();
         assert_eq!(ready_sleep, 1, "readyAt 定时闸门睡过一次");
     }
@@ -1028,7 +1028,7 @@ mod tests {
         assert!(
             !events
                 .iter()
-                .any(|e| matches!(e, RunEvent::StepPaused { .. })),
+                .any(|e| matches!(e, WorkflowEvent::StepPaused { .. })),
             "未超阈值不应有暂停"
         );
     }
@@ -1088,11 +1088,15 @@ mod tests {
         for step in ["settle-due-1", "settle-due-2"] {
             let paused = events
                 .iter()
-                .filter(|e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == step))
+                .filter(
+                    |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == step),
+                )
                 .count();
             let resumed = events
                 .iter()
-                .filter(|e| matches!(e, RunEvent::StepResume { step_id, .. } if step_id == step))
+                .filter(
+                    |e| matches!(e, WorkflowEvent::StepResume { step_id, .. } if step_id == step),
+                )
                 .count();
             assert_eq!(paused, 1, "{step} 暂停一次");
             assert_eq!(resumed, 1, "{step} 自动恢复一次");
@@ -1230,7 +1234,7 @@ mod tests {
         let timer_sleep = events
             .iter()
             .filter(
-                |e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "refund-wait"),
+                |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "refund-wait"),
             )
             .count();
         assert_eq!(timer_sleep, 1, "定时闸门睡过一次");
@@ -1628,7 +1632,7 @@ mod tests {
                     "predictedAt": 0, // 过去 → sleep_until 立即放行
                 }))
                 .run_id("event:gate"),
-                Some(Arc::new(move |e: &RunEvent| {
+                Some(Arc::new(move |e: &WorkflowEvent| {
                     sink.lock().unwrap().push(e.clone())
                 })),
             )
@@ -1665,14 +1669,14 @@ mod tests {
         // emit 进 publisher 但不进日志。
         assert!(seen.lock().unwrap().iter().any(|e| matches!(
             e,
-            RunEvent::Custom { name, .. } if name == "gate-opened"
+            WorkflowEvent::Custom { name, .. } if name == "gate-opened"
         )));
         assert!(
             store
                 .get_events("event:gate")
                 .unwrap()
                 .iter()
-                .all(|e| !matches!(e, RunEvent::Custom { .. }))
+                .all(|e| !matches!(e, WorkflowEvent::Custom { .. }))
         );
     }
 
@@ -1731,7 +1735,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .filter(
-                    |e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "price-wait")
+                    |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "price-wait")
                 )
                 .count(),
             1,

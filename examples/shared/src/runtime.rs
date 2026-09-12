@@ -6,10 +6,10 @@
 
 use std::sync::Arc;
 
-use workflow_core::{RunEvent, RunOptions, RunOutcome, RunStore, Workflow, run_workflow};
+use workflow_core::{RunOptions, RunOutcome, RunStore, Workflow, WorkflowEvent, run_workflow};
 
 /// 可选的事件订阅者（每个 `ctx.step` 落盘事件都会回调）。
-pub type EventSubscriber = Arc<dyn Fn(&RunEvent) + Send + Sync>;
+pub type EventSubscriber = Arc<dyn Fn(&WorkflowEvent) + Send + Sync>;
 
 /// 把事件打到 tracing 的默认订阅者（`examples.runtime` target）。
 pub fn tracing_publisher() -> EventSubscriber {
@@ -74,10 +74,9 @@ mod tests {
     async fn wait_paused<S: RunStore + ?Sized>(store: &Arc<S>, run_id: &str, step_id: &str) {
         for _ in 0..2000 {
             let evs = store.get_events(run_id).unwrap();
-            if evs
-                .iter()
-                .any(|e| matches!(e, RunEvent::StepPaused { step_id: id, .. } if id == step_id))
-            {
+            if evs.iter().any(
+                |e| matches!(e, WorkflowEvent::StepPaused { step_id: id, .. } if id == step_id),
+            ) {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -85,10 +84,10 @@ mod tests {
         panic!("run {run_id} never paused at {step_id}");
     }
 
-    fn finished_count(events: &[RunEvent], step: &str) -> usize {
+    fn finished_count(events: &[WorkflowEvent], step: &str) -> usize {
         events
             .iter()
-            .filter(|e| matches!(e, RunEvent::StepFinished { step_id, .. } if step_id == step))
+            .filter(|e| matches!(e, WorkflowEvent::StepFinished { step_id, .. } if step_id == step))
             .count()
     }
 
@@ -118,7 +117,9 @@ mod tests {
         let scan_ts_1 = events_1
             .iter()
             .find_map(|e| match e {
-                RunEvent::StepFinished { step_id, ts, .. } if step_id == "scan-events" => Some(*ts),
+                WorkflowEvent::StepFinished { step_id, ts, .. } if step_id == "scan-events" => {
+                    Some(*ts)
+                }
                 _ => None,
             })
             .unwrap();
@@ -142,7 +143,7 @@ mod tests {
             events_2
                 .iter()
                 .find_map(|e| match e {
-                    RunEvent::StepFinished { step_id, ts, .. } if step_id == "scan-events" => {
+                    WorkflowEvent::StepFinished { step_id, ts, .. } if step_id == "scan-events" => {
                         Some(*ts)
                     }
                     _ => None,
@@ -182,10 +183,9 @@ mod tests {
         });
         for _ in 0..2000 {
             let evs = store.get_events("approve:r").unwrap();
-            if evs
-                .iter()
-                .any(|e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "review"))
-            {
+            if evs.iter().any(
+                |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "review"),
+            ) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -212,10 +212,9 @@ mod tests {
         });
         for _ in 0..2000 {
             let evs = store2.get_events("approve:r").unwrap();
-            if evs
-                .iter()
-                .any(|e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "review"))
-            {
+            if evs.iter().any(
+                |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "review"),
+            ) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -226,7 +225,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .filter(
-                    |e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "review")
+                    |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "review")
                 )
                 .count(),
             1,
@@ -246,11 +245,15 @@ mod tests {
         let events = store2b.get_events("approve:r").unwrap();
         let pauses = events
             .iter()
-            .filter(|e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "review"))
+            .filter(
+                |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "review"),
+            )
             .count();
         let resumes = events
             .iter()
-            .filter(|e| matches!(e, RunEvent::StepResume { step_id, .. } if step_id == "review"))
+            .filter(
+                |e| matches!(e, WorkflowEvent::StepResume { step_id, .. } if step_id == "review"),
+            )
             .count();
         assert_eq!(pauses, 1, "整个生命周期只应有一个 StepPaused");
         assert_eq!(resumes, 1);
@@ -308,7 +311,7 @@ mod tests {
             events
                 .iter()
                 .filter(|e| {
-                    matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "settle-due-1")
+                    matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "settle-due-1")
                 })
                 .count(),
             1,

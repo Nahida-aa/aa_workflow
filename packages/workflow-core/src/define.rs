@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::engine::EngineRuntime;
-use crate::event::{RunEvent, StepState};
+use crate::event::{StepState, WorkflowEvent};
 
 /// Boxed async step-returning future. Steps are spawned inside the engine's
 /// driver; the async world is the default (mirrors `Promise.all` in JS).
@@ -249,7 +249,7 @@ impl<In, St, Ext> BaseCtx<In, St, Ext> {
     /// log, so it is outside replay — `fold_step_states` and resume ignore it
     /// (mirrors TanStack's `emit` / `CUSTOM`).
     pub fn emit(&self, name: impl AsRef<str>, value: serde_json::Value) {
-        self.engine.publish(&RunEvent::Custom {
+        self.engine.publish(&WorkflowEvent::Custom {
             ts: crate::engine::now_ms(),
             run_id: self.run_id.clone(),
             name: name.as_ref().to_string(),
