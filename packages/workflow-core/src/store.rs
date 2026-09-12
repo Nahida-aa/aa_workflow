@@ -48,6 +48,15 @@ pub trait RunStore: Send + Sync {
     ) -> Result<(), StoreError>;
     fn get_events(&self, run_id: &str) -> Result<Vec<RunEvent>, StoreError>;
 
+    /// Cuts the log at `step_id`'s **latest terminal checkpoint** (inclusive):
+    /// that checkpoint and every later event are dropped, the prefix is kept.
+    /// Used by `continue_from` so a replayed handler re-executes the step's
+    /// suffix from scratch. A step with no terminal checkpoint leaves the log
+    /// untouched (there is nothing to cut — resume would re-run it anyway).
+    /// Stores that cannot truncate must reject this with
+    /// [`StoreError::Io`] rather than silently no-oping.
+    fn truncate_runs(&self, run_id: &str, step_id: &str) -> Result<(), StoreError>;
+
     /// Live subscription: a receiver that sees every future event appended to
     /// this run's log. `None` if the store does not support subscriptions.
     fn subscribe(&self, run_id: &str) -> Option<Receiver<RunEvent>> {
@@ -131,6 +140,23 @@ impl RunStore for InMemoryStore {
             .get(run_id)
             .cloned()
             .unwrap_or_default())
+    }
+
+    fn truncate_runs(&self, run_id: &str, step_id: &str) -> Result<(), StoreError> {
+        let mut inner = self.inner.lock().map_err(|e| StoreError::Io(e.to_string()))?;
+        let Some(log) = inner.logs.get_mut(run_id) else {
+            return Ok(());
+        };
+        // Latest terminal checkpoint for step_id (success or failure).
+        let cut = log.iter().rposition(|ev| match ev {
+            RunEvent::StepFinished { step_id: id, .. }
+            | RunEvent::StepFailed { step_id: id, .. } => id == step_id,
+            _ => false,
+        });
+        if let Some(i) = cut {
+            log.truncate(i); // drop event i and everything after it
+        }
+        Ok(())
     }
 
     fn subscribe(&self, run_id: &str) -> Option<Receiver<RunEvent>> {

@@ -1,23 +1,92 @@
-use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::error::WorkflowError;
+use crate::engine::DrvInner;
 use crate::event::StepState;
-use crate::scheduler::StepContext;
 
-/// The per-step execution function. Steps write artifacts to disk and read
-/// from the frozen input / other steps' outputs they depend on; the engine
-/// only cares about success/failure.
-pub type StepRunFn = Arc<dyn Fn(StepContext) -> anyhow::Result<Option<serde_json::Value>> + Send + Sync>;
-/// Per-run filter; `None` means "always enabled". This is the LocalDub
-/// `get_steps`-style selection carrier.
-pub type StepEnabledFn = Arc<dyn Fn(&StepContext) -> bool + Send + Sync>;
-/// Maps a run to the [`crate::resource::ResourceKey`] it holds while running.
-pub type StepResourceFn = Arc<dyn Fn(&StepContext) -> String + Send + Sync>;
-/// Make-style freshness check: `Ok(true)` means "already up to date, skip
-/// re-running". Mirrors LocalDub's mtime / pipeline-fingerprint staleness.
-pub type StepUpToDateFn = Arc<dyn Fn(&StepContext, &StepState) -> bool + Send + Sync>;
+/// Boxed async step-returning future. Steps are spawned inside the engine's
+/// driver; the async world is the default (mirrors `Promise.all` in JS).
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// The workflow's orchestrating closure: plain async control flow over
+/// `ctx.step` / `try_join!`. Decisions (branching, which steps run) are made
+/// by this code — the graph is an emergent, per-run artifact, never declared
+/// up front.
+pub type WorkflowHandler =
+    Arc<dyn Fn(WorkflowCtx) -> BoxFuture<'static, anyhow::Result<serde_json::Value>> + Send + Sync>;
+
+/// Per-invocation view handed step closures. Mirrors TanStack's `StepContext`.
+#[derive(Clone)]
+pub struct StepCtx {
+    pub(crate) inner: Arc<DrvInner>,
+    pub step_id: String,
+    pub attempt: usize,
+}
+
+impl StepCtx {
+    pub fn run_id(&self) -> &str {
+        &self.inner.run_id
+    }
+    pub fn input(&self) -> &serde_json::Value {
+        &self.inner.input
+    }
+    pub fn progress(&self, value: f64) {
+        self.inner.publish_progress(&self.step_id, value);
+    }
+}
+
+/// Anything the handler needs to run steps durably. Held for the whole
+/// handler execution; steps read their own context through [`StepCtx`].
+#[derive(Clone)]
+pub struct WorkflowCtx {
+    pub(crate) inner: Arc<DrvInner>,
+}
+
+impl WorkflowCtx {
+    pub fn run_id(&self) -> &str {
+        &self.inner.run_id
+    }
+
+    /// Returns the frozen run input.
+    pub fn input(&self) -> &serde_json::Value {
+        &self.inner.input
+    }
+
+    /// Runs `run` durably under `step_id`. On replay (resume) a previously
+    /// succeeded step short-circuits to its cached result *without* calling
+    /// `run` again; a previously failed step rethrows the stored error.
+    ///
+    /// The step closure is async so that concurrent steps compose via
+    /// `tokio::try_join!` — parallel durable execution, no custom primitive.
+    pub async fn step<F, Fut>(
+        &self,
+        step_id: &str,
+        run: F,
+    ) -> anyhow::Result<serde_json::Value>
+    where
+        F: FnOnce(StepCtx) -> Fut + Clone + Send + 'static,
+        Fut: Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static,
+    {
+        self.step_with(step_id, StepOptions::default(), run).await
+    }
+
+    /// [`step`](Self::step) with per-step options (retry policy, timeout,
+    /// resource gate, `up_to_date` make-check).
+    pub async fn step_with<F, Fut>(
+        &self,
+        step_id: &str,
+        opts: StepOptions,
+        run: F,
+    ) -> anyhow::Result<serde_json::Value>
+    where
+        F: FnOnce(StepCtx) -> Fut + Clone + Send + 'static,
+        Fut: Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static,
+    {
+        crate::engine::exec_step(&self.inner, step_id, &opts, run).await
+    }
+}
 
 /// Fixed | exponential | custom backoff. `attempt` is 1-based: after attempt
 /// #N fails, we wait `delay_ms(N)` before attempt N+1 (exponential: base * 2^(N-1)).
@@ -54,55 +123,27 @@ impl RetryPolicy {
     }
 }
 
-/// A single step in the workflow graph. Edges are the explicit `needs` list;
-/// if a `needs` step is filtered out by `enabled`, that edge is ignored (so a
-/// conditional dependency like LocalDub's asr↔separate_after just vanishes).
-#[derive(Clone)]
-pub struct StepSpec {
-    pub id: String,
+/// Per-step configuration. `retry`/`timeout`/`resource`/`up_to_date` are
+/// per-call-site options (v2), whereas TanStack passes them as inline
+/// `step(id, fn, opts)`. Everything here is orthogonal to the durable log.
+#[derive(Clone, Default)]
+pub struct StepOptions {
     pub label: Option<String>,
-    pub needs: Vec<String>,
-    pub enabled: Option<StepEnabledFn>,
-    pub resource: Option<StepResourceFn>,
     pub retry: Option<RetryPolicy>,
     pub timeout: Option<Duration>,
-    pub up_to_date: Option<StepUpToDateFn>,
-    pub run: StepRunFn,
+    /// Resource key this step contends on (e.g. `"gpu:0"`). Steps with the
+    /// same key are serialized (capacity-1 gate, sibling of a mutex).
+    pub resource: Option<String>,
+    /// Make-style freshness check against the *derived* step state. `Ok(true)`
+    /// while a successful checkpoint exists ⇒ the step short-circuits; if it
+    /// reports stale a step still re-executes on resume. Defaults to the
+    /// durable checkpoint only.
+    pub up_to_date: Option<Arc<dyn Fn(&StepCtx, &StepState) -> bool + Send + Sync>>,
 }
 
-impl StepSpec {
-    pub fn new(id: impl Into<String>, run: StepRunFn) -> Self {
-        Self {
-            id: id.into(),
-            label: None,
-            needs: Vec::new(),
-            enabled: None,
-            resource: None,
-            retry: None,
-            timeout: None,
-            up_to_date: None,
-            run,
-        }
-    }
-
-    pub fn label(mut self, label: impl Into<String>) -> Self {
-        self.label = Some(label.into());
-        self
-    }
-
-    pub fn needs(mut self, needs: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.needs = needs.into_iter().map(Into::into).collect();
-        self
-    }
-
-    pub fn enabled(mut self, enabled: impl Fn(&StepContext) -> bool + Send + Sync + 'static) -> Self {
-        self.enabled = Some(Arc::new(enabled));
-        self
-    }
-
-    pub fn resource(mut self, resource: impl Fn(&StepContext) -> String + Send + Sync + 'static) -> Self {
-        self.resource = Some(Arc::new(resource));
-        self
+impl StepOptions {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn retry(mut self, retry: RetryPolicy) -> Self {
@@ -115,24 +156,26 @@ impl StepSpec {
         self
     }
 
+    pub fn resource(mut self, resource: impl Into<String>) -> Self {
+        self.resource = Some(resource.into());
+        self
+    }
+
     pub fn up_to_date(
         mut self,
-        up_to_date: impl Fn(&StepContext, &StepState) -> bool + Send + Sync + 'static,
+        up_to_date: impl Fn(&StepCtx, &StepState) -> bool + Send + Sync + 'static,
     ) -> Self {
         self.up_to_date = Some(Arc::new(up_to_date));
         self
     }
 }
 
-/// A declared workflow: an immutable graph of [`StepSpec`]s plus an optional
-/// finalize step that derives the run output from the completed step states.
+/// A declared workflow: just an id, optional version, and the async handler.
 #[derive(Clone)]
 pub struct Workflow {
     pub id: String,
     pub version: Option<String>,
-    pub steps: Vec<StepSpec>,
-    pub finalize: Option<Arc<dyn Fn(&HashMap<String, StepState>) -> anyhow::Result<Option<serde_json::Value>> + Send + Sync>>,
-    validated: bool,
+    pub handler: WorkflowHandler,
 }
 
 impl Workflow {
@@ -140,9 +183,7 @@ impl Workflow {
         Self {
             id: id.into(),
             version: None,
-            steps: Vec::new(),
-            finalize: None,
-            validated: false,
+            handler: Arc::new(|_ctx: WorkflowCtx| Box::pin(async { Ok(serde_json::Value::Null) })),
         }
     }
 
@@ -151,84 +192,14 @@ impl Workflow {
         self
     }
 
-    pub fn step(mut self, spec: StepSpec) -> Self {
-        self.steps.push(spec);
+    /// Installs the orchestrating closure. Branching/parallelism/order are
+    /// plain async code; only durable side effects go through `ctx.step`.
+    pub fn handler<F, Fut>(mut self, handler: F) -> Self
+    where
+        F: Fn(WorkflowCtx) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static,
+    {
+        self.handler = Arc::new(move |ctx| Box::pin(handler(ctx)));
         self
-    }
-
-    pub fn finalize_with(
-        mut self,
-        f: impl Fn(&HashMap<String, StepState>) -> anyhow::Result<Option<serde_json::Value>> + Send + Sync + 'static,
-    ) -> Self {
-        self.finalize = Some(Arc::new(f));
-        self
-    }
-
-    /// Structural validation: unique ids, all `needs` reference known steps,
-    /// and the full graph is acyclic. Called at `run` time (and idempotent,
-    /// so safe to call defensively).
-    pub fn validate(&mut self) -> Result<(), WorkflowError> {
-        if self.validated {
-            return Ok(());
-        }
-        let mut ids: HashSet<&str> = HashSet::new();
-        for step in &self.steps {
-            if !ids.insert(step.id.as_str()) {
-                return Err(WorkflowError::Validation(format!(
-                    "duplicate step id `{}`",
-                    step.id
-                )));
-            }
-        }
-        for step in &self.steps {
-            for need in &step.needs {
-                if !ids.contains(need.as_str()) {
-                    return Err(WorkflowError::Validation(format!(
-                        "step `{}` needs unknown step `{}`",
-                        step.id, need
-                    )));
-                }
-            }
-        }
-        // Cycle detection via Kahn's algorithm over all edges.
-        let mut in_degree: HashMap<&str, usize> = ids.iter().map(|id| (*id, 0usize)).collect();
-        let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
-        for step in &self.steps {
-            for need in &step.needs {
-                in_degree.entry(step.id.as_str()).and_modify(|d| *d += 1);
-                dependents.entry(need.as_str()).or_default().push(step.id.as_str());
-            }
-        }
-        let mut queue: Vec<&str> = ids
-            .iter()
-            .filter(|id| in_degree[*id] == 0)
-            .copied()
-            .collect();
-        let mut visited = 0usize;
-        while let Some(id) = queue.pop() {
-            visited += 1;
-            if let Some(deps) = dependents.get(id) {
-                for d in deps {
-                    let deg = in_degree.entry(d).or_insert(0);
-                    *deg -= 1;
-                    if *deg == 0 {
-                        queue.push(d);
-                    }
-                }
-            }
-        }
-        if visited != ids.len() {
-            let cyclic: Vec<&str> = ids
-                .iter()
-                .filter(|id| in_degree[*id] > 0)
-                .copied()
-                .collect();
-            return Err(WorkflowError::Validation(format!(
-                "cycle detected involving steps: {}",
-                cyclic.join(", ")
-            )));
-        }
-        self.validated = true;
-        Ok(())
     }
 }

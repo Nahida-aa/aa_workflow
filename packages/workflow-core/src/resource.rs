@@ -1,22 +1,21 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// A named resource that nodes contend on (e.g. `"gpu:0"`, `"cpu"`,
-/// `"cloud"`, or `format!("gpu:{}", device_id)` derived from input params).
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+/// A named resource that steps contend on (e.g. `"gpu:0"`, `"cpu"`, `"cloud"`).
 pub type ResourceKey = String;
 
 #[derive(Default)]
 struct GateInner {
-    /// How many in-flight holders each key currently has.
-    in_use: HashMap<ResourceKey, usize>,
+    /// Per-key capacity-1 semaphore.
+    semaphores: HashMap<ResourceKey, Arc<Semaphore>>,
 }
 
-/// Capacity-1 semaphore per resource key, used to serialize nodes that share
-/// a physical resource (halving VRAM pressure in LocalDub).
-///
-/// `try_acquire` never blocks: the scheduler makes the dispatch decision
-/// synchronously, so busy resources just leave the step queued while other
-/// ready nodes are considered (avoiding head-of-line blocking).
+/// Per-key async semaphore, used to serialize steps that share a physical
+/// resource (halving VRAM pressure in LocalDub). `acquire` waits rather than
+/// failing, because in the code-as-DAG model the handler has nowhere to defer
+/// a contended step — it must either proceed or block.
 #[derive(Default)]
 pub struct Gate {
     inner: Mutex<GateInner>,
@@ -24,44 +23,32 @@ pub struct Gate {
 
 impl Gate {
     pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(GateInner {
-                in_use: HashMap::new(),
-            }),
-        }
+        Self::default()
     }
 
-    pub fn try_acquire(self: &Arc<Self>, key: &ResourceKey) -> Option<GateGuard> {
-        let mut inner = self.inner.lock().ok()?;
-        let count = inner.in_use.entry(key.clone()).or_insert(0);
-        if *count >= 1 {
-            return None;
-        }
-        *count += 1;
-        Some(GateGuard {
-            gate: self.clone(),
-            key: key.clone(),
+    fn semaphore(&self, key: &ResourceKey) -> Arc<Semaphore> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.semaphores.get(key).cloned().unwrap_or_else(|| {
+            let sem = Arc::new(Semaphore::new(1));
+            inner.semaphores.insert(key.clone(), sem.clone());
+            sem
         })
     }
-}
 
-/// Holds one unit of a resource for the lifetime of a running step. Released
-/// on drop (before the worker signals completion, so dependents can start as
-/// soon as the step finishes).
-pub struct GateGuard {
-    gate: Arc<Gate>,
-    key: ResourceKey,
-}
-
-impl Drop for GateGuard {
-    fn drop(&mut self) {
-        if let Ok(mut inner) = self.gate.inner.lock() {
-            if let Some(count) = inner.in_use.get_mut(&self.key) {
-                *count -= 1;
-                if *count == 0 {
-                    inner.in_use.remove(&self.key);
-                }
-            }
-        }
+    /// Async acquire of one unit for `key`, waiting until the previous holder
+    /// releases. The returned [`GateGuard`] (one permit) is released on drop,
+    /// before the step's checkpoint is appended.
+    pub async fn acquire(self: &Arc<Self>, key: &ResourceKey) -> GateGuard {
+        let sem = self.semaphore(key);
+        let permit = sem
+            .acquire_owned()
+            .await
+            .unwrap_or_else(|_| unreachable!("resource semaphore is never closed"));
+        GateGuard { _permit: permit }
     }
+}
+
+/// Holds one unit of a resource until dropped.
+pub struct GateGuard {
+    _permit: OwnedSemaphorePermit,
 }
