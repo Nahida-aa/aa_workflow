@@ -73,6 +73,13 @@
    （等待而不是"并发守恒"）。对齐"同一把锁"的直觉，先到先跑。
 4. **`up_to_date`（make 式 freshness）**：成功 checkpoint 存在但 make-check 报
    stale 时仍重新执行——TanStack 没有这个钩子，是续跑定语的本地扩展。
+5. **signals / pause**：TanStack 用 `ctx.approve` + `__timer`（sleep）内建；
+   我们按同一语义落地：`ctx.approve(key, reason)` / `ctx.sleep(key, dur)` 在
+   handler 内挂起，引擎持久化 `STEP_PAUSED` checkpoint（`due_at` 供 timer
+   host），外部 `signal_run(run_id, step_id, payload)` 追加 `STEP_RESUME`
+   唤醒（approvals），sleep 到期由引擎自 deliver。等待方是轮询式
+   （25ms 重读日志），因为 LocalDub `FsRunStore` 无 `subscribe`；重放时
+   已交付的 `STEP_RESUME` 从日志短路，挂起点幂等（绝无重复 append）。
 
 ## 换了模型仍没变的硬设计
 
