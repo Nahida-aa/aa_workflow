@@ -72,6 +72,30 @@ impl WorkflowCtx {
         self.step_with(step_id, StepOptions::default(), run).await
     }
 
+    /// Durable approval wait: pauses the run until [`signal_run`](crate::engine::signal_run)
+    /// delivers a decision for `key`. `reason` is persisted in the `StepPaused`
+    /// checkpoint for approvers. Resolves to the signal's payload on success;
+    /// on replay the already-recorded `StepResume` is served from the log.
+    pub async fn approve(
+        &self,
+        key: impl Into<String>,
+        reason: impl AsRef<str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        crate::engine::exec_pause(&self.inner, &key.into(), reason.as_ref(), None).await
+    }
+
+    /// Durable sleep: pauses the run until `dur` elapses. `key` is the
+    /// deterministic pause identity; the engine auto-delivers the resume via
+    /// [`signal_run`](crate::engine::signal_run) when the timer fires. On replay
+    /// a previously delivered resume short-circuits immediately.
+    pub async fn sleep(
+        &self,
+        key: impl Into<String>,
+        dur: std::time::Duration,
+    ) -> anyhow::Result<serde_json::Value> {
+        crate::engine::exec_pause(&self.inner, &key.into(), "sleep", Some(dur)).await
+    }
+
     /// [`step`](Self::step) with per-step options (retry policy, timeout,
     /// resource gate, `up_to_date` make-check).
     pub async fn step_with<F, Fut>(

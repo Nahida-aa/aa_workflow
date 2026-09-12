@@ -1,7 +1,8 @@
 //! Host 无关的薄壳辅助：把 start / resume / `continue_from` 收成一个驱动入口
-//! （对齐 TanStack `runtime.ts` 的位置，但只做现有引擎的能力）。
-//!
-//! signals / `__timer` 唤醒等要等引擎补了 pause 语义再进来。
+//! （对齐 TanStack `runtime.ts` 的位置）。signals / pause 由引擎的
+//! [`ApprovalCtx`](workflow_core::define::WorkflowCtx::approve) +
+//! [`signal_run`](workflow_core::signal_run) 承担；示例 workflow 见
+//! [`approval_review`](crate::workflows::approval_review)。
 
 use std::sync::Arc;
 
@@ -60,7 +61,8 @@ pub async fn drive(
 mod tests {
     use super::*;
     use crate::file_run_store::FileRunStore;
-    use crate::workflows::email_digest;
+    use crate::workflows::{approval_review, email_digest};
+    use std::time::Duration;
     use workflow_core::RunStatus;
 
     #[tokio::test]
@@ -129,6 +131,102 @@ mod tests {
             scan_ts_1,
             "resume 后 scan-events 的 checkpoint 未被触碰"
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn file_store_pause_survives_restart() {
+        // 落盘目录放仓库内 tmp/（约定：测试不用系统 /tmp）
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tmp")
+            .join(format!("approve_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let store: Arc<dyn RunStore> = Arc::new(FileRunStore::new(&base));
+        let wf = crate::workflows::approval_review();
+
+        // 进程 A：跑到 approve 等待点后"崩溃"（abort，不写终态）
+        let store2 = store.clone();
+        let wf2 = wf.clone();
+        let t1 = tokio::spawn(async move {
+            drive(
+                &wf2,
+                store2,
+                serde_json::json!({}),
+                DriveOpts {
+                    run_id: Some("approve:r"),
+                    ..DriveOpts::default()
+                },
+            )
+            .await
+        });
+        for _ in 0..2000 {
+            let evs = store.get_events("approve:r").unwrap();
+            if evs
+                .iter()
+                .any(|e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "review"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        t1.abort();
+        let _ = t1.await;
+
+        // 进程 B：全新 FileRunStore 打开同一 base 续跑 → 不重复挂起等待点
+        let store2: Arc<dyn RunStore> = Arc::new(FileRunStore::new(&base));
+        let store2_spawn = store2.clone();
+        let wf2 = wf.clone();
+        let t2 = tokio::spawn(async move {
+            drive(
+                &wf2,
+                store2_spawn.clone(),
+                serde_json::json!({}),
+                DriveOpts {
+                    run_id: Some("approve:r"),
+                    ..DriveOpts::default()
+                },
+            )
+            .await
+            .map(|out| (out, store2_spawn))
+        });
+        for _ in 0..2000 {
+            let evs = store2.get_events("approve:r").unwrap();
+            if evs
+                .iter()
+                .any(|e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "review"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            store2
+                .get_events("approve:r")
+                .unwrap()
+                .iter()
+                .filter(|e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "review"))
+                .count(),
+            1,
+            "进程 B 不能重复 append StepPaused"
+        );
+
+        workflow_core::signal_run(store2.as_ref(), "approve:r", "review", serde_json::json!({ "ok": true }))
+            .unwrap();
+        let (out, store2b) = t2.await.unwrap().unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        assert_eq!(out.output, Some(serde_json::json!({ "ok": true })));
+        let events = store2b.get_events("approve:r").unwrap();
+        let pauses = events
+            .iter()
+            .filter(|e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "review"))
+            .count();
+        let resumes = events
+            .iter()
+            .filter(|e| matches!(e, RunEvent::StepResume { step_id, .. } if step_id == "review"))
+            .count();
+        assert_eq!(pauses, 1, "整个生命周期只应有一个 StepPaused");
+        assert_eq!(resumes, 1);
 
         let _ = std::fs::remove_dir_all(&base);
     }

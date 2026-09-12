@@ -3,6 +3,8 @@
 //! - [`fulfillment_saga`] — 并行（`tokio::try_join!`）+ retry（脆弱的外部支付）+ 分支：
 //!   演示 authoring 面；外部依赖通过 [`Deps`] 注入，测试可控。
 //! - [`email_digest`] — 简单三步链：resume / `continue_from` 的行为载体。
+//! - [`approval_review`] — 人工审批：`ctx.approve` 持久化一个等待点，
+//!   外部用 [`workflow_core::signal_run`] 交付决定后继续（signals 语义载体）。
 
 use std::sync::Arc;
 
@@ -147,12 +149,45 @@ pub fn email_digest() -> Workflow {
     })
 }
 
+/// 人工审批流：`draft` → `review`（`ctx.approve` 挂起，等外部决定）→ `publish`。
+/// 审批决定（signal 的 payload）就是 `approve` 的返回值，最后作为 run 输出。
+pub fn approval_review() -> Workflow {
+    Workflow::new("approval-review").handler(|ctx: WorkflowCtx| {
+        async move {
+            ctx.step("draft", move |_sc: StepCtx| {
+                async move {
+                    tracing::info!(target: "examples", "draft the proposal");
+                    Ok(serde_json::json!({ "draft": true }))
+                }
+            })
+            .await?;
+
+            let decision = ctx
+                .approve("review", "这份提案是否放行发布？")
+                .await?;
+            let decision_out = decision.clone();
+
+            ctx.step("publish", move |_sc: StepCtx| {
+                let decision = decision.clone();
+                async move {
+                    tracing::info!(target: "examples", "publish with decision");
+                    Ok(decision.clone())
+                }
+            })
+            .await?;
+
+            Ok(decision_out)
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
     use workflow_core::{
-        run_workflow, InMemoryStore, RunEvent, RunOptions, RunStatus, RunStore,
+        run_workflow, signal_run, InMemoryStore, RunEvent, RunOptions, RunStatus, RunStore,
     };
 
     fn finished_count(events: &[RunEvent], step: &str) -> usize {
@@ -335,5 +370,60 @@ mod tests {
         assert_eq!(sf_ts(&events_3, "scan-events"), scan_ts_1, "scan-events 不重跑");
         assert_eq!(finished_count(&events_3, "render"), 1, "render 重记一条新终态");
         assert_eq!(finished_count(&events_3, "send"), 1);
+    }
+
+    #[tokio::test]
+    async fn approval_pauses_until_signal_then_publishes() {
+        let store = Arc::new(InMemoryStore::new());
+        let wf = approval_review();
+
+        let store2 = store.clone();
+        let wf2 = wf.clone();
+        let task = tokio::spawn(async move {
+            run_workflow(
+                &wf2,
+                store2,
+                &RunOptions::new(serde_json::json!({})).run_id("approve:r"),
+                None,
+            )
+            .await
+        });
+
+        for _ in 0..2000 {
+            let evs = store.get_events("approve:r").unwrap();
+            if evs
+                .iter()
+                .any(|e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "review"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            store.get_run_state("approve:r").unwrap().unwrap().status,
+            RunStatus::Paused,
+            "挂起时 run 状态应为 Paused"
+        );
+
+        signal_run(store.as_ref(), "approve:r", "review", serde_json::json!({ "ok": true })).unwrap();
+        let out = task.await.unwrap().unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        assert_eq!(out.output, Some(serde_json::json!({ "ok": true })));
+
+        let evs = store.get_events("approve:r").unwrap();
+        assert_eq!(finished_count(&evs, "draft"), 1);
+        assert_eq!(finished_count(&evs, "publish"), 1);
+        assert_eq!(
+            evs.iter()
+                .filter(|e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "review"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            evs.iter()
+                .filter(|e| matches!(e, RunEvent::StepResume { step_id, .. } if step_id == "review"))
+                .count(),
+            1
+        );
     }
 }

@@ -10,6 +10,9 @@ pub enum RunStatus {
     Finished,
     Errored,
     Aborted,
+    /// The run is parked at a durable wait point (`StepPaused`), e.g. an
+    /// approval or a sleep; it resumes when a `StepResume` arrives.
+    Paused,
 }
 
 /// Per-step lifecycle status, derived from the event log via
@@ -23,6 +26,9 @@ pub enum StepStatus {
     Running,
     Success,
     Failed,
+    /// Derived from a `StepPaused` checkpoint: the step is parked at a durable
+    /// wait (approval / sleep) until a matching `StepResume` arrives.
+    Paused,
 }
 
 /// A single execution attempt of one step (used for retry bookkeeping).
@@ -66,6 +72,28 @@ pub enum RunEvent {
         error: String,
         attempts: Vec<StepAttempt>,
     },
+    /// Checkpoint (persisted): the run parked at a durable wait point
+    /// (`ctx.approve` / `ctx.sleep`). `step_id` is the deterministic pause
+    /// key (== the signal id [`signal_run`](crate::engine::signal_run) targets);
+    /// `due_at` is `Some` (wall-clock ms) for sleeps so a timer host could
+    /// auto-deliver, `None` for approvals that need an external decision.
+    StepPaused {
+        ts: i64,
+        run_id: String,
+        step_id: String,
+        due_at: Option<i64>,
+        reason: String,
+    },
+    /// Checkpoint (persisted): a signal was delivered for a paused run
+    /// (see [`signal_run`](crate::engine::signal_run)). Resolves the pending
+    /// `StepPaused` with the same `step_id`; `payload` is what the
+    /// `approve`/`sleep` call returns.
+    StepResume {
+        ts: i64,
+        run_id: String,
+        step_id: String,
+        payload: Option<serde_json::Value>,
+    },
     /// Observability only (not persisted): 0.0..=1.0 progress signal.
     StepProgress { ts: i64, run_id: String, step_id: String, value: f64 },
 }
@@ -77,6 +105,8 @@ impl RunEvent {
             RunEvent::StepStarted { step_id, .. }
             | RunEvent::StepFinished { step_id, .. }
             | RunEvent::StepFailed { step_id, .. }
+            | RunEvent::StepPaused { step_id, .. }
+            | RunEvent::StepResume { step_id, .. }
             | RunEvent::StepProgress { step_id, .. } => Some(step_id),
         }
     }
@@ -118,6 +148,18 @@ pub fn fold_step_states(events: &[RunEvent]) -> HashMap<String, StepState> {
                 st.status = StepStatus::Failed;
                 st.error = Some(error.clone());
                 st.finished_at = Some(*ts);
+            }
+            RunEvent::StepPaused { step_id, ts, due_at, .. } => {
+                let st = states.entry(step_id.clone()).or_default();
+                st.status = StepStatus::Paused;
+                st.started_at = st.started_at.or(Some(*ts));
+                st.finished_at = due_at.or(st.finished_at);
+            }
+            RunEvent::StepResume { step_id, payload, .. } => {
+                // A delivered signal exposes its payload as the paused step's
+                // derived result; the step stays `Paused` in the projection.
+                let st = states.entry(step_id.clone()).or_default();
+                st.result = payload.clone();
             }
             _ => {}
         }
