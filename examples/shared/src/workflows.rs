@@ -28,8 +28,8 @@
 
 use std::time::Duration;
 use workflow_core::{
-    create_workflow, Backoff, BaseCtx, CreateWorkflowConfig, RetryPolicy, StepCtx, StepOptions,
-    Workflow, WorkflowCtx, WorkflowDefinition,
+    Backoff, BaseCtx, CreateWorkflowConfig, RetryPolicy, StepCtx, StepOptions, Workflow,
+    WorkflowCtx, WorkflowDefinition, create_workflow,
 };
 
 // ========================================================================
@@ -227,8 +227,8 @@ pub fn fulfillment_saga() -> WorkflowDefinition<FulfillmentSagaInput, serde_json
 /// 邮件 digest：`scan-events` → `render` → `send` 三步链。
 /// 本身无并行/分支，专门用来演示 resume 与 `continue_from` 的检查点行为。
 pub fn email_digest() -> WorkflowDefinition<EmailDigestInput, serde_json::Value> {
-    create_workflow(CreateWorkflowConfig::new("email-digest").input::<EmailDigestInput>())
-        .handler(move |ctx: BaseCtx<EmailDigestInput>| async move {
+    create_workflow(CreateWorkflowConfig::new("email-digest").input::<EmailDigestInput>()).handler(
+        move |ctx: BaseCtx<EmailDigestInput>| async move {
             let days = ctx.input.days;
 
             let scanned = ctx
@@ -261,7 +261,8 @@ pub fn email_digest() -> WorkflowDefinition<EmailDigestInput, serde_json::Value>
                 .await?;
 
             Ok(serde_json::json!({ "days": days, "sent": sent }))
-        })
+        },
+    )
 }
 
 /// 人工审批流：`draft` → `review`（`ctx.approve` 挂起，等外部决定）→ `publish`。
@@ -301,8 +302,8 @@ fn now_ms() -> i64 {
 /// `reserve-inventory` → 若 `readyAt` 在未来先 `sleep` 闸门 → 等
 /// `payment-received` 事件 → `ship-order`。
 pub fn fulfillment() -> WorkflowDefinition<FulfillmentInput, serde_json::Value> {
-    create_workflow(CreateWorkflowConfig::new("fulfillment").input::<FulfillmentInput>())
-        .handler(|ctx: BaseCtx<FulfillmentInput>| async move {
+    create_workflow(CreateWorkflowConfig::new("fulfillment").input::<FulfillmentInput>()).handler(
+        |ctx: BaseCtx<FulfillmentInput>| async move {
             let input = &ctx.input;
             let order_id = input.order_id.clone();
             let ready_at = input.ready_at;
@@ -351,7 +352,8 @@ pub fn fulfillment() -> WorkflowDefinition<FulfillmentInput, serde_json::Value> 
                 "payment": payment,
                 "shipment": shipment,
             }))
-        })
+        },
+    )
 }
 
 const APPROVAL_THRESHOLD: i64 = 1_000;
@@ -427,8 +429,8 @@ pub fn approval_order() -> WorkflowDefinition<ApprovalOrderInput, serde_json::Va
 /// 发票（对齐 wf-demo `invoice`）：`prepare-invoice` → 连续两个 `sleep`
 /// （双定时器等待，引擎内自动唤醒）→ `settle-invoice`。
 pub fn invoice() -> WorkflowDefinition<InvoiceInput, serde_json::Value> {
-    create_workflow(CreateWorkflowConfig::new("invoice").input::<InvoiceInput>())
-        .handler(|ctx: BaseCtx<InvoiceInput>| async move {
+    create_workflow(CreateWorkflowConfig::new("invoice").input::<InvoiceInput>()).handler(
+        |ctx: BaseCtx<InvoiceInput>| async move {
             let input = &ctx.input;
             let order_id = input.order_id.clone();
             let t1 = input.t1;
@@ -459,14 +461,15 @@ pub fn invoice() -> WorkflowDefinition<InvoiceInput, serde_json::Value> {
                 "settled": true,
                 "settledAt": now_ms(),
             }))
-        })
+        },
+    )
 }
 
 /// 合规归档（对齐 wf-demo `compliance`）：连续两次事件等待
 /// （`legal-review-done` → `compliance-signed`）→ `archive-record`。
 pub fn compliance() -> WorkflowDefinition<ComplianceInput, serde_json::Value> {
-    create_workflow(CreateWorkflowConfig::new("compliance").input::<ComplianceInput>())
-        .handler(|ctx: BaseCtx<ComplianceInput>| async move {
+    create_workflow(CreateWorkflowConfig::new("compliance").input::<ComplianceInput>()).handler(
+        |ctx: BaseCtx<ComplianceInput>| async move {
             let subject_id = ctx.input.subject_id.clone();
 
             ctx.approve("legal-review", "waiting for legal-review-done")
@@ -492,14 +495,15 @@ pub fn compliance() -> WorkflowDefinition<ComplianceInput, serde_json::Value> {
                 "archived": true,
                 "record": record,
             }))
-        })
+        },
+    )
 }
 
 /// 退款（对齐 wf-demo `refund`）混合链：`chargeback-filed` 事件 → 定时闸门 → 审批
 /// （拒绝走 `declined`，无 disburse step）→ `disburse-refund`。
 pub fn refund() -> WorkflowDefinition<RefundInput, serde_json::Value> {
-    create_workflow(CreateWorkflowConfig::new("refund").input::<RefundInput>())
-        .handler(|ctx: BaseCtx<RefundInput>| async move {
+    create_workflow(CreateWorkflowConfig::new("refund").input::<RefundInput>()).handler(
+        |ctx: BaseCtx<RefundInput>| async move {
             let input = &ctx.input;
             let order_id = input.order_id.clone();
             let amount = input.amount;
@@ -549,7 +553,8 @@ pub fn refund() -> WorkflowDefinition<RefundInput, serde_json::Value> {
                 "amount": amount,
                 "currency": currency,
             }))
-        })
+        },
+    )
 }
 
 /// 状态机 demo 输入。
@@ -587,7 +592,8 @@ pub fn state_demo() -> WorkflowDefinition<StateDemoInput, serde_json::Value, Cou
                 }))
             }),
     )
-    .handler(|mut ctx: BaseCtx<StateDemoInput, CounterState>| async move {
+    .handler(
+        |mut ctx: BaseCtx<StateDemoInput, CounterState>| async move {
             let order_id = ctx.input.order_id.clone();
             let amount = ctx.input.amount;
 
@@ -618,7 +624,8 @@ pub fn state_demo() -> WorkflowDefinition<StateDemoInput, serde_json::Value, Cou
                 "preparedAt": prepared["preparedAt"],
                 "settled": true,
             }))
-        })
+        },
+    )
 }
 
 /// 事件闸门 demo（对齐 TanStack `waitForEvent` / `sleepUntil` / `emit`）：
@@ -633,8 +640,8 @@ pub struct EventGateInput {
 }
 
 pub fn event_gate() -> WorkflowDefinition<EventGateInput, serde_json::Value> {
-    create_workflow(CreateWorkflowConfig::new("event-gate").input::<EventGateInput>())
-        .handler(|ctx: BaseCtx<EventGateInput>| async move {
+    create_workflow(CreateWorkflowConfig::new("event-gate").input::<EventGateInput>()).handler(
+        |ctx: BaseCtx<EventGateInput>| async move {
             let market = ctx.input.market.clone();
             let predicted_at = ctx.input.predicted_at;
 
@@ -661,7 +668,8 @@ pub fn event_gate() -> WorkflowDefinition<EventGateInput, serde_json::Value> {
                 "settlement": settlement,
                 "finalized": true,
             }))
-        })
+        },
+    )
 }
 
 #[cfg(test)]
@@ -1233,8 +1241,7 @@ mod tests {
     /// output schema 声明）。
     #[test]
     fn typed_workflow_keeps_static_types() {
-        let _saga: WorkflowDefinition<FulfillmentSagaInput, serde_json::Value> =
-            fulfillment_saga();
+        let _saga: WorkflowDefinition<FulfillmentSagaInput, serde_json::Value> = fulfillment_saga();
         let _wf: WorkflowDefinition<FulfillmentInput, serde_json::Value> = fulfillment();
     }
 

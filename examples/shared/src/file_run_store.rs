@@ -14,8 +14,8 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use workflow_core::{RunEvent, RunState, RunStore, StoreError};
 
@@ -106,7 +106,10 @@ impl RunStore for FileRunStore {
     }
 
     fn delete_run(&self, run_id: &str) -> Result<(), StoreError> {
-        let _guard = self.lock.lock().map_err(|e| StoreError::Io(e.to_string()))?;
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|e| StoreError::Io(e.to_string()))?;
         match fs::remove_dir_all(self.run_dir(run_id)) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -124,7 +127,10 @@ impl RunStore for FileRunStore {
         expected_next_index: usize,
         event: &RunEvent,
     ) -> Result<(), StoreError> {
-        let _guard = self.lock.lock().map_err(|e| StoreError::Io(e.to_string()))?;
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|e| StoreError::Io(e.to_string()))?;
         let events = self.read_events(run_id)?;
         let actual = events.len();
         if actual != expected_next_index {
@@ -158,17 +164,17 @@ impl RunStore for FileRunStore {
     }
 
     fn truncate_runs(&self, run_id: &str, step_id: &str) -> Result<(), StoreError> {
-        let _guard = self.lock.lock().map_err(|e| StoreError::Io(e.to_string()))?;
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|e| StoreError::Io(e.to_string()))?;
         let events = self.read_events(run_id)?;
         // 对齐 InMemoryStore：裁到 step_id 最新终态 checkpoint（含）之前的保留。
-        let Some(cut) = events
-            .iter()
-            .rposition(|ev| match ev {
-                RunEvent::StepFinished { step_id: id, .. }
-                | RunEvent::StepFailed { step_id: id, .. } => id == step_id,
-                _ => false,
-            })
-        else {
+        let Some(cut) = events.iter().rposition(|ev| match ev {
+            RunEvent::StepFinished { step_id: id, .. }
+            | RunEvent::StepFailed { step_id: id, .. } => id == step_id,
+            _ => false,
+        }) else {
             return Ok(());
         };
         let mut out = String::new();
@@ -200,10 +206,8 @@ mod tests {
     use workflow_core::RunStatus;
 
     fn temp_base(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "wf_examples_store_{name}_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("wf_examples_store_{name}_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
     }
@@ -246,10 +250,16 @@ mod tests {
         assert_eq!(reloaded.run_id, "r1");
 
         store.append_event("r1", 0, &finished("r1", "a")).unwrap();
-        let err = store.append_event("r1", 0, &finished("r1", "b")).unwrap_err();
+        let err = store
+            .append_event("r1", 0, &finished("r1", "b"))
+            .unwrap_err();
         assert!(matches!(
             err,
-            StoreError::Conflict { expected: 0, actual: 1, .. }
+            StoreError::Conflict {
+                expected: 0,
+                actual: 1,
+                ..
+            }
         ));
 
         // 新实例重开同一 base 应看到之前的日志（模拟进程重启）
@@ -266,7 +276,9 @@ mod tests {
         let base = temp_base("trunc");
         let store = FileRunStore::new(&base);
         for (idx, step) in ["a", "b", "c"].iter().enumerate() {
-            store.append_event("r1", idx, &finished("r1", step)).unwrap();
+            store
+                .append_event("r1", idx, &finished("r1", step))
+                .unwrap();
         }
         store.truncate_runs("r1", "b").unwrap();
         let evs = store.get_events("r1").unwrap();
@@ -285,12 +297,8 @@ mod tests {
         let base = temp_base("sub");
         let store = FileRunStore::new(&base);
         let rx = store.subscribe("r1").expect("subscribe 应支持");
-        store
-            .append_event("r1", 0, &finished("r1", "a"))
-            .unwrap();
-        store
-            .append_event("r1", 1, &finished("r1", "b"))
-            .unwrap();
+        store.append_event("r1", 0, &finished("r1", "a")).unwrap();
+        store.append_event("r1", 1, &finished("r1", "b")).unwrap();
         let got: Vec<_> = rx.try_iter().collect();
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].step_id(), Some("a"));

@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use workflow_core::{run_workflow, RunEvent, RunOptions, RunOutcome, RunStore, Workflow};
+use workflow_core::{RunEvent, RunOptions, RunOutcome, RunStore, Workflow, run_workflow};
 
 /// 可选的事件订阅者（每个 `ctx.step` 落盘事件都会回调）。
 pub type EventSubscriber = Arc<dyn Fn(&RunEvent) + Send + Sync>;
@@ -52,9 +52,14 @@ pub async fn drive(
     input: serde_json::Value,
     opts: DriveOpts<'_>,
 ) -> anyhow::Result<RunOutcome> {
-    run_workflow(workflow, store, &opts.into_run_options(input), opts.publisher)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    run_workflow(
+        workflow,
+        store,
+        &opts.into_run_options(input),
+        opts.publisher,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 #[cfg(test)]
@@ -69,9 +74,10 @@ mod tests {
     async fn wait_paused<S: RunStore + ?Sized>(store: &Arc<S>, run_id: &str, step_id: &str) {
         for _ in 0..2000 {
             let evs = store.get_events(run_id).unwrap();
-            if evs.iter().any(|e| {
-                matches!(e, RunEvent::StepPaused { step_id: id, .. } if id == step_id)
-            }) {
+            if evs
+                .iter()
+                .any(|e| matches!(e, RunEvent::StepPaused { step_id: id, .. } if id == step_id))
+            {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -88,10 +94,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_store_survives_restart_and_resume() {
-        let base = std::env::temp_dir().join(format!(
-            "wf_examples_runtime_{}",
-            std::process::id()
-        ));
+        let base = std::env::temp_dir().join(format!("wf_examples_runtime_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let wf = email_digest();
         let input = serde_json::json!({ "days": 7 });
@@ -115,9 +118,7 @@ mod tests {
         let scan_ts_1 = events_1
             .iter()
             .find_map(|e| match e {
-                RunEvent::StepFinished { step_id, ts, .. } if step_id == "scan-events" => {
-                    Some(*ts)
-                }
+                RunEvent::StepFinished { step_id, ts, .. } if step_id == "scan-events" => Some(*ts),
                 _ => None,
             })
             .unwrap();
@@ -141,9 +142,7 @@ mod tests {
             events_2
                 .iter()
                 .find_map(|e| match e {
-                    RunEvent::StepFinished { step_id, ts, .. }
-                        if step_id == "scan-events" =>
-                    {
+                    RunEvent::StepFinished { step_id, ts, .. } if step_id == "scan-events" => {
                         Some(*ts)
                     }
                     _ => None,
@@ -226,14 +225,21 @@ mod tests {
                 .get_events("approve:r")
                 .unwrap()
                 .iter()
-                .filter(|e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "review"))
+                .filter(
+                    |e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "review")
+                )
                 .count(),
             1,
             "进程 B 不能重复 append StepPaused"
         );
 
-        workflow_core::signal_run(store2.as_ref(), "approve:r", "review", serde_json::json!({ "ok": true }))
-            .unwrap();
+        workflow_core::signal_run(
+            store2.as_ref(),
+            "approve:r",
+            "review",
+            serde_json::json!({ "ok": true }),
+        )
+        .unwrap();
         let (out, store2b) = t2.await.unwrap().unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output, Some(serde_json::json!({ "ok": true })));
