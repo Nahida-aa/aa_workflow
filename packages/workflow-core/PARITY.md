@@ -1,0 +1,80 @@
+# BaseCtx API 对等矩阵（aa-workflow Rust 端口 ↔ TanStack workflow-core）
+
+对照真源：`learn_ls/workflow/packages/workflow-core/src/types.ts`（BaseCtx /
+StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunOptions.runtime）。
+本矩阵只覆盖 **ctx 层 API 对等**；引擎内部（checkpoint 日志、replay、run.json）
+的对等由各自文档描述，不在本表。
+
+图例：✅ 完全对等（含语义） · ◐ 对等但有命名/签名差异 · ◯ 部分实现 · ✖ 未实现
+
+## ctx（handler 参数）
+
+| TanStack BaseCtx | Rust（WorkflowCtx / TypedCtx） | 状态 | 备注 |
+| ---------------- | ------------------------------ | ---- | ---- |
+| `runId: string` | `run_id()` | ✅ | |
+| `input: TInput` | `input()` → `&Value` / `&In`（typed） | ✅ | |
+| `state: TState` | `state_value()` / `state<T>()` / `set_state<T>()` | ✅ | Rust 用显式读/写/类型化访问器替代 `ctx.state` 属性直接读写 |
+| `signal: AbortSignal`（run 级） | `is_cancelled()` | ◐ | 语义等价：取消信号可被动查询。差异：(1) 无法注册 `signal.addEventListener`（Rust 无该机制，需轮询）；(2) 引擎在 step 边界才检查——**step 闭包内的 `await` 无法被中断**，与 JS AbortSignal 同粒度但 Rust 侧无法「中止 promise」，闭包必须协作式自检（见下） |
+| `runtime: WorkflowRuntimeContext` | `deadline() / time_remaining() / should_yield() / yield_()` | ◐ | TS 是嵌套对象；Rust **拍平为 ctx 顶层方法**。`yield` 是 Rust 保留字 → 命名 `yield_` |
+| `runtime.deadline?: number` | `deadline() -> Option<i64>` | ✅ | 无 deadline 时 TS 为 `undefined`，Rust 为 `None` |
+| `runtime.timeRemaining()` | `time_remaining() -> u64` | ✅ | 无 deadline：TS `Infinity`，Rust `u64::MAX`（外部可见均为「无限」，值不同） |
+| `runtime.shouldYield(minRemainingMs?)` | `should_yield()` | ◐ | TS 支持按调用传 `minRemainingMs` 覆盖；Rust 只有 RunOptions 级默认值，不支持逐调用覆盖 |
+| `runtime.yield(options?)` | `yield_()` | ◐ | 行为对等：park 在 `"__timer"` 直到 `yieldResumeAt`（缺省 now+1ms）。差异：TS 可传 `id`/`reason`；Rust 自动派生 `__yield-{n}` key，无 reason。缺省 1ms 会经 timer 轮询 tick（25ms）后放行，实际≈25-50ms |
+| `step(id, fn, options?)` | `step(id, f)` / `step_with(id, f, StepOptions)` | ✅ | |
+| `sleep(ms, options?)` | `sleep(key, ms)` | ◐ | TS `id` 可选；Rust key **必填**（确定性/可重入之需） |
+| `sleepUntil(timestamp, options?)` | `sleep_until(key, ts_ms)` | ◐ | 同上；过去时间戳立即放行，二者一致 |
+| `waitForEvent(name, options?)` | `wait_for_event(key, name)` | ◐ | TS `id` 可选；Rust key 必填（同名事件多次 wait 需区分 checkpoint） |
+| `approve({id,title,description})` | `approve(key, title)` | ◐ | 对象参数 → 位置参数；TS 有 `description`，Rust 暂无（后续补 `Ok`/`Err` 语义已具备） |
+| `now()` | `now() -> Result<i64>` | ◐ | 返回值锁定为**确定性 checkpoint**（`NowRecorded`），跨 resume 一致 —— 语义强于 TS 的 per-run engine counter；仅在 store 失败时 Err |
+| `uuid()` | `uuid() -> Result<String>` | ◐ | 同上；TS 为 Promise 纯净值，Rust 包 `Result`（PARITY delta，仅 store 失败时 Err） |
+| `emit(name, value)` | `emit(name, value: Value)` | ✅ | 不进日志、不参与 replay（RunEvent::Custom 仅投递 publisher） |
+
+## step 闭包参数（StepContext）
+
+| TanStack StepContext | Rust（StepCtx） | 状态 | 备注 |
+| -------------------- | --------------- | ---- | ---- |
+| `id: string` | 无（`step_id` 为闭包外层参数） | ◯ | Rust 侧重在 `step(id, f)` 的 id，闭包内不再暴露 |
+| `attempt: number` | ✖ | ✖ | 尚未暴露（engine 内部有 attempt 逻辑） |
+| `input: TInput` | `input()` | ✅ | TS StepContext 无此字段，Rust 额外提供 |
+| `runtime: StepRuntimeContext` | `deadline()/time_remaining()/should_yield()` | ◐ | 同 ctx 的 runtime 拍平 |
+| `signal: AbortSignal`（attempt 级，step timeout / run abort） | ✖ | ✖ | 未暴露；step 级协作检查待补（`is_cancelled` 目前只在 ctx 上） |
+| `progress(value)` | `progress(value: f64)` | ✅ | TS StepContext 无此字段？——见下注 |
+
+注：`progress` 在 TS 侧属于 `StepOptions.onProgress` 回调而非 StepContext；Rust
+以 `StepCtx::progress()` 推送，属 API 形状差异（上报渠道不同，行为均为 0..1 进度）。
+
+## RunOptions / engine 层入口对等
+
+| TanStack | Rust | 备注 |
+| -------- | ---- | ---- |
+| `runId` | `RunOptions::run_id()` | |
+| `input` | `RunOptions::new(input)` | |
+| `targetStep` | `target_step()` | |
+| `continueFrom` | `continue_from()` | |
+| `runtime.deadline` | `deadline()` | |
+| `runtime.minYieldRemainingMs` | `min_yield_remaining()`（缺省 1000） | |
+| `runtime.yieldResumeAt` | `yield_resume_at()` | |
+| `AbortController().cancel()` | `cancel_run(store, run_id)` | run 以 `Aborted` 终局；终态幂等；未知 run → `RunNotFound` |
+| `signalEvent(runId, event, payload)` | `signal_event(store, run_id, name, payload)` | 扫 `StepPaused` 按 `signal_name` 定位投递；无监听者 → `WorkflowError::SignalLost` |
+| 事件名 → 信号映射 | `"__approval"` / `"__timer"` / 用户事件名 | `approve`/`sleep`/`yield` 内部固定通道，用户事件名自定 |
+
+## 已知待补 / 差异清单
+
+1. **`yield` 命名**：Rust 保留字 → `yield_`（引用方需注意）。
+2. **run 级 `signal`**：仅 `is_cancelled()` 谓词；无中止回调注册。实现细节：
+   取消由 `cancel_run` 将 run.json 置 `Aborted`，引擎在 step 入口 / attempt
+   重试前 / pause 轮询 tick（≤25ms）轮询拾取 → run 以 `Aborted` + `RunErrored
+   "workflow aborted"` 终局（对齐 TanStack code `'aborted'`）。
+3. **step 级 `attempt` / `signal`**：未暴露，`StepOptions`（max_attempts 等）已可用。
+4. **`shouldYield` 逐调用 `minRemainingMs`**：未支持（仅 RunOptions 级）。
+5. **`now()/uuid()` 包 `Result`**：设计上仅 store 失败时 Err；正常路径与 TS 等价。
+6. **`approve.description`**：未实现（位置参数缺该项）。
+
+## 验证覆盖
+
+- `cargo test -p workflow-core`：33 个引擎级测试覆盖 Phase 1-4（named wait /
+  sleep_until 过去/定时 / emit 不进日志 / now·uuid 确定性 / cancel_run
+  三态 + 重打可恢复 / runtime budget / yield park+replay）。
+- `cargo test -p workflow-shared-examples`：27 个共享 workflow 的 e2e
+  （含 `event_gate`：emit → wait_for_event → sleep_until 链路）。
+- clippy：基线 8 个 pre-existing warning，新代码零新增。
