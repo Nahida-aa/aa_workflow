@@ -1,9 +1,25 @@
 //! Async **code-as-DAG** workflow engine, modelled after TanStack Workflow's
-//! store/event contract but with no determinism requirement and no server
-//! daemon. There is no declared graph: the orchestration is ordinary async
-//! code (branching = `if/else`, parallelism = `tokio::try_join!`, order =
-//! lexical `.await`), and only durable side effects go through
+//! core-engine layer: headless replay plus a store/event contract. No
+//! scheduler, no host adapters, no managed control plane.
+//!
+//! There is no declared graph: the orchestration is ordinary async code
+//! (branching = `if/else`, parallelism = `tokio::try_join!`, order = lexical
+//! `.await`), and only durable side effects go through
 //! [`define::WorkflowCtx::step`].
+//!
+//! Like TanStack, there is **no server daemon requirement** — a drive is one
+//! `run_workflow` call that runs the run to its next pause or completion. What
+//! is *not* ported is the `@tanstack/workflow-runtime` layer (leases, sweep,
+//! timer indexes, schedules).
+//!
+//! ## 确定性契约
+//!
+//! The handler **must** reach the same primitives in the same order on every
+//! replay — same contract as TanStack (`docs/concepts/replay-and-resume.md`).
+//! `SystemTime::now()` / `Uuid::new_v4()` / bare I/O outside `ctx.step` are
+//! violations; use [`define::BaseCtx::now`] / [`define::BaseCtx::uuid`] /
+//! `ctx.step`. The engine neither detects nor enforces this (nor does
+//! TanStack); violations surface as replay drift or checkpoint mismatches.
 //!
 //! ## TanStack Workflow 对照
 //!
@@ -32,14 +48,14 @@ pub mod resource;
 pub mod store;
 
 pub use define::{
-    create_workflow, Backoff, BaseCtx, CreateWorkflowConfig, Middleware, RetryPolicy, StepCtx,
-    StepOptions, Workflow, WorkflowBuilder, WorkflowCtx, WorkflowDefinition,
+    Backoff, BaseCtx, CreateWorkflowConfig, Middleware, RetryPolicy, StepCtx, StepOptions,
+    Workflow, WorkflowBuilder, WorkflowCtx, WorkflowDefinition, create_workflow,
 };
 pub use engine::{
-    cancel_run, run_workflow, run_workflow_sync, select_workflow_version, signal_event, signal_run,
-    RunOptions, RunOutcome,
+    RunOptions, RunOutcome, cancel_run, run_workflow, run_workflow_sync, select_workflow_version,
+    signal_event, signal_run,
 };
 pub use error::{StoreError, WorkflowError};
-pub use event::{fold_step_states, RunEvent, RunStatus, StepAttempt, StepState, StepStatus};
+pub use event::{RunEvent, RunStatus, StepAttempt, StepState, StepStatus, fold_step_states};
 pub use resource::{Gate, GateGuard, ResourceKey};
 pub use store::{InMemoryStore, PendingApproval, RunState, RunStore, WaitForState};

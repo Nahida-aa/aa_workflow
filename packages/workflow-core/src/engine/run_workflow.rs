@@ -1,4 +1,3 @@
-
 //! 单次 invocation 的驱动入口：把 workflow **跑起来 / 续跑** 的顶层编排。
 //!
 //! 引擎本体（`EngineRuntime` 驱动态、`exec_step` / `exec_pause` / `signal_run`）
@@ -7,11 +6,13 @@
 //! 收尾写终态事件与 run.json。每次调用（start / resume）都独立走完整条路径。
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use crate::define::Workflow;
-use crate::engine::{now_ms, EngineRuntime, StepHalt, WorkflowCancelled, DEFAULT_MIN_YIELD_REMAINING_MS};
+use crate::engine::{
+    DEFAULT_MIN_YIELD_REMAINING_MS, EngineRuntime, StepHalt, WorkflowCancelled, now_ms,
+};
 use crate::error::WorkflowError;
 use crate::event::{RunEvent, RunStatus, StepStatus, fold_step_states};
 use crate::resource::Gate;
@@ -99,7 +100,10 @@ pub struct RunOutcome {
 /// `workflow_version` picks among `[workflow] + workflow.previous_versions`.
 /// Unknown / absent persisted versions fall back to the current workflow
 /// (legacy runs started before versioning, or versions that were dropped).
-pub fn select_workflow_version<'a>(workflow: &'a Workflow, persisted: Option<&str>) -> &'a Workflow {
+pub fn select_workflow_version<'a>(
+    workflow: &'a Workflow,
+    persisted: Option<&str>,
+) -> &'a Workflow {
     match persisted {
         Some(v) => workflow
             .previous_versions
@@ -214,24 +218,29 @@ pub async fn run_workflow(
         now_counter: AtomicUsize::new(0),
         uuid_counter: AtomicUsize::new(0),
         deadline: opts.deadline,
-        min_yield_remaining_ms: opts.min_yield_remaining_ms.unwrap_or(DEFAULT_MIN_YIELD_REMAINING_MS),
+        min_yield_remaining_ms: opts
+            .min_yield_remaining_ms
+            .unwrap_or(DEFAULT_MIN_YIELD_REMAINING_MS),
         yield_resume_at: opts.yield_resume_at,
         yield_counter: AtomicUsize::new(0),
         default_step_retry: active.default_step_retry.clone(),
     });
-    inner.publish(&RunEvent::RunStarted { ts, run_id: run_id.clone() });
+    inner.publish(&RunEvent::RunStarted {
+        ts,
+        run_id: run_id.clone(),
+    });
 
     let ctx = crate::define::WorkflowCtx::untyped(inner.clone());
     let handler_result = (active.handler)(ctx).await;
 
     let (status, output, error) = match handler_result {
         Ok(output) => (RunStatus::Finished, Some(output), None),
-        Err(e) if e.downcast_ref::<StepHalt>().is_some() => {
-            (RunStatus::Finished, None, None)
-        }
-        Err(e) if e.downcast_ref::<WorkflowCancelled>().is_some() => {
-            (RunStatus::Aborted, None, Some(WorkflowCancelled.to_string()))
-        }
+        Err(e) if e.downcast_ref::<StepHalt>().is_some() => (RunStatus::Finished, None, None),
+        Err(e) if e.downcast_ref::<WorkflowCancelled>().is_some() => (
+            RunStatus::Aborted,
+            None,
+            Some(WorkflowCancelled.to_string()),
+        ),
         Err(e) => {
             let msg = e.to_string();
             (RunStatus::Errored, None, Some(msg))

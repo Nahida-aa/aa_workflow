@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use serde::{Deserialize, Serialize};
 
@@ -115,7 +115,13 @@ impl InMemoryStore {
 
 impl RunStore for InMemoryStore {
     fn get_run_state(&self, run_id: &str) -> Result<Option<RunState>, StoreError> {
-        Ok(self.inner.lock().map_err(|e| StoreError::Io(e.to_string()))?.runs.get(run_id).cloned())
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|e| StoreError::Io(e.to_string()))?
+            .runs
+            .get(run_id)
+            .cloned())
     }
 
     fn set_run_state(&self, run_id: &str, state: &RunState) -> Result<(), StoreError> {
@@ -128,7 +134,10 @@ impl RunStore for InMemoryStore {
     }
 
     fn delete_run(&self, run_id: &str) -> Result<(), StoreError> {
-        let mut inner = self.inner.lock().map_err(|e| StoreError::Io(e.to_string()))?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| StoreError::Io(e.to_string()))?;
         inner.runs.remove(run_id);
         inner.logs.remove(run_id);
         inner.subs.remove(run_id);
@@ -141,7 +150,10 @@ impl RunStore for InMemoryStore {
         expected_next_index: usize,
         event: &RunEvent,
     ) -> Result<(), StoreError> {
-        let mut inner = self.inner.lock().map_err(|e| StoreError::Io(e.to_string()))?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| StoreError::Io(e.to_string()))?;
         let log = inner.logs.entry(run_id.to_string()).or_default();
         let actual = log.len();
         if actual != expected_next_index {
@@ -170,7 +182,10 @@ impl RunStore for InMemoryStore {
     }
 
     fn truncate_runs(&self, run_id: &str, step_id: &str) -> Result<(), StoreError> {
-        let mut inner = self.inner.lock().map_err(|e| StoreError::Io(e.to_string()))?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| StoreError::Io(e.to_string()))?;
         let Some(log) = inner.logs.get_mut(run_id) else {
             return Ok(());
         };

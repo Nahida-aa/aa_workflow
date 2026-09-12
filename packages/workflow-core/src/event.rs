@@ -50,11 +50,23 @@ pub enum RunEvent {
     /// Observability only (not persisted): marks the start of a run.
     RunStarted { ts: i64, run_id: String },
     /// Checkpoint (persisted): final state of a completed run.
-    RunFinished { ts: i64, run_id: String, output: Option<serde_json::Value> },
+    RunFinished {
+        ts: i64,
+        run_id: String,
+        output: Option<serde_json::Value>,
+    },
     /// Checkpoint (persisted): the run errored (a step failed terminally).
-    RunErrored { ts: i64, run_id: String, error: String },
+    RunErrored {
+        ts: i64,
+        run_id: String,
+        error: String,
+    },
     /// Observability only (not persisted): a step began executing.
-    StepStarted { ts: i64, run_id: String, step_id: String },
+    StepStarted {
+        ts: i64,
+        run_id: String,
+        step_id: String,
+    },
     /// Checkpoint (persisted): a step finished successfully; the run may be
     /// resumed from here without re-execution.
     StepFinished {
@@ -100,18 +112,38 @@ pub enum RunEvent {
         payload: Option<serde_json::Value>,
     },
     /// Observability only (not persisted): 0.0..=1.0 progress signal.
-    StepProgress { ts: i64, run_id: String, step_id: String, value: f64 },
+    StepProgress {
+        ts: i64,
+        run_id: String,
+        step_id: String,
+        value: f64,
+    },
     /// Observability only (not persisted): `ctx.emit` fan-out. Reaches only
     /// the publisher, never the log — so it never becomes part of replay
     /// (mirrors TanStack's `CUSTOM` event).
-    Custom { ts: i64, run_id: String, name: String, value: serde_json::Value },
+    Custom {
+        ts: i64,
+        run_id: String,
+        name: String,
+        value: serde_json::Value,
+    },
     /// Checkpoint (persisted): `ctx.now()` recorded a wall-clock timestamp.
     /// On replay the cached value is served so a run sees the same clock
     /// across resumes (TanStack `NOW_RECORDED`).
-    NowRecorded { ts: i64, run_id: String, step_id: String, value: i64 },
+    NowRecorded {
+        ts: i64,
+        run_id: String,
+        step_id: String,
+        value: i64,
+    },
     /// Checkpoint (persisted): `ctx.uuid()` recorded a generated id. On
     /// replay the same id is served (TanStack `UUID_RECORDED`).
-    UuidRecorded { ts: i64, run_id: String, step_id: String, value: String },
+    UuidRecorded {
+        ts: i64,
+        run_id: String,
+        step_id: String,
+        value: String,
+    },
 }
 
 impl RunEvent {
@@ -157,26 +189,40 @@ pub fn fold_step_states(events: &[RunEvent]) -> HashMap<String, StepState> {
                 st.status = StepStatus::Running;
                 st.started_at = Some(*ts);
             }
-            RunEvent::StepFinished { step_id, result, ts, .. } => {
+            RunEvent::StepFinished {
+                step_id,
+                result,
+                ts,
+                ..
+            } => {
                 let st = states.entry(step_id.clone()).or_default();
                 st.status = StepStatus::Success;
                 st.result = result.clone();
                 st.error = None;
                 st.finished_at = Some(*ts);
             }
-            RunEvent::StepFailed { step_id, error, ts, .. } => {
+            RunEvent::StepFailed {
+                step_id, error, ts, ..
+            } => {
                 let st = states.entry(step_id.clone()).or_default();
                 st.status = StepStatus::Failed;
                 st.error = Some(error.clone());
                 st.finished_at = Some(*ts);
             }
-            RunEvent::StepPaused { step_id, ts, due_at, .. } => {
+            RunEvent::StepPaused {
+                step_id,
+                ts,
+                due_at,
+                ..
+            } => {
                 let st = states.entry(step_id.clone()).or_default();
                 st.status = StepStatus::Paused;
                 st.started_at = st.started_at.or(Some(*ts));
                 st.finished_at = due_at.or(st.finished_at);
             }
-            RunEvent::StepResume { step_id, payload, .. } => {
+            RunEvent::StepResume {
+                step_id, payload, ..
+            } => {
                 // A delivered signal exposes its payload as the paused step's
                 // derived result; the step stays `Paused` in the projection.
                 let st = states.entry(step_id.clone()).or_default();

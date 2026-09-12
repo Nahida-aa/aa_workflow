@@ -6,8 +6,8 @@
 
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::define::{StepCtx, StepOptions};
@@ -17,7 +17,9 @@ use crate::resource::Gate;
 use crate::store::RunStore;
 
 mod run_workflow;
-pub use run_workflow::{run_workflow, run_workflow_sync, select_workflow_version, RunOptions, RunOutcome};
+pub use run_workflow::{
+    RunOptions, RunOutcome, run_workflow, run_workflow_sync, select_workflow_version,
+};
 
 pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
@@ -223,7 +225,7 @@ where
                     Some(utd) => {
                         let probe = StepCtx {
                             inner: inner.clone(),
-                            step_id: step_id.to_string(),
+                            id: step_id.to_string(),
                             attempt: 0,
                         };
                         utd(&probe, &st)
@@ -277,7 +279,7 @@ where
     for attempt in 1..=max_attempts {
         let step_ctx = StepCtx {
             inner: inner.clone(),
-            step_id: step_id.to_string(),
+            id: step_id.to_string(),
             attempt,
         };
         let started_at = now_ms();
@@ -390,7 +392,9 @@ pub fn exec_now(inner: &Arc<EngineRuntime>) -> anyhow::Result<i64> {
     let k = inner.now_counter.fetch_add(1, Ordering::SeqCst);
     let step_id = format!("__now-{k}");
     for ev in inner.store.get_events(&inner.run_id)? {
-        if let RunEvent::NowRecorded { step_id: id, value, .. } = &ev
+        if let RunEvent::NowRecorded {
+            step_id: id, value, ..
+        } = &ev
             && id == &step_id
         {
             return Ok(*value);
@@ -415,7 +419,9 @@ pub fn exec_uuid(inner: &Arc<EngineRuntime>) -> anyhow::Result<String> {
     let k = inner.uuid_counter.fetch_add(1, Ordering::SeqCst);
     let step_id = format!("__uuid-{k}");
     for ev in inner.store.get_events(&inner.run_id)? {
-        if let RunEvent::UuidRecorded { step_id: id, value, .. } = &ev
+        if let RunEvent::UuidRecorded {
+            step_id: id, value, ..
+        } = &ev
             && id == &step_id
         {
             return Ok(value.clone());
@@ -514,10 +520,19 @@ pub async fn exec_pause(
                 // `i64::saturating_sub` does NOT clamp negatives to 0 — the
                 // difference fits an i64 and comes back negative, which would
                 // wrap to a huge u64 under `as u64`. Branch explicitly.
-                let rem_ms = if due > now_ms() { (due - now_ms()) as u64 } else { 0 };
+                let rem_ms = if due > now_ms() {
+                    (due - now_ms()) as u64
+                } else {
+                    0
+                };
                 let remaining = Duration::from_millis(rem_ms);
                 if remaining.is_zero() {
-                    signal_run(inner.store.as_ref(), &inner.run_id, step_id, serde_json::Value::Null)?;
+                    signal_run(
+                        inner.store.as_ref(),
+                        &inner.run_id,
+                        step_id,
+                        serde_json::Value::Null,
+                    )?;
                     continue;
                 }
                 remaining.min(RESUME_POLL_MS)
@@ -536,9 +551,11 @@ fn find_resume(
 ) -> Option<serde_json::Value> {
     let events = store.get_events(run_id).ok()?;
     events.iter().find_map(|ev| match ev {
-        RunEvent::StepResume { step_id: id, payload, .. } if id == step_id => {
-            Some(payload.clone().unwrap_or(serde_json::Value::Null))
-        }
+        RunEvent::StepResume {
+            step_id: id,
+            payload,
+            ..
+        } if id == step_id => Some(payload.clone().unwrap_or(serde_json::Value::Null)),
         _ => None,
     })
 }
@@ -574,7 +591,11 @@ fn project_run_wait(store: &Arc<dyn RunStore>, run_id: &str, kind: WaitKind) {
         st.status = RunStatus::Paused;
         st.updated_at = now_ms();
         match kind {
-            WaitKind::Signal { step_id, signal_name, deadline } => {
+            WaitKind::Signal {
+                step_id,
+                signal_name,
+                deadline,
+            } => {
                 st.waiting_for = Some(crate::store::WaitForState {
                     step_id,
                     signal_name,
@@ -582,7 +603,12 @@ fn project_run_wait(store: &Arc<dyn RunStore>, run_id: &str, kind: WaitKind) {
                 });
                 st.pending_approval = None;
             }
-            WaitKind::Approval { step_id, approval_id, title, description } => {
+            WaitKind::Approval {
+                step_id,
+                approval_id,
+                title,
+                description,
+            } => {
                 st.pending_approval = Some(crate::store::PendingApproval {
                     step_id,
                     approval_id,
@@ -649,9 +675,11 @@ pub fn signal_event(
 ) -> Result<(), WorkflowError> {
     let events = store.get_events(run_id)?;
     let step_id = events.iter().rev().find_map(|ev| match ev {
-        RunEvent::StepPaused { step_id, signal_name, .. } if signal_name == event_name => {
-            Some(step_id.clone())
-        }
+        RunEvent::StepPaused {
+            step_id,
+            signal_name,
+            ..
+        } if signal_name == event_name => Some(step_id.clone()),
         _ => None,
     });
     match step_id {
@@ -666,8 +694,8 @@ pub fn signal_event(
 mod tests {
     use super::*;
     use crate::define::{
-        create_workflow, Backoff, BaseCtx, BoxFuture, CreateWorkflowConfig, Middleware,
-        RetryPolicy, Workflow, WorkflowCtx,
+        Backoff, BaseCtx, BoxFuture, CreateWorkflowConfig, Middleware, RetryPolicy, Workflow,
+        WorkflowCtx, create_workflow,
     };
     use crate::store::{InMemoryStore, RunState};
     use std::sync::atomic::AtomicBool;
@@ -710,29 +738,34 @@ mod tests {
         let wf = Workflow::new("w").handler({
             let log = log.clone();
             move |ctx: WorkflowCtx| {
-            let log = log.clone();
-            async move {
-                for id in ["a", "b", "c"] {
-                    let log = log.clone();
-                    let id = id.to_string();
-                    let id_c = id.clone();
-                    ctx.step(&id, move |_sc: StepCtx| {
-                        let (log, id) = (log.clone(), id_c.clone());
-                        async move {
-                            log.lock().unwrap().note_start(&id);
-                            log.lock().unwrap().note_finish(&id);
-                            Ok(serde_json::Value::Null)
-                        }
-                    })
-                    .await?;
+                let log = log.clone();
+                async move {
+                    for id in ["a", "b", "c"] {
+                        let log = log.clone();
+                        let id = id.to_string();
+                        let id_c = id.clone();
+                        ctx.step(&id, move |_sc: StepCtx| {
+                            let (log, id) = (log.clone(), id_c.clone());
+                            async move {
+                                log.lock().unwrap().note_start(&id);
+                                log.lock().unwrap().note_finish(&id);
+                                Ok(serde_json::Value::Null)
+                            }
+                        })
+                        .await?;
+                    }
+                    Ok(serde_json::Value::Null)
                 }
-                Ok(serde_json::Value::Null)
-            }
             }
         });
-        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
-            .await
-            .unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let l = log.lock().unwrap();
         assert_eq!(l.started, vec!["a", "b", "c"]);
@@ -746,40 +779,45 @@ mod tests {
         let wf = Workflow::new("w").handler({
             let log = log.clone();
             move |ctx: WorkflowCtx| {
-            let log = log.clone();
-            async move {
-                let a = {
-                    let log = log.clone();
-                    ctx.step("a", move |_sc| {
+                let log = log.clone();
+                async move {
+                    let a = {
                         let log = log.clone();
-                        async move {
-                            log.lock().unwrap().note_start("a");
-                            tokio::time::sleep(Duration::from_millis(60)).await;
-                            log.lock().unwrap().note_finish("a");
-                            Ok(serde_json::Value::Null)
-                        }
-                    })
-                };
-                let b = {
-                    let log = log.clone();
-                    ctx.step("b", move |_sc| {
+                        ctx.step("a", move |_sc| {
+                            let log = log.clone();
+                            async move {
+                                log.lock().unwrap().note_start("a");
+                                tokio::time::sleep(Duration::from_millis(60)).await;
+                                log.lock().unwrap().note_finish("a");
+                                Ok(serde_json::Value::Null)
+                            }
+                        })
+                    };
+                    let b = {
                         let log = log.clone();
-                        async move {
-                            log.lock().unwrap().note_start("b");
-                            tokio::time::sleep(Duration::from_millis(60)).await;
-                            log.lock().unwrap().note_finish("b");
-                            Ok(serde_json::Value::Null)
-                        }
-                    })
-                };
-                let _ = try_join!(a, b)?;
-                Ok(serde_json::Value::Null)
-            }
+                        ctx.step("b", move |_sc| {
+                            let log = log.clone();
+                            async move {
+                                log.lock().unwrap().note_start("b");
+                                tokio::time::sleep(Duration::from_millis(60)).await;
+                                log.lock().unwrap().note_finish("b");
+                                Ok(serde_json::Value::Null)
+                            }
+                        })
+                    };
+                    let _ = try_join!(a, b)?;
+                    Ok(serde_json::Value::Null)
+                }
             }
         });
-        run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
-            .await
-            .unwrap();
+        run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})),
+            None,
+        )
+        .await
+        .unwrap();
         let l = log.lock().unwrap();
         assert_eq!(l.runs["a"], 1);
         assert_eq!(l.runs["b"], 1);
@@ -796,88 +834,93 @@ mod tests {
         let wf = Workflow::new("w").handler({
             let log = log.clone();
             move |ctx: WorkflowCtx| {
-            let log = log.clone();
-            async move {
-                // Step closures capture their own `log` clone (per-call block)
-                // so `log` stays borrowable for the peer chain + `e`.
-                let a = {
-                    let log = log.clone();
-                    ctx.step("a", move |_sc: StepCtx| {
+                let log = log.clone();
+                async move {
+                    // Step closures capture their own `log` clone (per-call block)
+                    // so `log` stays borrowable for the peer chain + `e`.
+                    let a = {
                         let log = log.clone();
-                        async move {
-                            log.lock().unwrap().note_start("a");
-                            tokio::time::sleep(Duration::from_millis(40)).await;
-                            log.lock().unwrap().note_finish("a");
-                            Ok(serde_json::Value::Null)
-                        }
-                    })
-                };
-                let b = {
-                    let log = log.clone();
-                    ctx.step("b", move |_sc: StepCtx| {
-                        let log = log.clone();
-                        async move {
-                            log.lock().unwrap().note_start("b");
-                            tokio::time::sleep(Duration::from_millis(40)).await;
-                            log.lock().unwrap().note_finish("b");
-                            Ok(serde_json::Value::Null)
-                        }
-                    })
-                };
-                // wait for b, then c, then d — serial, but concurrent with `a`.
-                let chain_ctx = ctx.clone();
-                let chain_log = log.clone();
-                let chain = async move {
-                    let _ = b.await?;
-                    let _ = {
-                        let log = chain_log.clone();
-                        chain_ctx.step("c", move |_sc: StepCtx| {
+                        ctx.step("a", move |_sc: StepCtx| {
                             let log = log.clone();
                             async move {
-                                log.lock().unwrap().note_start("c");
+                                log.lock().unwrap().note_start("a");
                                 tokio::time::sleep(Duration::from_millis(40)).await;
-                                log.lock().unwrap().note_finish("c");
+                                log.lock().unwrap().note_finish("a");
+                                Ok(serde_json::Value::Null)
+                            }
+                        })
+                    };
+                    let b = {
+                        let log = log.clone();
+                        ctx.step("b", move |_sc: StepCtx| {
+                            let log = log.clone();
+                            async move {
+                                log.lock().unwrap().note_start("b");
+                                tokio::time::sleep(Duration::from_millis(40)).await;
+                                log.lock().unwrap().note_finish("b");
+                                Ok(serde_json::Value::Null)
+                            }
+                        })
+                    };
+                    // wait for b, then c, then d — serial, but concurrent with `a`.
+                    let chain_ctx = ctx.clone();
+                    let chain_log = log.clone();
+                    let chain = async move {
+                        let _ = b.await?;
+                        let _ = {
+                            let log = chain_log.clone();
+                            chain_ctx.step("c", move |_sc: StepCtx| {
+                                let log = log.clone();
+                                async move {
+                                    log.lock().unwrap().note_start("c");
+                                    tokio::time::sleep(Duration::from_millis(40)).await;
+                                    log.lock().unwrap().note_finish("c");
+                                    Ok(serde_json::Value::Null)
+                                }
+                            })
+                        }
+                        .await?;
+                        let _ = {
+                            let log = chain_log.clone();
+                            chain_ctx.step("d", move |_sc: StepCtx| {
+                                let log = log.clone();
+                                async move {
+                                    log.lock().unwrap().note_start("d");
+                                    tokio::time::sleep(Duration::from_millis(40)).await;
+                                    log.lock().unwrap().note_finish("d");
+                                    Ok(serde_json::Value::Null)
+                                }
+                            })
+                        }
+                        .await?;
+                        Ok(())
+                    };
+                    let _ = try_join!(a, chain)?;
+                    let _ = {
+                        let log = log.clone();
+                        ctx.step("e", move |_sc: StepCtx| {
+                            let log = log.clone();
+                            async move {
+                                log.lock().unwrap().note_start("e");
+                                tokio::time::sleep(Duration::from_millis(40)).await;
+                                log.lock().unwrap().note_finish("e");
                                 Ok(serde_json::Value::Null)
                             }
                         })
                     }
                     .await?;
-                    let _ = {
-                        let log = chain_log.clone();
-                        chain_ctx.step("d", move |_sc: StepCtx| {
-                            let log = log.clone();
-                            async move {
-                                log.lock().unwrap().note_start("d");
-                                tokio::time::sleep(Duration::from_millis(40)).await;
-                                log.lock().unwrap().note_finish("d");
-                                Ok(serde_json::Value::Null)
-                            }
-                        })
-                    }
-                    .await?;
-                    Ok(())
-                };
-                let _ = try_join!(a, chain)?;
-                let _ = {
-                    let log = log.clone();
-                    ctx.step("e", move |_sc: StepCtx| {
-                        let log = log.clone();
-                        async move {
-                            log.lock().unwrap().note_start("e");
-                            tokio::time::sleep(Duration::from_millis(40)).await;
-                            log.lock().unwrap().note_finish("e");
-                            Ok(serde_json::Value::Null)
-                        }
-                    })
+                    Ok(serde_json::Value::Null)
                 }
-                .await?;
-                Ok(serde_json::Value::Null)
-            }
             }
         });
-        run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
-            .await
-            .unwrap();
+        run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})),
+            None,
+        )
+        .await
+        .unwrap();
         let l = log.lock().unwrap();
         for id in ["a", "b", "c", "d", "e"] {
             assert_eq!(l.runs[id], 1, "{id} ran exactly once");
@@ -897,29 +940,34 @@ mod tests {
         let wf = Workflow::new("w").handler({
             let log = log.clone();
             move |ctx: WorkflowCtx| {
-            let log = log.clone();
-            async move {
-                for id in ["a", "b"] {
-                    let log = log.clone();
-                    let id = id.to_string();
-                    let id_c = id.clone();
-                    ctx.step(&id, move |_sc: StepCtx| {
-                        let (log, id) = (log.clone(), id_c.clone());
-                        async move {
-                            log.lock().unwrap().note_start(&id);
-                            log.lock().unwrap().note_finish(&id);
-                            Ok(serde_json::Value::Null)
-                        }
-                    })
-                    .await?;
+                let log = log.clone();
+                async move {
+                    for id in ["a", "b"] {
+                        let log = log.clone();
+                        let id = id.to_string();
+                        let id_c = id.clone();
+                        ctx.step(&id, move |_sc: StepCtx| {
+                            let (log, id) = (log.clone(), id_c.clone());
+                            async move {
+                                log.lock().unwrap().note_start(&id);
+                                log.lock().unwrap().note_finish(&id);
+                                Ok(serde_json::Value::Null)
+                            }
+                        })
+                        .await?;
+                    }
+                    Ok(serde_json::Value::Null)
                 }
-                Ok(serde_json::Value::Null)
-            }
             }
         });
-        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
-            .await
-            .unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})),
+            None,
+        )
+        .await
+        .unwrap();
         let second = run_workflow(
             &wf,
             store.clone(),
@@ -943,37 +991,42 @@ mod tests {
             let log = log.clone();
             let fail = fail.clone();
             move |ctx: WorkflowCtx| {
-            let log = log.clone();
-            let fail = fail.clone();
-            async move {
-                for id in ["a", "b"] {
-                    let (log, fail) = (log.clone(), fail.clone());
-                    let id = id.to_string();
-                    let id_c = id.clone();
-                    ctx.step(&id, move |_sc: StepCtx| {
-                        let (log, fail, id) = (log.clone(), fail.clone(), id_c.clone());
-                        async move {
-                            log.lock().unwrap().note_start(&id);
-                            let res = if id == "b" && fail.swap(false, Ordering::SeqCst) {
-                                Err(anyhow::anyhow!("boom"))
-                            } else {
-                                Ok(serde_json::Value::Null)
-                            };
-                            log.lock().unwrap().note_finish(&id);
-                            res
-                        }
-                    })
-                    .await?;
+                let log = log.clone();
+                let fail = fail.clone();
+                async move {
+                    for id in ["a", "b"] {
+                        let (log, fail) = (log.clone(), fail.clone());
+                        let id = id.to_string();
+                        let id_c = id.clone();
+                        ctx.step(&id, move |_sc: StepCtx| {
+                            let (log, fail, id) = (log.clone(), fail.clone(), id_c.clone());
+                            async move {
+                                log.lock().unwrap().note_start(&id);
+                                let res = if id == "b" && fail.swap(false, Ordering::SeqCst) {
+                                    Err(anyhow::anyhow!("boom"))
+                                } else {
+                                    Ok(serde_json::Value::Null)
+                                };
+                                log.lock().unwrap().note_finish(&id);
+                                res
+                            }
+                        })
+                        .await?;
+                    }
+                    Ok(serde_json::Value::Null)
                 }
-                Ok(serde_json::Value::Null)
-            }
             }
         });
 
         // first run: b fails, run errors
-        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
-            .await
-            .unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
         assert!(out.error.as_deref().unwrap().contains("boom"));
         assert_eq!(log.lock().unwrap().runs["b"], 1);
@@ -989,7 +1042,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(again.status, RunStatus::Errored);
-        assert_eq!(log.lock().unwrap().runs["b"], 1, "no re-execution on plain resume");
+        assert_eq!(
+            log.lock().unwrap().runs["b"],
+            1,
+            "no re-execution on plain resume"
+        );
 
         // continue_from "b": truncate b's checkpoint + suffix, replay reruns b
         let resumed = run_workflow(
@@ -1015,29 +1072,34 @@ mod tests {
         let wf = Workflow::new("w").handler({
             let log = log.clone();
             move |ctx: WorkflowCtx| {
-            let log = log.clone();
-            async move {
-                for id in ["a", "b", "c"] {
-                    let log = log.clone();
-                    let id = id.to_string();
-                    let id_c = id.clone();
-                    ctx.step(&id, move |_sc: StepCtx| {
-                        let (log, id) = (log.clone(), id_c.clone());
-                        async move {
-                            log.lock().unwrap().note_start(&id);
-                            log.lock().unwrap().note_finish(&id);
-                            Ok(serde_json::Value::Null)
-                        }
-                    })
-                    .await?;
+                let log = log.clone();
+                async move {
+                    for id in ["a", "b", "c"] {
+                        let log = log.clone();
+                        let id = id.to_string();
+                        let id_c = id.clone();
+                        ctx.step(&id, move |_sc: StepCtx| {
+                            let (log, id) = (log.clone(), id_c.clone());
+                            async move {
+                                log.lock().unwrap().note_start(&id);
+                                log.lock().unwrap().note_finish(&id);
+                                Ok(serde_json::Value::Null)
+                            }
+                        })
+                        .await?;
+                    }
+                    Ok(serde_json::Value::Null)
                 }
-                Ok(serde_json::Value::Null)
-            }
             }
         });
-        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
-            .await
-            .unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})),
+            None,
+        )
+        .await
+        .unwrap();
         let second = run_workflow(
             &wf,
             store.clone(),
@@ -1066,33 +1128,40 @@ mod tests {
             let fresh_a = fresh_a.clone();
             let fresh_b = fresh_b.clone();
             move |ctx: WorkflowCtx| {
-            let log = log.clone();
-            let fresh_a = fresh_a.clone();
-            let fresh_b = fresh_b.clone();
-            async move {
-                let opts_a = StepOptions::new().up_to_date(move |_, _| fresh_a.load(Ordering::SeqCst));
-                let opts_b = StepOptions::new().up_to_date(move |_, _| fresh_b.load(Ordering::SeqCst));
-                for (id, opts) in [("a", opts_a), ("b", opts_b)] {
-                    let log = log.clone();
-                    let id = id.to_string();
-                    let id_c = id.clone();
-                    ctx.step_with(&id, opts, move |_sc: StepCtx| {
-                        let (log, id) = (log.clone(), id_c.clone());
-                        async move {
-                            log.lock().unwrap().note_start(&id);
-                            log.lock().unwrap().note_finish(&id);
-                            Ok(serde_json::Value::Null)
-                        }
-                    })
-                    .await?;
+                let log = log.clone();
+                let fresh_a = fresh_a.clone();
+                let fresh_b = fresh_b.clone();
+                async move {
+                    let opts_a =
+                        StepOptions::new().up_to_date(move |_, _| fresh_a.load(Ordering::SeqCst));
+                    let opts_b =
+                        StepOptions::new().up_to_date(move |_, _| fresh_b.load(Ordering::SeqCst));
+                    for (id, opts) in [("a", opts_a), ("b", opts_b)] {
+                        let log = log.clone();
+                        let id = id.to_string();
+                        let id_c = id.clone();
+                        ctx.step_with(&id, opts, move |_sc: StepCtx| {
+                            let (log, id) = (log.clone(), id_c.clone());
+                            async move {
+                                log.lock().unwrap().note_start(&id);
+                                log.lock().unwrap().note_finish(&id);
+                                Ok(serde_json::Value::Null)
+                            }
+                        })
+                        .await?;
+                    }
+                    Ok(serde_json::Value::Null)
                 }
-                Ok(serde_json::Value::Null)
-            }
             }
         });
-        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
-            .await
-            .unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})),
+            None,
+        )
+        .await
+        .unwrap();
         // mark a stale, rereun: a reruns, b stays cached
         fresh_a.store(false, Ordering::SeqCst);
         let second = run_workflow(
@@ -1116,24 +1185,24 @@ mod tests {
         let wf = Workflow::new("w").handler({
             let log = log.clone();
             move |ctx: WorkflowCtx| {
-            let log = log.clone();
-            async move {
-                for id in ["a", "b", "c"] {
-                    let log = log.clone();
-                    let id = id.to_string();
-                    let id_c = id.clone();
-                    ctx.step(&id, move |_sc: StepCtx| {
-                        let (log, id) = (log.clone(), id_c.clone());
-                        async move {
-                            log.lock().unwrap().note_start(&id);
-                            log.lock().unwrap().note_finish(&id);
-                            Ok(serde_json::Value::Null)
-                        }
-                    })
-                    .await?;
+                let log = log.clone();
+                async move {
+                    for id in ["a", "b", "c"] {
+                        let log = log.clone();
+                        let id = id.to_string();
+                        let id_c = id.clone();
+                        ctx.step(&id, move |_sc: StepCtx| {
+                            let (log, id) = (log.clone(), id_c.clone());
+                            async move {
+                                log.lock().unwrap().note_start(&id);
+                                log.lock().unwrap().note_finish(&id);
+                                Ok(serde_json::Value::Null)
+                            }
+                        })
+                        .await?;
+                    }
+                    Ok(serde_json::Value::Null)
                 }
-                Ok(serde_json::Value::Null)
-            }
             }
         });
         let out = run_workflow(
@@ -1148,7 +1217,11 @@ mod tests {
         let l = log.lock().unwrap();
         assert_eq!(l.runs["a"], 1);
         assert_eq!(l.runs["b"], 1);
-        assert_eq!(l.runs.get("c").copied().unwrap_or(0), 0, "downstream never ran");
+        assert_eq!(
+            l.runs.get("c").copied().unwrap_or(0),
+            0,
+            "downstream never ran"
+        );
     }
 
     #[tokio::test]
@@ -1158,31 +1231,36 @@ mod tests {
         let wf = Workflow::new("w").handler({
             let log = log.clone();
             move |ctx: WorkflowCtx| {
-            let log = log.clone();
-            async move {
-                let ser = |id: &'static str| {
-                    let log = log.clone();
-                    let opts = StepOptions::new().resource("gpu:0");
-                    ctx.step_with(id, opts, move |_sc: StepCtx| {
+                let log = log.clone();
+                async move {
+                    let ser = |id: &'static str| {
                         let log = log.clone();
-                        async move {
-                            log.lock().unwrap().note_start(id);
-                            tokio::time::sleep(Duration::from_millis(60)).await;
-                            log.lock().unwrap().note_finish(id);
-                            Ok(serde_json::Value::Null)
-                        }
-                    })
-                };
-                let a = ser("a");
-                let b = ser("b");
-                let _ = try_join!(a, b)?;
-                Ok(serde_json::Value::Null)
-            }
+                        let opts = StepOptions::new().resource("gpu:0");
+                        ctx.step_with(id, opts, move |_sc: StepCtx| {
+                            let log = log.clone();
+                            async move {
+                                log.lock().unwrap().note_start(id);
+                                tokio::time::sleep(Duration::from_millis(60)).await;
+                                log.lock().unwrap().note_finish(id);
+                                Ok(serde_json::Value::Null)
+                            }
+                        })
+                    };
+                    let a = ser("a");
+                    let b = ser("b");
+                    let _ = try_join!(a, b)?;
+                    Ok(serde_json::Value::Null)
+                }
             }
         });
-        run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
-            .await
-            .unwrap();
+        run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})),
+            None,
+        )
+        .await
+        .unwrap();
         let l = log.lock().unwrap();
         assert!(idx(&l.timeline, ">b") > idx(&l.timeline, "<a"));
         assert_eq!(l.runs["a"], 1);
@@ -1198,30 +1276,33 @@ mod tests {
             async move {
                 let fail = fail.clone();
                 let retry = RetryPolicy::new(2, Backoff::Fixed { base_ms: 1 });
-                ctx.step_with(
-                    "a",
-                    StepOptions::new().retry(retry),
-                    move |_sc: StepCtx| {
-                        let fail = fail.clone();
-                        async move {
-                            if fail.swap(false, Ordering::SeqCst) {
-                                Err(anyhow::anyhow!("transient"))
-                            } else {
-                                Ok(serde_json::Value::Null)
-                            }
+                ctx.step_with("a", StepOptions::new().retry(retry), move |_sc: StepCtx| {
+                    let fail = fail.clone();
+                    async move {
+                        if fail.swap(false, Ordering::SeqCst) {
+                            Err(anyhow::anyhow!("transient"))
+                        } else {
+                            Ok(serde_json::Value::Null)
                         }
-                    },
-                )
+                    }
+                })
                 .await
             }
         });
-        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
-            .await
-            .unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let events = store.get_events(&out.run_id).unwrap();
         let fin = events.iter().find_map(|e| match e {
-            RunEvent::StepFinished { step_id, attempts, .. } if step_id == "a" => Some(attempts),
+            RunEvent::StepFinished {
+                step_id, attempts, ..
+            } if step_id == "a" => Some(attempts),
             _ => None,
         });
         assert_eq!(fin.map(|a| a.len()), Some(2));
@@ -1230,25 +1311,30 @@ mod tests {
     #[tokio::test]
     async fn exhausted_retries_error() {
         let store = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("w").handler(move |ctx: WorkflowCtx| {
-            async move {
-                let retry = RetryPolicy::new(2, Backoff::Fixed { base_ms: 1 });
-                ctx.step_with(
-                    "a",
-                    StepOptions::new().retry(retry),
-                    move |_sc: StepCtx| async move { Err(anyhow::anyhow!("boom")) },
-                )
-                .await
-            }
-        });
-        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
+        let wf = Workflow::new("w").handler(move |ctx: WorkflowCtx| async move {
+            let retry = RetryPolicy::new(2, Backoff::Fixed { base_ms: 1 });
+            ctx.step_with(
+                "a",
+                StepOptions::new().retry(retry),
+                move |_sc: StepCtx| async move { Err(anyhow::anyhow!("boom")) },
+            )
             .await
-            .unwrap();
+        });
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
         assert!(out.error.as_deref().unwrap().contains("boom"));
         let events = store.get_events(&out.run_id).unwrap();
         let failed = events.iter().find_map(|e| match e {
-            RunEvent::StepFailed { step_id, attempts, .. } if step_id == "a" => Some(attempts),
+            RunEvent::StepFailed {
+                step_id, attempts, ..
+            } if step_id == "a" => Some(attempts),
             _ => None,
         });
         assert_eq!(failed.map(|a| a.len()), Some(2));
@@ -1265,9 +1351,14 @@ mod tests {
                 .await?;
             Ok(serde_json::json!({ "out": v }))
         });
-        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
-            .await
-            .unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output, Some(serde_json::json!({ "out": { "x": 1 } })));
         let st = store.get_run_state(&out.run_id).unwrap().unwrap();
@@ -1291,9 +1382,14 @@ mod tests {
                 .await?;
             Ok(serde_json::Value::Null)
         });
-        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
-            .await
-            .unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
         assert!(out.error.as_deref().unwrap().contains("timed out"));
     }
@@ -1315,7 +1411,9 @@ mod tests {
             &wf,
             store.clone(),
             &RunOptions::new(serde_json::json!({})).run_id("prog_run"),
-            Some(Arc::new(move |e: &RunEvent| sink.lock().unwrap().push(e.clone()))),
+            Some(Arc::new(move |e: &RunEvent| {
+                sink.lock().unwrap().push(e.clone())
+            })),
         )
         .await
         .unwrap();
@@ -1323,14 +1421,22 @@ mod tests {
 
         // publisher saw emit-only progress + checkpoints
         let evs = events.lock().unwrap();
-        assert!(evs.iter().any(|e| matches!(e, RunEvent::StepProgress { value: 0.5, .. })));
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, RunEvent::StepProgress { value: 0.5, .. }))
+        );
         assert!(evs.iter().any(|e| matches!(e, RunEvent::RunStarted { .. })));
-        assert!(evs.iter().any(|e| matches!(e, RunEvent::StepFinished { .. })));
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, RunEvent::StepFinished { .. }))
+        );
 
         // subscriber (store log) saw the checkpoint but not emit-only events
         let mut saw_finish = false;
         let mut saw_shared = false;
-        let first = rx.recv_timeout(Duration::from_secs(2)).expect("got first event");
+        let first = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("got first event");
         saw_finish |= matches!(first, RunEvent::StepFinished { .. });
         assert!(saw_finish, "first appended event should be StepFinished");
         while let Ok(e) = rx.try_recv() {
@@ -1358,7 +1464,9 @@ mod tests {
         store.append_event("r1", 1, &ev).unwrap();
         let err = store.append_event("r1", 1, &ev).unwrap_err();
         match err {
-            crate::error::StoreError::Conflict { expected, actual, .. } => {
+            crate::error::StoreError::Conflict {
+                expected, actual, ..
+            } => {
                 assert_eq!(expected, 1);
                 assert_eq!(actual, 2);
             }
@@ -1376,7 +1484,11 @@ mod tests {
         panic!("condition never met for run {run_id}");
     }
 
-    fn count_events(store: &Arc<dyn RunStore>, run_id: &str, pred: impl Fn(&RunEvent) -> bool) -> usize {
+    fn count_events(
+        store: &Arc<dyn RunStore>,
+        run_id: &str,
+        pred: impl Fn(&RunEvent) -> bool,
+    ) -> usize {
         store
             .get_events(run_id)
             .unwrap()
@@ -1409,7 +1521,13 @@ mod tests {
         let store2 = store.clone();
         let wf2 = wf.clone();
         let task = tokio::spawn(async move {
-            run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id("r1"), None).await
+            run_workflow(
+                &wf2,
+                store2,
+                &RunOptions::new(serde_json::json!({})).run_id("r1"),
+                None,
+            )
+            .await
         });
         wait_until(
             &store,
@@ -1419,17 +1537,29 @@ mod tests {
         .await;
         let st = store.get_run_state("r1").unwrap().unwrap();
         assert_eq!(st.status, RunStatus::Paused);
-        let pa = st.pending_approval.as_ref().expect("run.json 应投影 pending_approval");
+        let pa = st
+            .pending_approval
+            .as_ref()
+            .expect("run.json 应投影 pending_approval");
         assert_eq!(pa.step_id, "release");
         assert_eq!(pa.title, "Approve the release?");
         assert!(st.waiting_for.is_none());
 
-        signal_run(store.as_ref(), "r1", "release", serde_json::json!({ "approved": true })).unwrap();
+        signal_run(
+            store.as_ref(),
+            "r1",
+            "release",
+            serde_json::json!({ "approved": true }),
+        )
+        .unwrap();
         let out = task.await.unwrap().unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output, Some(serde_json::json!({ "approved": true })));
         let st = store.get_run_state("r1").unwrap().unwrap();
-        assert!(st.waiting_for.is_none() && st.pending_approval.is_none(), "恢复后投影应被清除");
+        assert!(
+            st.waiting_for.is_none() && st.pending_approval.is_none(),
+            "恢复后投影应被清除"
+        );
         assert_eq!(
             decided.lock().unwrap().as_ref(),
             Some(&serde_json::json!({ "approved": true }))
@@ -1476,7 +1606,13 @@ mod tests {
         let store2 = store.clone();
         let wf2 = wf.clone();
         let t1 = tokio::spawn(async move {
-            run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id("r2"), None).await
+            run_workflow(
+                &wf2,
+                store2,
+                &RunOptions::new(serde_json::json!({})).run_id("r2"),
+                None,
+            )
+            .await
         });
         wait_until(
             &store,
@@ -1492,7 +1628,13 @@ mod tests {
         let store3 = store.clone();
         let wf3 = wf.clone();
         let t2 = tokio::spawn(async move {
-            run_workflow(&wf3, store3, &RunOptions::new(serde_json::json!({})).run_id("r2"), None).await
+            run_workflow(
+                &wf3,
+                store3,
+                &RunOptions::new(serde_json::json!({})).run_id("r2"),
+                None,
+            )
+            .await
         });
         wait_until(
             &store,
@@ -1509,7 +1651,13 @@ mod tests {
             "replay must not re-append the pause checkpoint"
         );
 
-        signal_run(store.as_ref(), "r2", "release", serde_json::json!({ "approved": true })).unwrap();
+        signal_run(
+            store.as_ref(),
+            "r2",
+            "release",
+            serde_json::json!({ "approved": true }),
+        )
+        .unwrap();
         let out = t2.await.unwrap().unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output, Some(serde_json::json!({ "approved": true })));
@@ -1530,7 +1678,7 @@ mod tests {
         );
     }
 
-#[tokio::test]
+    #[tokio::test]
     async fn sleep_pauses_then_auto_resumes() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let wf = Workflow::new("sleeper").handler(|ctx: WorkflowCtx| async move {
@@ -1544,8 +1692,13 @@ mod tests {
         let store2 = store.clone();
         let wf2 = wf.clone();
         let task = tokio::spawn(async move {
-            run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id("s1"), None)
-                .await
+            run_workflow(
+                &wf2,
+                store2,
+                &RunOptions::new(serde_json::json!({})).run_id("s1"),
+                None,
+            )
+            .await
         });
 
         // 等待进入 sleep：status=Paused + waiting_for{signal_name,deadline}
@@ -1561,9 +1714,18 @@ mod tests {
         }
         let paused = paused.expect("sleep 中应投影 status=Paused + waiting_for");
         let wf2_state = paused.waiting_for.as_ref().unwrap();
-        assert_eq!(wf2_state.step_id, "cooldown", "sleep 的 step_id 是 pause key");
-        assert_eq!(wf2_state.signal_name, "__timer", "sleep 的通道是内部 __timer");
-        assert!(wf2_state.deadline.is_some(), "sleep 的 due_at 应投影为 deadline");
+        assert_eq!(
+            wf2_state.step_id, "cooldown",
+            "sleep 的 step_id 是 pause key"
+        );
+        assert_eq!(
+            wf2_state.signal_name, "__timer",
+            "sleep 的通道是内部 __timer"
+        );
+        assert!(
+            wf2_state.deadline.is_some(),
+            "sleep 的 due_at 应投影为 deadline"
+        );
 
         let out = task.await.unwrap().unwrap();
         assert_eq!(out.status, RunStatus::Finished);
@@ -1575,7 +1737,9 @@ mod tests {
 
         let evs = store.get_events("s1").unwrap();
         let resume = evs.iter().find_map(|e| match e {
-            RunEvent::StepResume { step_id, payload, .. } if step_id == "cooldown" => payload.clone(),
+            RunEvent::StepResume {
+                step_id, payload, ..
+            } if step_id == "cooldown" => payload.clone(),
             _ => None,
         });
         assert_eq!(resume, Some(serde_json::Value::Null));
@@ -1601,7 +1765,13 @@ mod tests {
         let store2 = store.clone();
         let wf2 = wf.clone();
         let t = tokio::spawn(async move {
-            run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id("r3"), None).await
+            run_workflow(
+                &wf2,
+                store2,
+                &RunOptions::new(serde_json::json!({})).run_id("r3"),
+                None,
+            )
+            .await
         });
         wait_until(
             &store,
@@ -1609,7 +1779,13 @@ mod tests {
             |e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "gate"),
         )
         .await;
-        signal_run(store.as_ref(), "r3", "gate", serde_json::json!({ "yes": 1 })).unwrap();
+        signal_run(
+            store.as_ref(),
+            "r3",
+            "gate",
+            serde_json::json!({ "yes": 1 }),
+        )
+        .unwrap();
         let out = t.await.unwrap().unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output, Some(serde_json::json!({ "yes": 1 })));
@@ -1618,9 +1794,14 @@ mod tests {
         // approve resolves from the log — no new checkpoints appended.
         let store3 = store.clone();
         let wf3 = wf.clone();
-        let out2 = run_workflow(&wf3, store3, &RunOptions::new(serde_json::json!({})).run_id("r3"), None)
-            .await
-            .unwrap();
+        let out2 = run_workflow(
+            &wf3,
+            store3,
+            &RunOptions::new(serde_json::json!({})).run_id("r3"),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out2.status, RunStatus::Finished);
         assert_eq!(out2.output, Some(serde_json::json!({ "yes": 1 })));
         assert_eq!(
@@ -1655,7 +1836,13 @@ mod tests {
         let store2 = store.clone();
         let wf2 = wf.clone();
         let task = tokio::spawn(async move {
-            run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id("ne1"), None).await
+            run_workflow(
+                &wf2,
+                store2,
+                &RunOptions::new(serde_json::json!({})).run_id("ne1"),
+                None,
+            )
+            .await
         });
         wait_until(
             &store,
@@ -1665,16 +1852,28 @@ mod tests {
         .await;
         let st = store.get_run_state("ne1").unwrap().unwrap();
         assert_eq!(st.status, RunStatus::Paused);
-        let w = st.waiting_for.as_ref().expect("named wait 投影 waiting_for");
+        let w = st
+            .waiting_for
+            .as_ref()
+            .expect("named wait 投影 waiting_for");
         assert_eq!(w.signal_name, "review-approved");
         assert_eq!(w.step_id, "review");
         assert!(st.pending_approval.is_none(), "named event 不是 approval");
 
-        signal_event(store.as_ref(), "ne1", "review-approved", serde_json::json!({ "ok": true })).unwrap();
+        signal_event(
+            store.as_ref(),
+            "ne1",
+            "review-approved",
+            serde_json::json!({ "ok": true }),
+        )
+        .unwrap();
         let out = task.await.unwrap().unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output, Some(serde_json::json!({ "ok": true })));
-        assert_eq!(received.lock().unwrap().as_ref(), Some(&serde_json::json!({ "ok": true })));
+        assert_eq!(
+            received.lock().unwrap().as_ref(),
+            Some(&serde_json::json!({ "ok": true }))
+        );
     }
 
     #[tokio::test]
@@ -1683,13 +1882,20 @@ mod tests {
         let wf = Workflow::new("named-event").handler(|ctx: WorkflowCtx| async move {
             let v = ctx.wait_for_event("gate", "go").await?;
             let out = v.clone();
-            ctx.step("consume", move |_sc| async move { Ok(v.clone()) }).await?;
+            ctx.step("consume", move |_sc| async move { Ok(v.clone()) })
+                .await?;
             Ok(out)
         });
         let store2 = store.clone();
         let wf2 = wf.clone();
         let t = tokio::spawn(async move {
-            run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id("ne2"), None).await
+            run_workflow(
+                &wf2,
+                store2,
+                &RunOptions::new(serde_json::json!({})).run_id("ne2"),
+                None,
+            )
+            .await
         });
         wait_until(
             &store,
@@ -1736,9 +1942,14 @@ mod tests {
             .await?;
             Ok(serde_json::Value::Null)
         });
-        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
-            .await
-            .unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let evs = store.get_events(&out.run_id).unwrap();
         assert!(evs.iter().any(|e| matches!(
@@ -1763,7 +1974,13 @@ mod tests {
         let store2 = store.clone();
         let wf2 = wf.clone();
         let task = tokio::spawn(async move {
-            run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id("stu1"), None).await
+            run_workflow(
+                &wf2,
+                store2,
+                &RunOptions::new(serde_json::json!({})).run_id("stu1"),
+                None,
+            )
+            .await
         });
         let mut saw_deadline = false;
         for _ in 0..2000 {
@@ -1800,21 +2017,26 @@ mod tests {
             &wf,
             store.clone(),
             &RunOptions::new(serde_json::json!({})).run_id("em1"),
-            Some(Arc::new(move |e: &RunEvent| sink.lock().unwrap().push(e.clone()))),
+            Some(Arc::new(move |e: &RunEvent| {
+                sink.lock().unwrap().push(e.clone())
+            })),
         )
         .await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
-        assert!(seen
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|e| matches!(e, RunEvent::Custom { name, .. } if name == "ping")));
-        assert!(store
-            .get_events("em1")
-            .unwrap()
-            .iter()
-            .all(|e| !matches!(e, RunEvent::Custom { .. })));
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, RunEvent::Custom { name, .. } if name == "ping"))
+        );
+        assert!(
+            store
+                .get_events("em1")
+                .unwrap()
+                .iter()
+                .all(|e| !matches!(e, RunEvent::Custom { .. }))
+        );
     }
 
     #[tokio::test]
@@ -1844,7 +2066,13 @@ mod tests {
         let store2 = store.clone();
         let wf2 = wf.clone();
         let t = tokio::spawn(async move {
-            run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id("det1"), None).await
+            run_workflow(
+                &wf2,
+                store2,
+                &RunOptions::new(serde_json::json!({})).run_id("det1"),
+                None,
+            )
+            .await
         });
         wait_until(
             &store,
@@ -1860,18 +2088,33 @@ mod tests {
         // 重跑（崩溃恢复模拟）：now/uuid 全部从日志缓存值取，输出逐字节一致。
         let store3 = store.clone();
         let wf3 = wf.clone();
-        let out2 = run_workflow(&wf3, store3, &RunOptions::new(serde_json::json!({})).run_id("det1"), None)
-            .await
-            .unwrap();
+        let out2 = run_workflow(
+            &wf3,
+            store3,
+            &RunOptions::new(serde_json::json!({})).run_id("det1"),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out2.status, RunStatus::Finished);
-        assert_eq!(out2.output.clone().unwrap(), o1, "replay 后 now/uuid 与首跑一致");
         assert_eq!(
-            count_events(&store, "det1", |e| matches!(e, RunEvent::NowRecorded { .. })),
+            out2.output.clone().unwrap(),
+            o1,
+            "replay 后 now/uuid 与首跑一致"
+        );
+        assert_eq!(
+            count_events(&store, "det1", |e| matches!(
+                e,
+                RunEvent::NowRecorded { .. }
+            )),
             2,
             "每个调用位点只记录一次，replay 不重复 append"
         );
         assert_eq!(
-            count_events(&store, "det1", |e| matches!(e, RunEvent::UuidRecorded { .. })),
+            count_events(&store, "det1", |e| matches!(
+                e,
+                RunEvent::UuidRecorded { .. }
+            )),
             2
         );
         // 两对 now/uuid 都用独立的确定性 id（__now-0/__now-1、__uuid-0/__uuid-1）。
@@ -1885,32 +2128,42 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(!ids.iter().any(|a| ids.iter().filter(|b| b == &a).count() > 1), "ids 唯一: {ids:?}");
+        assert!(
+            !ids.iter()
+                .any(|a| ids.iter().filter(|b| b == &a).count() > 1),
+            "ids 唯一: {ids:?}"
+        );
     }
 
     #[tokio::test]
     async fn concurrent_now_calls_stay_unique() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("conc").handler(|ctx: WorkflowCtx| {
-            async move {
-                let (a, b) = {
-                    let (a, b) = (ctx.clone(), ctx.clone());
-                    tokio::join!(
-                        async move { a.now() },
-                        async move { b.now() },
-                    )
-                };
-                Ok(serde_json::json!({ "a": a?, "b": b? }))
-            }
+        let wf = Workflow::new("conc").handler(|ctx: WorkflowCtx| async move {
+            let (a, b) = {
+                let (a, b) = (ctx.clone(), ctx.clone());
+                tokio::join!(async move { a.now() }, async move { b.now() },)
+            };
+            Ok(serde_json::json!({ "a": a?, "b": b? }))
         });
-        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
-            .await
-            .unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let v = out.output.unwrap();
-        assert!(v["a"].as_i64().is_some() && v["b"].as_i64().is_some(), "两个 now 都应成功");
+        assert!(
+            v["a"].as_i64().is_some() && v["b"].as_i64().is_some(),
+            "两个 now 都应成功"
+        );
         assert_eq!(
-            count_events(&store, &out.run_id, |e| matches!(e, RunEvent::NowRecorded { .. })),
+            count_events(&store, &out.run_id, |e| matches!(
+                e,
+                RunEvent::NowRecorded { .. }
+            )),
             2,
             "并发调用各自落一个 NowRecorded，无重复 id"
         );
@@ -1918,13 +2171,21 @@ mod tests {
         // 重跑：并发 again，replay 命中 __now-0/__now-1 缓存，事件数不变。
         let store2 = store.clone();
         let wf2 = wf.clone();
-        let out2 = run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id(&out.run_id), None)
-            .await
-            .unwrap();
+        let out2 = run_workflow(
+            &wf2,
+            store2,
+            &RunOptions::new(serde_json::json!({})).run_id(&out.run_id),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out2.status, RunStatus::Finished);
         assert_eq!(out2.output.clone().unwrap(), v, "并发 replay 也一致");
         assert_eq!(
-            count_events(&store, &out.run_id, |e| matches!(e, RunEvent::NowRecorded { .. })),
+            count_events(&store, &out.run_id, |e| matches!(
+                e,
+                RunEvent::NowRecorded { .. }
+            )),
             2
         );
     }
@@ -1943,7 +2204,13 @@ mod tests {
         let store2 = store.clone();
         let wf2 = wf.clone();
         let task = tokio::spawn(async move {
-            run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id("ca1"), None).await
+            run_workflow(
+                &wf2,
+                store2,
+                &RunOptions::new(serde_json::json!({})).run_id("ca1"),
+                None,
+            )
+            .await
         });
         wait_until(
             &store,
@@ -1956,7 +2223,11 @@ mod tests {
 
         cancel_run(store.as_ref(), "ca1").unwrap();
         let out = task.await.unwrap().unwrap();
-        assert_eq!(out.status, RunStatus::Aborted, "cancel 后 run 以 Aborted 终局");
+        assert_eq!(
+            out.status,
+            RunStatus::Aborted,
+            "cancel 后 run 以 Aborted 终局"
+        );
         assert!(out.error.as_deref().unwrap().contains("aborted"));
         assert!(out.output.is_none());
 
@@ -1977,6 +2248,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn step_ctx_exposes_id_attempt_and_cooperative_cancel() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let started_in = started.clone();
+        let gate_in = gate.clone();
+        let wf = Workflow::new("sig").handler(move |ctx: WorkflowCtx| {
+            let started3 = started_in.clone();
+            let gate3 = gate_in.clone();
+            async move {
+                let seen = ctx
+                    .step("a", move |sc: StepCtx| async move {
+                        started3.notify_one();
+                        gate3.notified().await;
+                        let cancelled = sc.is_cancelled();
+                        let id = sc.id.clone();
+                        let attempt = sc.attempt;
+                        Ok(serde_json::json!({ "id": id, "attempt": attempt, "cancelled": cancelled }))
+                    })
+                    .await?;
+                Ok(seen)
+            }
+        });
+        let store2 = store.clone();
+        let wf2 = wf.clone();
+        let task = tokio::spawn(async move {
+            run_workflow(
+                &wf2,
+                store2,
+                &RunOptions::new(serde_json::json!({})).run_id("sig1"),
+                None,
+            )
+            .await
+        });
+        started.notified().await;
+        cancel_run(store.as_ref(), "sig1").unwrap();
+        gate.notify_one();
+        let out = task.await.unwrap().unwrap();
+        assert_eq!(
+            out.status,
+            RunStatus::Finished,
+            "协作式取消：闭包选择正常返回而非提前中止"
+        );
+        let v = out.output.unwrap();
+        assert_eq!(v["id"], "a");
+        assert_eq!(v["attempt"], 1);
+        assert_eq!(v["cancelled"], true);
+    }
+
+    #[tokio::test]
     async fn cancel_sleeping_run_aborts_and_is_recoverable() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let wf = Workflow::new("cancel-sleep").handler(|ctx: WorkflowCtx| async move {
@@ -1986,7 +2307,13 @@ mod tests {
         let store2 = store.clone();
         let wf2 = wf.clone();
         let task = tokio::spawn(async move {
-            run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id("ca2"), None).await
+            run_workflow(
+                &wf2,
+                store2,
+                &RunOptions::new(serde_json::json!({})).run_id("ca2"),
+                None,
+            )
+            .await
         });
         wait_until(
             &store,
@@ -2026,9 +2353,14 @@ mod tests {
             assert!(!ctx.is_cancelled());
             Ok(serde_json::json!({ "ok": true }))
         });
-        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
-            .await
-            .unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
     }
 
@@ -2045,7 +2377,11 @@ mod tests {
                 ctx.step("a", move |sc: StepCtx| {
                     let sink = sink.clone();
                     async move {
-                        *sink.lock().unwrap() = (Some(sc.deadline()), sc.time_remaining() < 1000, sc.should_yield());
+                        *sink.lock().unwrap() = (
+                            Some(sc.deadline()),
+                            sc.time_remaining() < 1000,
+                            sc.should_yield(),
+                        );
                         Ok(serde_json::json!({ "d": sc.deadline(), "tr": sc.time_remaining() }))
                     }
                 })
@@ -2056,8 +2392,7 @@ mod tests {
         let out = run_workflow(
             &wf,
             store.clone(),
-            &RunOptions::new(serde_json::json!({}))
-                .deadline(crate::engine::now_ms() + 300), // 500ms 内到期 → headroom < 1000
+            &RunOptions::new(serde_json::json!({})).deadline(crate::engine::now_ms() + 300), // 500ms 内到期 → headroom < 1000
             None,
         )
         .await
@@ -2090,7 +2425,13 @@ mod tests {
         let store2 = store.clone();
         let wf2 = wf.clone();
         let task = tokio::spawn(async move {
-            run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id("y1"), None).await
+            run_workflow(
+                &wf2,
+                store2,
+                &RunOptions::new(serde_json::json!({})).run_id("y1"),
+                None,
+            )
+            .await
         });
         // 第一个 yield 会 park（default 到期 ≈ now+1ms，非常快）；等待其 StepPaused。
         wait_until(
@@ -2102,18 +2443,25 @@ mod tests {
         // 到期自动 resume（timer 自动投递）→ 继续跑完
         let out = task.await.unwrap().unwrap();
         assert_eq!(out.status, RunStatus::Finished);
-        assert!(store
-            .get_events("y1")
-            .unwrap()
-            .iter()
-            .any(|e| matches!(e, RunEvent::StepFinished { step_id, .. } if step_id == "after")));
+        assert!(
+            store
+                .get_events("y1")
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, RunEvent::StepFinished { step_id, .. } if step_id == "after"))
+        );
 
         // replay：yield 的 StepResume 已在日志 → 短路径立即放行，不新增 checkpoint
         let store3 = store.clone();
         let wf3 = wf.clone();
-        let out2 = run_workflow(&wf3, store3, &RunOptions::new(serde_json::json!({})).run_id("y1"), None)
-            .await
-            .unwrap();
+        let out2 = run_workflow(
+            &wf3,
+            store3,
+            &RunOptions::new(serde_json::json!({})).run_id("y1"),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out2.status, RunStatus::Finished);
         assert_eq!(
             count_events(&store, "y1", |e| matches!(e, RunEvent::StepPaused { .. })),
@@ -2137,7 +2485,9 @@ mod tests {
             run_workflow(
                 &wf2,
                 store2,
-                &RunOptions::new(serde_json::json!({})).run_id("y2").yield_resume_at(resume_at),
+                &RunOptions::new(serde_json::json!({}))
+                    .run_id("y2")
+                    .yield_resume_at(resume_at),
                 None,
             )
             .await
@@ -2161,9 +2511,7 @@ mod tests {
     // Middleware）与版本路由
     // ====================================================================
 
-    #[derive(
-        serde::Deserialize, serde::Serialize, Default, Debug, PartialEq, Eq,
-    )]
+    #[derive(serde::Deserialize, serde::Serialize, Default, Debug, PartialEq, Eq)]
     struct UserExt {
         user: String,
     }
@@ -2174,20 +2522,24 @@ mod tests {
     #[tokio::test]
     async fn middleware_produce_builds_typed_ext() {
         let store = Arc::new(InMemoryStore::new());
-        let wf = create_workflow(
-            CreateWorkflowConfig::new("mw-ext").input::<serde_json::Value>(),
+        let wf = create_workflow(CreateWorkflowConfig::new("mw-ext").input::<serde_json::Value>())
+            .middleware::<UserExt>(
+                Middleware::new()
+                    .produce(|_ctx| Ok(serde_json::json!({ "user": "alice", "ignored": true }))),
+            )
+            .handler(
+                |ctx: BaseCtx<serde_json::Value, serde_json::Value, UserExt>| async move {
+                    Ok(serde_json::json!({ "user": ctx.ext.user }))
+                },
+            );
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})),
+            None,
         )
-        .middleware::<UserExt>(
-            Middleware::new().produce(|_ctx| {
-                Ok(serde_json::json!({ "user": "alice", "ignored": true }))
-            }),
-        )
-        .handler(|ctx: BaseCtx<serde_json::Value, serde_json::Value, UserExt>| async move {
-            Ok(serde_json::json!({ "user": ctx.ext.user }))
-        });
-        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(
             out.output,
@@ -2201,9 +2553,11 @@ mod tests {
             CreateWorkflowConfig::new("mw-ext-default").input::<serde_json::Value>(),
         )
         .middleware::<UserExt>(Middleware::new())
-        .handler(|ctx: BaseCtx<serde_json::Value, serde_json::Value, UserExt>| async move {
-            Ok(serde_json::json!({ "user": ctx.ext.user }))
-        });
+        .handler(
+            |ctx: BaseCtx<serde_json::Value, serde_json::Value, UserExt>| async move {
+                Ok(serde_json::json!({ "user": ctx.ext.user }))
+            },
+        );
         let out2 = run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})), None)
             .await
             .unwrap();
@@ -2221,10 +2575,9 @@ mod tests {
             WorkflowCtx,
             BoxFuture<'static, anyhow::Result<serde_json::Value>>,
         ) -> BoxFuture<'static, anyhow::Result<serde_json::Value>>
-               + Send
-               + Sync
-               + 'static
-        {
+        + Send
+        + Sync
+        + 'static {
             let order = order.clone();
             move |_ctx, next| {
                 let order = order.clone();
@@ -2241,17 +2594,16 @@ mod tests {
         let order = Arc::new(Mutex::new(Vec::new()));
         let m_in = Middleware::new().wrap(make_wrap("in", &order));
         let m_out = Middleware::new().wrap(make_wrap("out", &order));
-        let wf = create_workflow(
-            CreateWorkflowConfig::new("mw-order").input::<serde_json::Value>(),
-        )
-        .middleware::<()>(m_in)
-        .middleware::<()>(m_out)
-        .handler(|ctx: BaseCtx<serde_json::Value>| async move {
-            ctx.step("inner", |_sc: StepCtx| async move {
-                Ok(serde_json::json!({ "ok": true }))
-            })
-            .await
-        });
+        let wf =
+            create_workflow(CreateWorkflowConfig::new("mw-order").input::<serde_json::Value>())
+                .middleware::<()>(m_in)
+                .middleware::<()>(m_out)
+                .handler(|ctx: BaseCtx<serde_json::Value>| async move {
+                    ctx.step("inner", |_sc: StepCtx| async move {
+                        Ok(serde_json::json!({ "ok": true }))
+                    })
+                    .await
+                });
         let store = Arc::new(InMemoryStore::new());
         let out = run_workflow(&wf, store, &RunOptions::new(serde_json::json!({})), None)
             .await
@@ -2296,10 +2648,19 @@ mod tests {
             }
         });
         let wf: Workflow = wf.into_workflow();
-        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
-            .await
-            .unwrap();
-        assert_eq!(out.status, RunStatus::Finished, "workflow 级 retry 应重试成功");
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out.status,
+            RunStatus::Finished,
+            "workflow 级 retry 应重试成功"
+        );
         assert_eq!(
             count_events(&store, out.run_id.as_str(), |e| matches!(
                 e,
@@ -2335,10 +2696,19 @@ mod tests {
             }
         });
         let wf2: Workflow = wf2.into_workflow();
-        let out2 = run_workflow(&wf2, store2.clone(), &RunOptions::new(serde_json::json!({})), None)
-            .await
-            .unwrap();
-        assert_eq!(out2.status, RunStatus::Errored, "step 自己的 retry=1 → 失败");
+        let out2 = run_workflow(
+            &wf2,
+            store2.clone(),
+            &RunOptions::new(serde_json::json!({})),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out2.status,
+            RunStatus::Errored,
+            "step 自己的 retry=1 → 失败"
+        );
         let st = store2.get_run_state(&out2.run_id).unwrap().unwrap();
         assert!(
             st.status == RunStatus::Errored
@@ -2386,7 +2756,9 @@ mod tests {
     async fn resume_routes_by_persisted_workflow_version() {
         let store = Arc::new(InMemoryStore::new());
         let v1 = create_workflow(
-            CreateWorkflowConfig::new("ver-wf").version("v1").input::<serde_json::Value>(),
+            CreateWorkflowConfig::new("ver-wf")
+                .version("v1")
+                .input::<serde_json::Value>(),
         )
         .handler(|ctx: BaseCtx<serde_json::Value>| async move {
             ctx.step("s", |_sc: StepCtx| async move {
@@ -2407,7 +2779,9 @@ mod tests {
         assert_eq!(out1.output, Some(serde_json::json!({ "ver": "v1" })));
 
         let v2 = create_workflow(
-            CreateWorkflowConfig::new("ver-wf").version("v2").input::<serde_json::Value>(),
+            CreateWorkflowConfig::new("ver-wf")
+                .version("v2")
+                .input::<serde_json::Value>(),
         )
         .previous_versions(vec![v1])
         .handler(|ctx: BaseCtx<serde_json::Value>| async move {

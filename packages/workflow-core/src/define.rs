@@ -18,11 +18,17 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type WorkflowHandler =
     Arc<dyn Fn(WorkflowCtx) -> BoxFuture<'static, anyhow::Result<serde_json::Value>> + Send + Sync>;
 
-/// Per-invocation view handed step closures. Mirrors TanStack's `StepContext`.
+/// Per-invocation view handed step closures. Mirrors TanStack's `StepContext`
+/// member-for-member: `id` / `attempt` / `runtime` helpers, with the per-attempt
+/// `signal` exposed as a cooperative [`is_cancelled`](Self::is_cancelled) poll.
 #[derive(Clone)]
 pub struct StepCtx {
     pub(crate) inner: Arc<EngineRuntime>,
-    pub step_id: String,
+    /// Deterministic step ID. Stable across retries *and* replays of the same
+    /// run — the idempotency-key candidate for external systems (`id`).
+    pub id: String,
+    /// Current attempt number (1-indexed). 0 only for internal probes (e.g.
+    /// the `up_to_date` make-check).
     pub attempt: usize,
 }
 
@@ -34,7 +40,20 @@ impl StepCtx {
         &self.inner.input
     }
     pub fn progress(&self, value: f64) {
-        self.inner.publish_progress(&self.step_id, value);
+        self.inner.publish_progress(&self.id, value);
+    }
+    /// Whether this run was cancelled via [`cancel_run`](crate::engine::cancel_run).
+    /// Cooperative poll counterpart to TanStack's per-attempt `signal` — Rust
+    /// cannot interrupt an in-flight future, so long steps must self-check on
+    /// their own cadence (same granularity as `BaseCtx::is_cancelled`).
+    pub fn is_cancelled(&self) -> bool {
+        self.inner
+            .store
+            .get_run_state(&self.inner.run_id)
+            .ok()
+            .flatten()
+            .map(|st| st.status == crate::event::RunStatus::Aborted)
+            .unwrap_or(false)
     }
     /// Absolute UTC ms runtime budget for this drive (TanStack
     /// `runtime.deadline`); `None` when unbudgeted.
@@ -545,8 +564,7 @@ pub struct Middleware {
 }
 
 /// Erased ctx-extension producer: `&WorkflowCtx` → JSON ext value.
-pub type CtxProducer =
-    Arc<dyn Fn(&WorkflowCtx) -> anyhow::Result<serde_json::Value> + Send + Sync>;
+pub type CtxProducer = Arc<dyn Fn(&WorkflowCtx) -> anyhow::Result<serde_json::Value> + Send + Sync>;
 
 /// Erased around-wrapper: `(ctx, next)` → wrapped handler future.
 pub type CtxWrapper = Arc<
@@ -560,7 +578,10 @@ pub type CtxWrapper = Arc<
 
 impl Middleware {
     pub fn new() -> Self {
-        Self { produce: None, wrap: None }
+        Self {
+            produce: None,
+            wrap: None,
+        }
     }
 
     /// Set the ctx-extension producer.
@@ -600,11 +621,7 @@ impl Default for Middleware {
 /// serde shape-checks (zod `.safeParse` counterparts); `version` is the string
 /// this workflow's runs persist for version routing; `default_step_retry` is
 /// the step retry fallback; `description` is metadata.
-pub struct CreateWorkflowConfig<
-    TInput = (),
-    TOutput = (),
-    TState = serde_json::Value,
-> {
+pub struct CreateWorkflowConfig<TInput = (), TOutput = (), TState = serde_json::Value> {
     pub id: String,
     pub description: Option<String>,
     pub version: Option<String>,
@@ -772,7 +789,10 @@ impl<TInput, TOutput, TState, TCtxExt> WorkflowBuilder<TInput, TOutput, TState, 
     /// into it; [`Default`] is used when the middleware has no `produce`).
     /// TanStack's intersection of extension types collapses to this single
     /// bundle; extra `wrap`s still compose in registration order.
-    pub fn middleware<PExt>(mut self, m: Middleware) -> WorkflowBuilder<TInput, TOutput, TState, PExt> {
+    pub fn middleware<PExt>(
+        mut self,
+        m: Middleware,
+    ) -> WorkflowBuilder<TInput, TOutput, TState, PExt> {
         self.middlewares.push(m);
         WorkflowBuilder {
             config: self.config,
@@ -793,7 +813,10 @@ impl<TInput, TOutput, TState, TCtxExt> WorkflowBuilder<TInput, TOutput, TState, 
     /// handler's return value; the engine stores it serialized as JSON, so on
     /// resume the handler re-runs from scratch with re-parsed input/state and a
     /// freshly `produce`d extension (same as TanStack).
-    pub fn handler<F, Fut, AOut>(self, handler: F) -> WorkflowDefinition<TInput, AOut, TState, TCtxExt>
+    pub fn handler<F, Fut, AOut>(
+        self,
+        handler: F,
+    ) -> WorkflowDefinition<TInput, AOut, TState, TCtxExt>
     where
         TInput: serde::de::DeserializeOwned + Send + Sync + 'static,
         TState: serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
@@ -832,9 +855,7 @@ impl<TInput, TOutput, TState, TCtxExt> WorkflowBuilder<TInput, TOutput, TState, 
                     .iter()
                     .filter_map(|m| m.produce.clone())
                     .next_back()
-                    .map(|p| -> anyhow::Result<TCtxExt> {
-                        Ok(serde_json::from_value(p(&ctx)?)?)
-                    })
+                    .map(|p| -> anyhow::Result<TCtxExt> { Ok(serde_json::from_value(p(&ctx)?)?) })
                     .transpose()?
                     .unwrap_or_default();
                 let typed = BaseCtx {

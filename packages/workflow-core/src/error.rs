@@ -16,8 +16,15 @@ pub enum StoreError {
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StoreError::Conflict { run_id, expected, actual } => {
-                write!(f, "append CAS conflict for run {run_id}: expected index {expected}, found {actual}")
+            StoreError::Conflict {
+                run_id,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "append CAS conflict for run {run_id}: expected index {expected}, found {actual}"
+                )
             }
             StoreError::Io(msg) => write!(f, "store io error: {msg}"),
         }
