@@ -210,7 +210,9 @@ store 必须报 `StoreError::Io`，不许静默 no-op。
 要具体类型就 `state.into_typed::<In, Out>()?` —— 对应 TanStack 的
 `RunState<TInput, TOutput>`，但他们是 cast（不校验），我们真的反序列化（会 `Err`）。
 
-`error` 是结构化的 `RunError { name, message }`。两处刻意不对等：`anyhow::Error`
+`error` 是结构化的 `RunError { name, message }`，终局事件 `RunErrored` 还带一个
+机器可读的 `code`（`RunErrorCode`：目前能产出 `error` / `aborted` /
+`validation_error`）——按它分支，别去匹配 `error.message`。
 是类型擦除的，拿不到 JS `Error.name` 那样的类名，所以只有引擎自身的错误有名字，
 其余退化成 `"Error"`；也不带 `stack`（Rust 侧要么需要 nightly，要么跨 `await`
 拿到的全是运行时内部帧，没用）。

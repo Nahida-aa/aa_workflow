@@ -90,6 +90,43 @@ impl RunError {
     }
 }
 
+/// 终局错误码（对齐 TanStack `RUN_ERRORED.code`，`types.ts:91`）。
+///
+/// TS 全集是 `error | aborted | validation_error | run_lost | signal_lost |
+/// approval_lost | workflow_version_mismatch`。这里只留引擎真能产出的三个：
+///
+/// - `run_lost` / `signal_lost` / `approval_lost` 对应他们「投递丢失」时把
+///   run 打 errored 的路径，我们的 `signal_run` / `signal_event` 是把错误
+///   **返回给调用方**，不往日志里写终态事件，没有发射点。
+/// - `workflow_version_mismatch` 我们是**回退到当前版本**而不是报错
+///   （`select_workflow_version`），所以也产不出。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunErrorCode {
+    /// handler 抛错 / step 失败。
+    Error,
+    /// 被 `cancel_run` 中止。
+    Aborted,
+    /// `initialize` 失败或 state 形状校验不过（对应他们 zod `.safeParse` 失败）。
+    Validation,
+}
+
+impl RunErrorCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RunErrorCode::Error => "error",
+            RunErrorCode::Aborted => "aborted",
+            RunErrorCode::Validation => "validation_error",
+        }
+    }
+}
+
+impl std::fmt::Display for RunErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl std::fmt::Display for RunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)

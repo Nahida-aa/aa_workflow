@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
 
-use crate::error::RunError;
+use crate::error::{RunError, RunErrorCode};
 
 /// Overall lifecycle status of a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,7 +63,10 @@ pub enum RunEvent {
     RunErrored {
         ts: i64,
         run_id: String,
-        error: String,
+        error: RunError,
+        /// 机器可读的终局原因（TanStack `RUN_ERRORED.code`）。用它分支，别去
+        /// 匹配 `error.message`。
+        code: RunErrorCode,
     },
     /// Observability only (not persisted): a step began executing.
     StepStarted {
@@ -85,7 +88,7 @@ pub enum RunEvent {
         ts: i64,
         run_id: String,
         step_id: String,
-        error: String,
+        error: RunError,
         attempts: Vec<StepAttempt>,
     },
     /// Checkpoint (persisted): the run parked at a durable wait point
@@ -174,7 +177,8 @@ impl RunEvent {
 pub struct StepState {
     pub status: StepStatus,
     pub result: Option<serde_json::Value>,
-    pub error: Option<String>,
+    /// 与 [`StepAttempt::error`] 同构（都是 `RunError`）。
+    pub error: Option<RunError>,
     pub started_at: Option<i64>,
     pub finished_at: Option<i64>,
 }

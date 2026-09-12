@@ -13,8 +13,7 @@ use crate::define::Workflow;
 use crate::engine::{
     DEFAULT_MIN_YIELD_REMAINING_MS, EngineRuntime, StepHalt, WorkflowCancelled, now_ms,
 };
-use crate::error::RunError;
-use crate::error::WorkflowError;
+use crate::error::{RunError, RunErrorCode, WorkflowError};
 use crate::event::{RunEvent, RunStatus, StepStatus, fold_step_states};
 use crate::resource::Gate;
 use crate::run_store::{RunState, RunStore};
@@ -185,12 +184,12 @@ pub async fn run_workflow(
     // shares that source for consistency.
     let state = match (active.initialize)(&opts.input) {
         Ok(s) => s,
-        Err(e) => return init_failed(&store, run_state, &run_id, &e),
+        Err(e) => return init_failed(&store, run_state, &run_id, &e, publisher.as_ref()),
     };
     if let Some(validate) = &active.state_validator
         && let Err(e) = validate(&state)
     {
-        return init_failed(&store, run_state, &run_id, &e);
+        return init_failed(&store, run_state, &run_id, &e, publisher.as_ref());
     }
 
     let events = store.get_events(&run_id)?;
@@ -234,23 +233,30 @@ pub async fn run_workflow(
     let ctx = crate::define::WorkflowCtx::untyped(inner.clone());
     let handler_result = (active.handler)(ctx).await;
 
-    // `error` 是结构化的（`RunState.error` 用它）；`RunOutcome.error` 对调用方
-    // 仍给扁平字符串，因为 `RunOutcome` 本身没有 TanStack 对端（他们的
-    // `runWorkflow` 是 async generator，只吐事件）。
-    let (status, output, error) = match handler_result {
+    // `failure` 是结构化的（`RunState.error` 与 `RUN_ERRORED` 用它）；
+    // `RunOutcome.error` 对调用方仍给扁平字符串，因为 `RunOutcome` 本身没有
+    // TanStack 对端（他们的 `runWorkflow` 是 async generator，只吐事件）。
+    let (status, output, failure) = match handler_result {
         Ok(output) => (RunStatus::Finished, Some(output), None),
         Err(e) if e.downcast_ref::<StepHalt>().is_some() => (RunStatus::Finished, None, None),
-        Err(e) if e.downcast_ref::<WorkflowCancelled>().is_some() => {
-            (RunStatus::Aborted, None, Some(RunError::cancelled()))
-        }
-        Err(e) => (RunStatus::Errored, None, Some(RunError::from_anyhow(&e))),
+        Err(e) if e.downcast_ref::<WorkflowCancelled>().is_some() => (
+            RunStatus::Aborted,
+            None,
+            Some((RunError::cancelled(), RunErrorCode::Aborted)),
+        ),
+        Err(e) => (
+            RunStatus::Errored,
+            None,
+            Some((RunError::from_anyhow(&e), RunErrorCode::Error)),
+        ),
     };
 
-    let terminal = match &error {
-        Some(e) => RunEvent::RunErrored {
+    let terminal = match &failure {
+        Some((err, code)) => RunEvent::RunErrored {
             ts: now_ms(),
             run_id: run_id.clone(),
-            error: e.message.clone(),
+            error: err.clone(),
+            code: *code,
         },
         None => RunEvent::RunFinished {
             ts: now_ms(),
@@ -264,7 +270,7 @@ pub async fn run_workflow(
     let mut st = run_state;
     st.status = status;
     st.output = output.clone();
-    st.error = error.clone();
+    st.error = failure.as_ref().map(|(e, _)| e.clone());
     st.updated_at = now_ms();
     store.set_run_state(&run_id, &st)?;
 
@@ -272,7 +278,7 @@ pub async fn run_workflow(
         run_id,
         status,
         output,
-        error: error.map(|e| e.message),
+        error: failure.map(|(e, _)| e.message),
     })
 }
 
@@ -280,18 +286,32 @@ pub async fn run_workflow(
 /// `initialize` returning an error, or the `state_schema` shape check
 /// rejecting the built state) and returns the errored outcome. Counterpart of
 /// TanStack zod `.safeParse` failing validation: the run is recorded as
-/// failed rather than left dangling. No events are appended — nothing has run.
+/// failed rather than left dangling.
+///
+/// **只 publish，不 append**：什么都没跑，不该在日志里留下半条记录——TanStack
+/// 同理，他们的 validation 失败走 `emit(...)`（只进内存队列），不是
+/// `emitAndAppend`（`run-workflow.ts:215`）。
 fn init_failed(
     store: &Arc<dyn RunStore>,
     mut run_state: RunState,
     run_id: &str,
     err: &anyhow::Error,
+    publisher: Option<&Arc<dyn Fn(&RunEvent) + Send + Sync>>,
 ) -> Result<RunOutcome, WorkflowError> {
-    let msg = err.to_string();
+    let run_err = RunError::from_anyhow(err);
+    let msg = run_err.message.clone();
     run_state.status = RunStatus::Errored;
-    run_state.error = Some(RunError::from_anyhow(err));
+    run_state.error = Some(run_err.clone());
     run_state.updated_at = now_ms();
     store.set_run_state(run_id, &run_state)?;
+    if let Some(publish) = publisher {
+        publish(&RunEvent::RunErrored {
+            ts: now_ms(),
+            run_id: run_id.to_string(),
+            error: run_err,
+            code: RunErrorCode::Validation,
+        });
+    }
     Ok(RunOutcome {
         run_id: run_id.to_string(),
         status: RunStatus::Errored,
@@ -428,9 +448,109 @@ mod tests {
         assert_eq!(st.status, RunStatus::Errored);
     }
 
-    /// `select_workflow_version`（TanStack `selectWorkflowVersion`）：持久化的
-    /// `workflow_version` 在 `[current] + previous_versions` 中路由；未知/缺省
-    /// 回退当前版本。
+    /// `RUN_ERRORED` 带机器可读的 `code`（TanStack `RUN_ERRORED.code`），
+    /// host 该用它分支，而不是去匹配 `error.message`。
+    #[tokio::test]
+    async fn handler_failure_errored_with_error_code() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("bad").handler(|ctx: WorkflowCtx| async move {
+            ctx.step("a", |_sc: StepCtx| async move { anyhow::bail!("boom") })
+                .await
+        });
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(json!({})).run_id("code:err"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Errored);
+
+        let (err, code) = store
+            .get_events("code:err")
+            .unwrap()
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::RunErrored { error, code, .. } => Some((error.clone(), *code)),
+                _ => None,
+            })
+            .expect("终局事件应为 RunErrored");
+        assert_eq!(code, RunErrorCode::Error);
+        assert_eq!(code.as_str(), "error");
+        assert_eq!(err.message, "step `a` failed: boom");
+    }
+
+    #[tokio::test]
+    async fn cancelled_run_errored_with_aborted_code() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("c").handler(|_ctx: WorkflowCtx| async move {
+            Err(crate::engine::WorkflowCancelled.into())
+        });
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(json!({})).run_id("code:abort"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Aborted);
+
+        let (err, code) = store
+            .get_events("code:abort")
+            .unwrap()
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::RunErrored { error, code, .. } => Some((error.clone(), *code)),
+                _ => None,
+            })
+            .expect("终局事件应为 RunErrored");
+        assert_eq!(code, RunErrorCode::Aborted);
+        assert_eq!(err.name, "Aborted");
+    }
+
+    /// `initialize` 失败：publish `validation_error`，但**不落盘**（对齐
+    /// TanStack 的 `emit` 而非 `emitAndAppend`）。
+    #[tokio::test]
+    async fn init_failure_publishes_validation_code_without_appending() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let seen: Arc<Mutex<Vec<RunEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let publisher: Arc<dyn Fn(&RunEvent) + Send + Sync> = {
+            let seen = seen.clone();
+            Arc::new(move |ev| seen.lock().unwrap().push(ev.clone()))
+        };
+        let wf = Workflow::new("bad-init")
+            .initialize(|_| Err(anyhow::anyhow!("nope")))
+            .handler(|_ctx: WorkflowCtx| async move { Ok(json!({ "unreachable": true })) });
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(json!({})).run_id("code:validation"),
+            Some(publisher),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Errored);
+        assert!(
+            store.get_events("code:validation").unwrap().is_empty(),
+            "什么都没跑，不该留下事件"
+        );
+
+        let (err, code) = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::RunErrored { error, code, .. } => Some((error.clone(), *code)),
+                _ => None,
+            })
+            .expect("应 publish RunErrored");
+        assert_eq!(code, RunErrorCode::Validation);
+        assert_eq!(code.as_str(), "validation_error");
+        assert_eq!(err.message, "nope");
+    }
+
     #[test]
     fn select_workflow_version_routes_and_falls_back() {
         let v1 = Workflow::new("wf").version("v1");

@@ -11,8 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::define::{StepCtx, StepOptions};
-use crate::error::RunError;
-use crate::error::{StoreError, WorkflowError};
+use crate::error::{RunError, StoreError, WorkflowError};
 use crate::event::{RunEvent, RunStatus, StepAttempt, StepState, StepStatus};
 use crate::resource::Gate;
 use crate::run_store::RunStore;
@@ -239,8 +238,11 @@ where
                 // stale → fall through and re-execute below.
             }
             StepStatus::Failed => {
-                let msg = st.error.clone().unwrap_or_else(|| "failed".to_string());
-                return Err(anyhow::anyhow!("step `{step_id}` previously failed: {msg}"));
+                let err = st
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| RunError::from_anyhow(&anyhow::anyhow!("failed")));
+                return Err(anyhow::anyhow!("step `{step_id}` previously failed: {err}"));
             }
             // Running can only appear from a live concurrent duplicate id —
             // a user error we surface loudly instead of double-appending.
@@ -330,12 +332,13 @@ where
                 return Ok(result);
             }
             Err(err) => {
+                let run_err = RunError::from_anyhow(&err);
                 attempts.push(StepAttempt {
                     attempt,
                     started_at,
                     finished_at,
                     result: None,
-                    error: Some(RunError::from_anyhow(&err)),
+                    error: Some(run_err.clone()),
                 });
                 let retrying = retry.is_some() && attempt < max_attempts;
                 if retrying {
@@ -354,7 +357,7 @@ where
                     ts: now_ms(),
                     run_id: inner.run_id.clone(),
                     step_id: step_id.to_string(),
-                    error: msg.clone(),
+                    error: run_err.clone(),
                     attempts,
                 };
                 inner.append(&ev)?;
@@ -363,7 +366,7 @@ where
                     StepState {
                         status: StepStatus::Failed,
                         result: None,
-                        error: Some(msg.clone()),
+                        error: Some(run_err),
                         started_at: Some(started_at),
                         finished_at: Some(finished_at),
                     },
@@ -735,6 +738,7 @@ mod tests {
         Backoff, BaseCtx, CreateWorkflowConfig, RetryPolicy, Workflow, WorkflowCtx, create_workflow,
     };
     use crate::engine::testkit::{TestLog, idx};
+    use crate::error::RunErrorCode;
     use crate::run_store::{InMemoryStore, RunState};
     use std::sync::atomic::AtomicBool;
     use tokio::try_join;
@@ -2091,6 +2095,22 @@ mod tests {
 
         let st = store.get_run_state("ca1").unwrap().unwrap();
         assert_eq!(st.status, RunStatus::Aborted, "RunState 终态应为 Aborted");
+        // 结构化错误名 + 机器可读 code，不用再去匹配 message 字符串。
+        assert_eq!(
+            st.error.as_ref().map(|e| e.name.as_str()),
+            Some("Aborted"),
+            "RunState.error 应带上结构化错误名"
+        );
+        let code = store
+            .get_events("ca1")
+            .unwrap()
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::RunErrored { code, .. } => Some(*code),
+                _ => None,
+            })
+            .expect("终局事件应为 RunErrored");
+        assert_eq!(code, RunErrorCode::Aborted, "RUN_ERRORED.code 应是 aborted");
         assert!(st.waiting_for.is_none() && st.pending_approval.is_none());
 
         // 日志没有 Finished 终态，也不应落在 running/paused（cancel 后不再驱动）
