@@ -36,14 +36,18 @@ pub struct PendingApproval {
 /// log; this is just the envelope the launcher needs to locate runs.
 /// `waiting_for` / `pending_approval` 是挂起态的一等投影（派生自事件日志，
 /// 恢复时清除）——观察者无需扫日志就能告诉 run 在等什么。
+///
+/// `In` / `Out` 默认擦除为 [`serde_json::Value`]，因为 [`RunStore`] 的契约面
+/// 必须能装下任意 workflow 的 input/output（store 是 `dyn`，无法带泛型）。
+/// 想要具体类型的调用方用 [`RunState::into_typed`] 窄化。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunState {
+pub struct RunState<In = serde_json::Value, Out = serde_json::Value> {
     pub run_id: String,
     pub workflow_id: String,
     pub workflow_version: Option<String>,
     pub status: RunStatus,
-    pub input: serde_json::Value,
-    pub output: Option<serde_json::Value>,
+    pub input: In,
+    pub output: Option<Out>,
     pub error: Option<String>,
     /// 挂起等待外部 signal / sleep 到期（sleep 有 deadline）。
     #[serde(default)]
@@ -53,6 +57,35 @@ pub struct RunState {
     pub pending_approval: Option<PendingApproval>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// 从 store 的擦除形态（`RunState<Value, Value>`）窄化成具体类型。
+///
+/// 对应 TanStack 的 `RunState<TInput, TOutput>`（`types.ts:540`）。差别值得写清：
+/// 他们的 `RunStore` 边界同样是 `RunState<unknown, unknown>`，消费者用
+/// `WorkflowInput<typeof wf>` / `WorkflowOutput<typeof wf>` 重新参数化后
+/// **cast** 过去——纯类型断言，无运行时成本也无校验。Rust 没有 `unknown`，
+/// 必须真的反序列化，所以这里会失败并返回 `Err`。
+impl RunState<serde_json::Value, serde_json::Value> {
+    pub fn into_typed<In, Out>(self) -> anyhow::Result<RunState<In, Out>>
+    where
+        In: serde::de::DeserializeOwned,
+        Out: serde::de::DeserializeOwned,
+    {
+        Ok(RunState {
+            run_id: self.run_id,
+            workflow_id: self.workflow_id,
+            workflow_version: self.workflow_version,
+            status: self.status,
+            input: serde_json::from_value(self.input)?,
+            output: self.output.map(serde_json::from_value).transpose()?,
+            error: self.error,
+            waiting_for: self.waiting_for,
+            pending_approval: self.pending_approval,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
 }
 
 /// The store contract, modelled after TanStack Workflow's two-surface design:
@@ -95,5 +128,83 @@ pub trait RunStore: Send + Sync {
     fn subscribe(&self, run_id: &str) -> Option<Receiver<RunEvent>> {
         let _ = run_id;
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(serde::Deserialize, serde::Serialize, Debug, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    struct OrderIn {
+        order_id: String,
+    }
+
+    #[derive(serde::Deserialize, serde::Serialize, Debug, PartialEq)]
+    struct OrderOut {
+        ok: bool,
+    }
+
+    fn erased(output: Option<serde_json::Value>) -> RunState {
+        RunState {
+            run_id: "r1".into(),
+            workflow_id: "order".into(),
+            workflow_version: Some("v2".into()),
+            status: RunStatus::Finished,
+            input: serde_json::json!({ "orderId": "A-1" }),
+            output,
+            error: None,
+            waiting_for: None,
+            pending_approval: None,
+            created_at: 1,
+            updated_at: 2,
+        }
+    }
+
+    #[test]
+    fn into_typed_narrows_input_and_output() {
+        let typed: RunState<OrderIn, OrderOut> = erased(Some(serde_json::json!({ "ok": true })))
+            .into_typed()
+            .unwrap();
+        assert_eq!(
+            typed.input,
+            OrderIn {
+                order_id: "A-1".into()
+            }
+        );
+        assert_eq!(typed.output, Some(OrderOut { ok: true }));
+        // 非 input/output 字段原样搬运。
+        assert_eq!(typed.run_id, "r1");
+        assert_eq!(typed.workflow_version.as_deref(), Some("v2"));
+        assert_eq!(typed.status, RunStatus::Finished);
+        assert_eq!(typed.created_at, 1);
+    }
+
+    #[test]
+    fn into_typed_keeps_absent_output_absent() {
+        let typed: RunState<OrderIn, OrderOut> = erased(None).into_typed().unwrap();
+        assert_eq!(typed.output, None, "output 为 None 时不该去解析出默认值");
+    }
+
+    #[test]
+    fn into_typed_reports_shape_mismatch() {
+        let err = erased(Some(serde_json::json!({ "ok": "yes" })))
+            .into_typed::<OrderIn, OrderOut>()
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("invalid type"),
+            "形状不匹配应报 serde 类型错误，实际为 {err}"
+        );
+    }
+
+    /// 擦除形态仍能被 store 序列化/反序列化（run.json 兼容性）。
+    #[test]
+    fn erased_run_state_roundtrips_through_json() {
+        let st = erased(Some(serde_json::json!({ "ok": true })));
+        let json = serde_json::to_string(&st).unwrap();
+        let back: RunState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.input, st.input);
+        assert_eq!(back.output, st.output);
     }
 }

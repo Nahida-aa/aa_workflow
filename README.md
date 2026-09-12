@@ -206,6 +206,10 @@ store 必须报 `StoreError::Io`，不许静默 no-op。
 `FileRunStore`（`run.json` + `events.jsonl`，`publish = false`）。两者都只是
 `RunStore` 的一种实现，换成数据库后端不需要动引擎。
 
+`RunState` 的 `input` / `output` 默认擦除成 `Value`（store 是 `dyn`，装不下泛型），
+要具体类型就 `state.into_typed::<In, Out>()?` —— 对应 TanStack 的
+`RunState<TInput, TOutput>`，但他们是 cast（不校验），我们真的反序列化（会 `Err`）。
+
 ## 与 TanStack 的关系
 
 采纳其命名与 store/event 契约；执行模型在**第二轮**才换成 handler 重放（第一版是
