@@ -36,6 +36,24 @@ impl StepCtx {
     pub fn progress(&self, value: f64) {
         self.inner.publish_progress(&self.step_id, value);
     }
+    /// Absolute UTC ms runtime budget for this drive (TanStack
+    /// `runtime.deadline`); `None` when unbudgeted.
+    pub fn deadline(&self) -> Option<i64> {
+        self.inner.deadline
+    }
+    /// Ms of runtime budget left (`u64::MAX` when no deadline).
+    pub fn time_remaining(&self) -> u64 {
+        match self.inner.deadline {
+            Some(d) => i64::saturating_sub(d, crate::engine::now_ms()).max(0) as u64,
+            None => u64::MAX,
+        }
+    }
+    /// True once the budget is nearly exhausted (`time_remaining() <
+    /// min_yield_remaining_ms`); the step should `?` fast or orchestrate
+    /// yielding via `WorkflowCtx::yield_`.
+    pub fn should_yield(&self) -> bool {
+        self.time_remaining() < self.inner.min_yield_remaining_ms
+    }
 }
 
 /// Anything the handler needs to run steps durably. Held for the whole
@@ -194,6 +212,43 @@ impl WorkflowCtx {
             .flatten()
             .map(|st| st.status == crate::event::RunStatus::Aborted)
             .unwrap_or(false)
+    }
+
+    /// Absolute UTC ms runtime budget for this drive (TanStack `deadline`);
+    /// `None` when the host set no budget.
+    pub fn deadline(&self) -> Option<i64> {
+        self.inner.deadline
+    }
+
+    /// Ms of runtime budget left (`u64::MAX` when no deadline).
+    pub fn time_remaining(&self) -> u64 {
+        match self.inner.deadline {
+            Some(d) => i64::saturating_sub(d, crate::engine::now_ms()).max(0) as u64,
+            None => u64::MAX,
+        }
+    }
+
+    /// True once the budget is nearly exhausted: `time_remaining() <
+    /// min_yield_remaining_ms` (default 1000ms).
+    pub fn should_yield(&self) -> bool {
+        self.time_remaining() < self.inner.min_yield_remaining_ms
+    }
+
+    /// Cooperative hand-back of the runtime budget (TanStack `yield`): durably
+    /// parks the run on a `"__timer"` wait until [`RunOptions::yield_resume_at`]
+    /// (or now+1ms), so a host can re-invoke with a freshly extended deadline.
+    /// Deterministic id `__yield-{n}` (per-invocation counter), replay-safe.
+    pub async fn yield_(&self) -> anyhow::Result<serde_json::Value> {
+        let k = self.inner.yield_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let step_id = format!("__yield-{k}");
+        let target = self
+            .inner
+            .yield_resume_at
+            .unwrap_or_else(|| crate::engine::now_ms() + 1);
+        let dur = std::time::Duration::from_millis(
+            i64::saturating_sub(target, crate::engine::now_ms()).max(0) as u64,
+        );
+        crate::engine::exec_pause(&self.inner, &step_id, "__timer", "yield", Some(dur)).await
     }
 
     /// [`step`](Self::step) with per-step options (retry policy, timeout,
@@ -503,6 +558,26 @@ impl<In> TypedCtx<In> {
     /// Whether this run was cancelled (see [`WorkflowCtx::is_cancelled`]).
     pub fn is_cancelled(&self) -> bool {
         self.inner.is_cancelled()
+    }
+
+    /// Runtime budget deadline (see [`WorkflowCtx::deadline`]).
+    pub fn deadline(&self) -> Option<i64> {
+        self.inner.deadline()
+    }
+
+    /// Ms of runtime budget left (see [`WorkflowCtx::time_remaining`]).
+    pub fn time_remaining(&self) -> u64 {
+        self.inner.time_remaining()
+    }
+
+    /// Whether the budget is nearly exhausted (see [`WorkflowCtx::should_yield`]).
+    pub fn should_yield(&self) -> bool {
+        self.inner.should_yield()
+    }
+
+    /// Cooperative runtime hand-back (see [`WorkflowCtx::yield_`]).
+    pub async fn yield_(&self) -> anyhow::Result<serde_json::Value> {
+        self.inner.yield_().await
     }
 }
 

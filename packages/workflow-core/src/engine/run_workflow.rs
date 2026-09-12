@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Mutex;
 
 use crate::define::Workflow;
-use crate::engine::{now_ms, DrvInner, StepHalt, WorkflowCancelled};
+use crate::engine::{now_ms, DrvInner, StepHalt, WorkflowCancelled, DEFAULT_MIN_YIELD_REMAINING_MS};
 use crate::error::WorkflowError;
 use crate::event::{RunEvent, RunStatus, StepStatus, fold_step_states};
 use crate::resource::Gate;
@@ -27,6 +27,16 @@ pub struct RunOptions {
     pub input: serde_json::Value,
     pub target_step: Option<String>,
     pub continue_from: Option<String>,
+    /// Absolute UTC ms budget for this drive (TanStack `deadline`). When set,
+    /// `time_remaining()` / `should_yield()` (ctx + step) and `ctx.yield_()`
+    /// become active; a fresh budget can be supplied on every resume.
+    pub deadline: Option<i64>,
+    /// `should_yield()` flips true when fewer than this many ms remain
+    /// (TanStack `minYieldRemainingMs`, default 1000).
+    pub min_yield_remaining_ms: Option<u64>,
+    /// Absolute ms at which `ctx.yield_()` re-wakes (TanStack `yieldResumeAt`;
+    /// defaults to "now+1ms" per call).
+    pub yield_resume_at: Option<i64>,
 }
 
 impl RunOptions {
@@ -36,6 +46,9 @@ impl RunOptions {
             input,
             target_step: None,
             continue_from: None,
+            deadline: None,
+            min_yield_remaining_ms: None,
+            yield_resume_at: None,
         }
     }
 
@@ -51,6 +64,24 @@ impl RunOptions {
 
     pub fn continue_from(mut self, v: impl Into<String>) -> Self {
         self.continue_from = Some(v.into());
+        self
+    }
+
+    /// Set the absolute UTC ms runtime budget for this drive.
+    pub fn deadline(mut self, v: i64) -> Self {
+        self.deadline = Some(v);
+        self
+    }
+
+    /// Set when `should_yield()` turns true (ms of headroom left).
+    pub fn min_yield_remaining(mut self, v: u64) -> Self {
+        self.min_yield_remaining_ms = Some(v);
+        self
+    }
+
+    /// Set the absolute re-wake timestamp for `ctx.yield_()`.
+    pub fn yield_resume_at(mut self, v: i64) -> Self {
+        self.yield_resume_at = Some(v);
         self
     }
 }
@@ -157,6 +188,10 @@ pub async fn run_workflow(
         publisher,
         now_counter: AtomicUsize::new(0),
         uuid_counter: AtomicUsize::new(0),
+        deadline: opts.deadline,
+        min_yield_remaining_ms: opts.min_yield_remaining_ms.unwrap_or(DEFAULT_MIN_YIELD_REMAINING_MS),
+        yield_resume_at: opts.yield_resume_at,
+        yield_counter: AtomicUsize::new(0),
     });
     inner.publish(&RunEvent::RunStarted { ts, run_id: run_id.clone() });
 

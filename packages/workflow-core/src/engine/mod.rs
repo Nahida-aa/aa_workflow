@@ -116,6 +116,14 @@ pub struct DrvInner {
     /// used to derive the checkpoint ids `__now-{n}` / `__uuid-{n}`.
     now_counter: AtomicUsize,
     uuid_counter: AtomicUsize,
+    /// Runtime budget (TanStack `deadline`): absolute UTC ms for this drive.
+    pub deadline: Option<i64>,
+    /// Headroom threshold for `should_yield()` (TanStack `minYieldRemainingMs`).
+    pub min_yield_remaining_ms: u64,
+    /// Absolute ms at which `ctx.yield_()` re-wakes (TanStack `yieldResumeAt`).
+    pub yield_resume_at: Option<i64>,
+    /// Positional counter for `__yield-{n}` pause keys (per-invocation).
+    pub(crate) yield_counter: AtomicUsize,
     pub publisher: Option<Arc<dyn Fn(&RunEvent) + Send + Sync>>,
 }
 
@@ -356,6 +364,10 @@ where
 /// Polling (rather than a subscription) keeps pause/resume working against any
 /// [`RunStore`], including LocalDub's `FsRunStore` which has no `subscribe`.
 const RESUME_POLL_MS: Duration = Duration::from_millis(25);
+
+/// Default `minYieldRemainingMs` (TanStack): `should_yield()` turns true once
+/// fewer than this many ms of the runtime budget remain.
+pub const DEFAULT_MIN_YIELD_REMAINING_MS: u64 = 1000;
 
 /// Deterministic wall-clock behind [`WorkflowCtx::now`](crate::define::WorkflowCtx::now)
 /// (TanStack `ctx.now`): the call's timestamp, recorded as a `NowRecorded`
@@ -2004,5 +2016,129 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
+    }
+
+    #[tokio::test]
+    async fn deadline_exhausted_flags_should_yield() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let seen = Arc::new(Mutex::new((None::<Option<i64>>, false, false)));
+        let sink = seen.clone();
+        let wf = Workflow::new("budget").handler(move |ctx: WorkflowCtx| {
+            let sink = sink.clone();
+            async move {
+                let (d, tr, sy) = (ctx.deadline(), ctx.time_remaining(), ctx.should_yield());
+                *sink.lock().unwrap() = (Some(d), tr < 1000, sy);
+                ctx.step("a", move |sc: StepCtx| {
+                    let sink = sink.clone();
+                    async move {
+                        *sink.lock().unwrap() = (Some(sc.deadline()), sc.time_remaining() < 1000, sc.should_yield());
+                        Ok(serde_json::json!({ "d": sc.deadline(), "tr": sc.time_remaining() }))
+                    }
+                })
+                .await?;
+                Ok(serde_json::Value::Null)
+            }
+        });
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({}))
+                .deadline(crate::engine::now_ms() + 300), // 500ms 内到期 → headroom < 1000
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        {
+            let g = seen.lock().unwrap();
+            let (d, _, _) = *g;
+            assert!(d.is_some(), "deadline 传入");
+        }
+        // 至少一次观测到 budget 接近耗尽 → should_yield 在 ctx 或 step 侧为 true
+        let (_, tr_in_step, _) = *seen.lock().unwrap();
+        assert!(tr_in_step, "should_yield 应因 deadline 逼近而为 true");
+    }
+
+    #[tokio::test]
+    async fn yield_parks_and_replays() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("yielder").handler(|ctx: WorkflowCtx| async move {
+            ctx.yield_().await?;
+            if ctx.should_yield() {
+                ctx.yield_().await?;
+            }
+            ctx.step("after", move |_sc: StepCtx| async move {
+                Ok(serde_json::json!({ "done": true }))
+            })
+            .await?;
+            Ok(serde_json::json!({ "ok": true }))
+        });
+        let store2 = store.clone();
+        let wf2 = wf.clone();
+        let task = tokio::spawn(async move {
+            run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id("y1"), None).await
+        });
+        // 第一个 yield 会 park（default 到期 ≈ now+1ms，非常快）；等待其 StepPaused。
+        wait_until(
+            &store,
+            "y1",
+            |e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id.starts_with("__yield-")),
+        )
+        .await;
+        // 到期自动 resume（timer 自动投递）→ 继续跑完
+        let out = task.await.unwrap().unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        assert!(store
+            .get_events("y1")
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, RunEvent::StepFinished { step_id, .. } if step_id == "after")));
+
+        // replay：yield 的 StepResume 已在日志 → 短路径立即放行，不新增 checkpoint
+        let store3 = store.clone();
+        let wf3 = wf.clone();
+        let out2 = run_workflow(&wf3, store3, &RunOptions::new(serde_json::json!({})).run_id("y1"), None)
+            .await
+            .unwrap();
+        assert_eq!(out2.status, RunStatus::Finished);
+        assert_eq!(
+            count_events(&store, "y1", |e| matches!(e, RunEvent::StepPaused { .. })),
+            1,
+            "replay 不重复 yield 的 pause"
+        );
+    }
+
+    #[tokio::test]
+    async fn yield_waits_until_yield_resume_at() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("yielder").handler(|ctx: WorkflowCtx| async move {
+            ctx.yield_().await?;
+            Ok(serde_json::json!({ "ok": true }))
+        });
+        let resume_at = crate::engine::now_ms() + 250;
+        let store2 = store.clone();
+        let wf2 = wf.clone();
+        let start = crate::engine::now_ms();
+        let task = tokio::spawn(async move {
+            run_workflow(
+                &wf2,
+                store2,
+                &RunOptions::new(serde_json::json!({})).run_id("y2").yield_resume_at(resume_at),
+                None,
+            )
+            .await
+        });
+        wait_until(
+            &store,
+            "y2",
+            |e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id.starts_with("__yield-")),
+        )
+        .await;
+        let out = task.await.unwrap().unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        assert!(
+            crate::engine::now_ms() - start >= 200,
+            "yield 应睡到 yield_resume_at 才放行"
+        );
     }
 }
