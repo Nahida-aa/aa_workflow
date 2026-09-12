@@ -36,6 +36,11 @@ impl std::error::Error for StepHalt {}
 pub struct DrvInner {
     pub run_id: String,
     pub input: serde_json::Value,
+    /// Per-invocation state, rebuilt from `initialize(input)` on every start
+    /// and resume (see `define::Workflow::initialize`). Guarded by a
+    /// `std::sync::RwLock`; step closures access it via the typed
+    /// `ctx.state::<T>()` / `ctx.set_state` accessors. Never persisted.
+    pub state: Arc<std::sync::RwLock<serde_json::Value>>,
     pub store: Arc<dyn RunStore>,
     pub gate: Arc<Gate>,
     /// Monotonic next-appendix index. Concurrent steps (via `try_join!`)
@@ -373,6 +378,21 @@ pub async fn run_workflow(
     };
     store.set_run_state(&run_id, &run_state)?;
 
+    // Per-invocation state: re-derived from `initialize(input)` on every
+    // start and resume (mirrors TanStack, where state is rebuilt from
+    // `initialize({ input })` and never persisted). The handler input the
+    // workflow sees is `opts.input` (see `DrvInner.input`), so initialize
+    // shares that source for consistency.
+    let state = match (workflow.initialize)(&opts.input) {
+        Ok(s) => s,
+        Err(e) => return init_failed(&store, run_state, &run_id, &e),
+    };
+    if let Some(validate) = &workflow.state_validator
+        && let Err(e) = validate(&state)
+    {
+        return init_failed(&store, run_state, &run_id, &e);
+    }
+
     let events = store.get_events(&run_id)?;
     let lives = fold_step_states(&events);
     let log_len = events.len();
@@ -388,6 +408,7 @@ pub async fn run_workflow(
     let inner = Arc::new(DrvInner {
         run_id: run_id.clone(),
         input: opts.input.clone(),
+        state: Arc::new(std::sync::RwLock::new(state)),
         store: store.clone(),
         gate: Arc::new(Gate::new()),
         log_len: AtomicUsize::new(log_len),
@@ -439,6 +460,30 @@ pub async fn run_workflow(
         status,
         output,
         error,
+    })
+}
+
+/// Persists a run that failed during pre-handler initialization (state
+/// `initialize` returning an error, or the `state_schema` shape check
+/// rejecting the built state) and returns the errored outcome. Counterpart of
+/// TanStack zod `.safeParse` failing validation: the run is recorded as
+/// failed rather than left dangling. No events are appended — nothing has run.
+fn init_failed(
+    store: &Arc<dyn RunStore>,
+    mut run_state: RunState,
+    run_id: &str,
+    err: &anyhow::Error,
+) -> Result<RunOutcome, WorkflowError> {
+    let msg = err.to_string();
+    run_state.status = RunStatus::Errored;
+    run_state.error = Some(msg.clone());
+    run_state.updated_at = now_ms();
+    store.set_run_state(run_id, &run_state)?;
+    Ok(RunOutcome {
+        run_id: run_id.to_string(),
+        status: RunStatus::Errored,
+        output: None,
+        error: Some(msg),
     })
 }
 

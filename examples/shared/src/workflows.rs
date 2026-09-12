@@ -18,6 +18,11 @@
 //! - [`invoice`]（id `invoice`）— 对齐 wf-demo：连续两个 `sleep`（双定时器，引擎自动唤醒）。
 //! - [`compliance`]（id `compliance`）— 对齐 wf-demo：连续两次事件等待后归档。
 //! - [`refund`]（id `refund`）— 对齐 wf-demo 混合链：事件 → 定时闸门 → 审批 → 步骤。
+//! - [`state_demo`]（id `state-demo`）— per-invocation state（对齐 TanStack
+//!   `initialize` + `stateSchema`）：`state_schema::<T>()` 声明 typed state，
+//!   `initialize(|input| ...)` 每次 start/resume 重建 state（**不落盘**），handler
+//!   用 `ctx.state::<T>()` / `ctx.set_state(&t)` 读写。step 闭包**外**的 mutation
+//!   随重建重放，闭包**内**的被 replay 短路丢失（与 TanStack 0.0.4 一致）。
 
 use std::time::Duration;
 use workflow_core::{
@@ -568,6 +573,79 @@ pub fn refund() -> TypedWorkflow<RefundInput, serde_json::Value> {
         })
 }
 
+/// 状态机 demo 输入。
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StateDemoInput {
+    pub order_id: String,
+    pub amount: i64,
+}
+
+/// typed state 的形状（Rust 版 zod `stateSchema`）：`state_schema::<T>()`
+/// 声明契约，`initialize` 每次调用从输入重建，handler 用 `ctx.state::<T>()`
+/// 读、`ctx.set_state(&t)` 写。
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CounterState {
+    pub total: i64,
+    pub settle_events: Vec<String>,
+}
+
+/// per-invocation state（对齐 TanStack `initialize`）：state **不落盘**，每次
+/// start/resume 都从 `initialize(input)` 重建，然后 handler 从头重跑。因此
+/// step 闭包**之外**的 mutation 天然可重放：gate 之后对 state 的修改在
+/// resume 时会再次执行，最终结果与一次跑到底完全一致。
+pub fn state_demo() -> TypedWorkflow<StateDemoInput, serde_json::Value> {
+    Workflow::new("state-demo")
+        .input_schema::<StateDemoInput>()
+        .state_schema::<CounterState>()
+        .initialize(|input| {
+            let amount = input["amount"].as_i64().unwrap_or(0);
+            Ok(serde_json::json!({
+                "total": amount,
+                "settleEvents": serde_json::Value::Array(vec![]),
+            }))
+        })
+        .handler(|ctx: TypedCtx<StateDemoInput>| async move {
+            let input = ctx.input();
+            let order_id = input.order_id.clone();
+            let amount = input.amount;
+
+            // step 闭包之外的 mutation —— resume 时随 initialize 重建+重跑。
+            let mut st: CounterState = ctx.state()?;
+            st.total += 1;
+            ctx.set_state(&st)?;
+
+            let order_id_prepare = order_id.clone();
+            let prepared = ctx
+                .step("prepare", move |_sc: StepCtx| {
+                    let order_id = order_id_prepare;
+                    async move {
+                        Ok(serde_json::json!({ "orderId": order_id, "preparedAt": now_ms() }))
+                    }
+                })
+                .await?;
+
+            // 人工放行 gate：跨调用边界，验证 resume 后 state 重建+重放。
+            ctx.approve("manual-release", "gate pending human release")
+                .await?;
+
+            let mut st2: CounterState = ctx.state()?;
+            st2.settle_events.push("released".into());
+            st2.total += amount;
+            ctx.set_state(&st2)?;
+
+            let final_state: CounterState = ctx.state()?;
+            Ok(serde_json::json!({
+                "orderId": order_id,
+                "total": final_state.total,
+                "settleEvents": final_state.settle_events,
+                "preparedAt": prepared["preparedAt"],
+                "settled": true,
+            }))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1105,5 +1183,289 @@ mod tests {
             msg.contains("ready_at") || msg.contains("missing field"),
             "错误应指向字段路径: {msg}"
         );
+    }
+
+    /// zod `stateSchema` 的 Rust 版：initialize 产物形状不符 `state_schema::<T>()`
+    /// → 每次调用（start/resume）都把 run 标 Errored（与 inputSchema 语义一致）。
+    #[tokio::test]
+    async fn state_validation_rejects_init_shape() {
+        let store = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("state-bad-shape")
+            .state_schema::<CounterState>()
+            .initialize(|_input| Ok(serde_json::json!({ "bogus": 1 })))
+            .handler(|_ctx: WorkflowCtx| async move { Ok(serde_json::json!({})) });
+        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
+            .await
+            .unwrap();
+        assert_eq!(out.status, RunStatus::Errored, "initialize 产物不符 state_schema 应报错");
+        let err = out.error.unwrap();
+        assert!(
+            err.contains("missing field") || err.contains("total") || err.contains("settle_events"),
+            "错误应指向 state 形状: {err}"
+        );
+        let st = store.get_run_state(&out.run_id).unwrap().unwrap();
+        assert_eq!(st.status, RunStatus::Errored, "run state 也应持久化为 Errored");
+    }
+
+    /// `ctx.state::<T>()` / `ctx.set_state(&t)` 往返一致（typed 访问器契约）。
+    #[tokio::test]
+    async fn state_typed_accessors_roundtrip() {
+        let store = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("state-roundtrip")
+            .state_schema::<CounterState>()
+            .initialize(|_input| {
+                Ok(serde_json::json!({ "total": 7, "settleEvents": ["seed"] }))
+            })
+            .handler(|ctx: WorkflowCtx| async move {
+                let mut st: CounterState = ctx.state()?;
+                assert_eq!((st.total, st.settle_events.len()), (7, 1), "initialize 已注入");
+                st.total = 99;
+                st.settle_events.push("mutated".into());
+                ctx.set_state(&st)?;
+                let read: CounterState = ctx.state()?;
+                assert_eq!((read.total, read.settle_events.len()), (99, 2));
+                Ok(serde_json::json!(read.total))
+            });
+        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
+            .await
+            .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        assert_eq!(out.output, Some(serde_json::json!(99)));
+    }
+
+    /// state 每次调用（start/resume）都从 initialize(input) 重建、step 闭包之外的
+    /// mutation 重放——所以崩溃重启（abort → 重跑）后的输出与一次跑完完全一致。
+    /// total = amount(initialize) + 1(前置) + amount(gate 后) = 2*amount + 1。
+    #[tokio::test]
+    async fn state_rebuilt_each_invocation() {
+        let inp = || serde_json::json!({ "orderId": "s-1", "amount": 10 });
+
+        // run A：单任务内 pause + resume（gate 由外部信号放行），不重建 state。
+        let signal_gate = |store: &Arc<InMemoryStore>, run_id: &str| {
+            let store = store.clone();
+            let run_id = run_id.to_string();
+            async move {
+                wait_paused(&store, &run_id, "manual-release").await;
+                signal_run(
+                    store.as_ref(),
+                    &run_id,
+                    "manual-release",
+                    serde_json::json!({ "ok": true }),
+                )
+                .unwrap();
+            }
+        };
+        let store_a = Arc::new(InMemoryStore::new());
+        let store_a2 = store_a.clone();
+        let s1 = signal_gate(&store_a, "state:burst");
+        let burst = tokio::spawn(async move {
+            run_workflow(
+                &state_demo().into_workflow(),
+                store_a2,
+                &RunOptions::new(inp()).run_id("state:burst"),
+                None,
+            )
+            .await
+        });
+        s1.await;
+        let out_burst = burst.await.unwrap().unwrap();
+        assert_eq!(out_burst.status, RunStatus::Finished);
+
+        // run B：先挂起在 gate 后 abort（模拟崩溃，state 不落盘），signal 后重跑
+        // 同 run_id → 引擎从头重建 state + 重放 handler，最终输出应与 A 一致。
+        let store_b = Arc::new(InMemoryStore::new());
+        let store_b2 = store_b.clone();
+        let wf = state_demo().into_workflow();
+        let wf2 = wf.clone();
+        let task_b = tokio::spawn(async move {
+            run_workflow(
+                &wf2,
+                store_b2,
+                &RunOptions::new(inp()).run_id("state:gated"),
+                None,
+            )
+            .await
+        });
+        wait_paused(&store_b, "state:gated", "manual-release").await;
+        let paused_b = store_b.get_run_state("state:gated").unwrap().unwrap();
+        assert_eq!(paused_b.status, RunStatus::Paused, "gate 应把 run 挂起");
+        task_b.abort();
+        let _ = task_b.await;
+        signal_run(
+            store_b.as_ref(),
+            "state:gated",
+            "manual-release",
+            serde_json::json!({ "ok": true }),
+        )
+        .unwrap();
+        let out_b = run_workflow(
+            &wf,
+            store_b.clone(),
+            &RunOptions::new(inp()).run_id("state:gated"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out_b.status, RunStatus::Finished);
+
+        // 跳过 preparedAt（每次取 now_ms）比较其余全部字段。
+        let project = |o: &serde_json::Value| {
+            serde_json::json!({
+                "orderId": o["orderId"],
+                "total": o["total"],
+                "settleEvents": o["settleEvents"],
+                "settled": o["settled"],
+            })
+        };
+        let expected = serde_json::json!({
+            "orderId": "s-1",
+            "total": 21,
+            "settleEvents": ["released"],
+            "settled": true,
+        });
+        assert_eq!(project(&out_burst.output.unwrap()), expected, "一次跑完的输出");
+        assert_eq!(project(&out_b.output.unwrap()), expected, "崩溃重启后输出应一致（state 重建+重放）");
+    }
+
+    /// 并发 step（`tokio::try_join!`）同时读写 state：访问器从不跨 `.await` 持锁，
+    /// 因此不死锁；last-write-wins（对齐 TanStack 的 mutable `ctx.state`）。
+    #[tokio::test]
+    async fn state_concurrent_steps_no_deadlock() {
+        let store = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("state-concurrency")
+            .state_schema::<CounterState>()
+            .initialize(|_| Ok(serde_json::json!({ "total": 0, "settleEvents": [] })))
+            .handler(|ctx: WorkflowCtx| async move {
+                // `step` borrows `&self`（ctx 活到 handler 结尾）；闭包捕获各自 clone，
+                // 3 个 future 并发等待（`tokio::try_join!`）——并发写 state 不死锁。
+                let qa = ctx.clone();
+                let fa = ctx.step("a", move |_sc: StepCtx| {
+                    let qa = qa;
+                    async move {
+                        let mut st: CounterState = qa.state()?;
+                        st.total += 1;
+                        qa.set_state(&st)?;
+                        let read: CounterState = qa.state()?;
+                        Ok(serde_json::json!(read.total))
+                    }
+                });
+                let qb = ctx.clone();
+                let fb = ctx.step("b", move |_sc: StepCtx| {
+                    let qb = qb;
+                    async move {
+                        let mut st: CounterState = qb.state()?;
+                        st.total += 1;
+                        qb.set_state(&st)?;
+                        let read: CounterState = qb.state()?;
+                        Ok(serde_json::json!(read.total))
+                    }
+                });
+                let qc = ctx.clone();
+                let fc = ctx.step("c", move |_sc: StepCtx| {
+                    let qc = qc;
+                    async move {
+                        let mut st: CounterState = qc.state()?;
+                        st.total += 1;
+                        qc.set_state(&st)?;
+                        let read: CounterState = qc.state()?;
+                        Ok(serde_json::json!(read.total))
+                    }
+                });
+                let (ra, rb, rc): (serde_json::Value, serde_json::Value, serde_json::Value) =
+                    tokio::try_join!(fa, fb, fc)?;
+                let bits = [ra.as_i64().unwrap(), rb.as_i64().unwrap(), rc.as_i64().unwrap()];
+                Ok(serde_json::json!({ "steps": bits }))
+            });
+        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
+            .await
+            .unwrap();
+        assert_eq!(out.status, RunStatus::Finished, "并发写 state 不应死锁");
+        let steps = out.output.clone().unwrap()["steps"].clone();
+        let vals: Vec<i64> = steps
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_i64().unwrap())
+            .collect();
+        assert!(vals.iter().all(|v| (1..=3).contains(v)), "last-write-wins 猜中 1..=3: {vals:?}");
+    }
+
+    /// TanStack 0.0.4 同款 sharp edge：重启重放（crash → re-run handler）时，
+    /// 已被 checkpoint 记录的 step 闭包**不会**再次调用，因此闭包内对 state 的
+    /// 修改丢失——只有 step 闭包**之外**的 mutation 才是可重放的。
+    #[tokio::test]
+    async fn state_step_closure_mutation_lost_on_resume() {
+        let store = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("state-sharp-edge")
+            .state_schema::<CounterState>()
+            .initialize(|input| {
+                Ok(serde_json::json!({
+                    "total": input["amount"].as_i64().unwrap_or(0),
+                    "settleEvents": [],
+                }))
+            })
+            .handler(|ctx: WorkflowCtx| async move {
+                // mutation 在 step 闭包内：重放时整个闭包被跳过 → 修改丢失。
+                let inner = ctx.clone();
+                ctx.step("bump-inside", move |_sc: StepCtx| {
+                    let ctx = inner;
+                    async move {
+                        let mut st: CounterState = ctx.state()?;
+                        st.total += 1;
+                        ctx.set_state(&st)?;
+                        Ok(serde_json::json!({ "bumped": true }))
+                    }
+                })
+                .await?;
+
+                ctx.approve("gate", "sharp edge gate").await?;
+
+                // step 闭包之外的重放 mutation：重跑后仍会执行。
+                let mut st: CounterState = ctx.state()?;
+                st.settle_events.push("outside".into());
+                ctx.set_state(&st)?;
+
+                let final_state: CounterState = ctx.state()?;
+                Ok(serde_json::json!({
+                    "total": final_state.total,
+                    "settleEvents": final_state.settle_events,
+                }))
+            });
+
+        // 进程 A：跑到 gate 挂起后"崩溃"（abort，不写终态）。
+        let store2 = Arc::clone(&store);
+        let wf2 = wf.clone();
+        let task_a = tokio::spawn(async move {
+            run_workflow(
+                &wf2,
+                store2,
+                &RunOptions::new(serde_json::json!({ "amount": 5 })).run_id("state:edge"),
+                None,
+            )
+            .await
+        });
+        wait_paused(&store, "state:edge", "gate").await;
+        task_a.abort();
+        let _ = task_a.await;
+
+        // 进程 B：同 run_id 重跑 → state 从 initialize 重建为 5，`bump-inside`
+        // 已被 checkpoint 记录 → 闭包跳过（+1 丢失），只剩闭包之外的 mutation。
+        signal_run(store.as_ref(), "state:edge", "gate", serde_json::json!({ "ok": true })).unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({ "amount": 5 })).run_id("state:edge"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        let o = out.output.unwrap();
+        assert_eq!(
+            o["total"].as_i64().unwrap(),
+            5,
+            "bump-inside 的 +1 在重启重放时丢失（闭包被短路），只保留 initialize 的 base"
+        );
+        assert_eq!(o["settleEvents"], serde_json::json!(["outside"]), "闭包之外的 mutation 重放");
     }
 }

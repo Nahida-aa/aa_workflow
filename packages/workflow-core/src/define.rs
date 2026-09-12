@@ -55,6 +55,38 @@ impl WorkflowCtx {
         &self.inner.input
     }
 
+    /// Raw shared state handle (guard borrows `&self`; scope writes tightly,
+    /// never hold the guard across an `.await`).
+    pub fn state_value(&self) -> std::sync::RwLockReadGuard<'_, serde_json::Value> {
+        self.inner
+            .state
+            .read()
+            .expect("workflow state lock poisoned")
+    }
+
+    /// Raw mutable shared state handle (guard borrows `&self`; scope writes
+    /// tightly, never hold the guard across an `.await`).
+    pub fn state_value_mut(&self) -> std::sync::RwLockWriteGuard<'_, serde_json::Value> {
+        self.inner
+            .state
+            .write()
+            .expect("workflow state lock poisoned")
+    }
+
+    /// Typed read: clone the current state and deserialize it as `T`.
+    pub fn state<T: serde::de::DeserializeOwned>(&self) -> anyhow::Result<T> {
+        let g = self.state_value();
+        Ok(serde_json::from_value(g.clone())?)
+    }
+
+    /// Typed write: serialize `s` into the shared state (last write wins —
+    /// TanStack's mutable `ctx.state` semantics).
+    pub fn set_state<T: serde::Serialize>(&self, state: &T) -> anyhow::Result<()> {
+        let mut g = self.state_value_mut();
+        *g = serde_json::to_value(state)?;
+        Ok(())
+    }
+
     /// Runs `run` durably under `step_id`. On replay (resume) a previously
     /// succeeded step short-circuits to its cached result *without* calling
     /// `run` again; a previously failed step rethrows the stored error.
@@ -195,12 +227,23 @@ impl StepOptions {
     }
 }
 
+/// Rebuilds the per-invocation state from frozen input. Mirrors TanStack's
+/// `initialize({ input })`: state is NOT persisted — it's re-derived on every
+/// invocation (start and resume) by re-running `initialize` + the handler.
+type InitializeFn =
+    Arc<dyn Fn(&serde_json::Value) -> anyhow::Result<serde_json::Value> + Send + Sync>;
+
+/// Shape-check for the initial state (installed by `Workflow::state_schema::<T>()`).
+type StateValidatorFn = Arc<dyn Fn(&serde_json::Value) -> anyhow::Result<()> + Send + Sync>;
+
 /// A declared workflow: just an id, optional version, and the async handler.
 #[derive(Clone)]
 pub struct Workflow {
     pub id: String,
     pub version: Option<String>,
     pub handler: WorkflowHandler,
+    pub initialize: InitializeFn,
+    pub state_validator: Option<StateValidatorFn>,
 }
 
 impl Workflow {
@@ -209,11 +252,38 @@ impl Workflow {
             id: id.into(),
             version: None,
             handler: Arc::new(|_ctx: WorkflowCtx| Box::pin(async { Ok(serde_json::Value::Null) })),
+            initialize: Arc::new(|_| Ok(serde_json::Value::Object(Default::default()))),
+            state_validator: None,
         }
     }
 
     pub fn version(mut self, version: impl Into<String>) -> Self {
         self.version = Some(version.into());
+        self
+    }
+
+    /// Declare the initial per-invocation state, derived from the frozen run
+    /// input (TanStack `initialize`). Called on every invocation — start and
+    /// resume — and the handler re-runs from scratch, so mutations written
+    /// *outside* step closures re-execute deterministically.
+    pub fn initialize(
+        mut self,
+        f: impl Fn(&serde_json::Value) -> anyhow::Result<serde_json::Value> + Send + Sync + 'static,
+    ) -> Self {
+        self.initialize = Arc::new(f);
+        self
+    }
+
+    /// Declare a typed state (serde `Deserialize` type = schema). The initial
+    /// state built by [`initialize`](Self::initialize) is shape-checked against
+    /// `T` on every invocation; a mismatch errors the run (zod `.safeParse`
+    /// counterpart for `stateSchema`). Typed access at runtime goes through
+    /// [`WorkflowCtx`]'s `state::<T>()` / `set_state::<T>()` accessors.
+    pub fn state_schema<T: serde::de::DeserializeOwned + Send + Sync + 'static>(mut self) -> Self {
+        self.state_validator = Some(Arc::new(|v| {
+            serde_json::from_value::<T>(v.clone())?;
+            Ok(())
+        }));
         self
     }
 
@@ -240,6 +310,8 @@ impl Workflow {
         TypedWorkflowBuilder {
             id: self.id,
             version: self.version,
+            initialize: self.initialize,
+            state_validator: self.state_validator,
             parse: Arc::new(|v| serde_json::from_value(v.clone()).map_err(anyhow::Error::from)),
         }
     }
@@ -265,6 +337,26 @@ impl<In> TypedCtx<In> {
     /// The typed, validated run input.
     pub fn input(&self) -> &In {
         &self.input
+    }
+
+    /// Raw shared state handle (see [`WorkflowCtx::state_value`]).
+    pub fn state_value(&self) -> std::sync::RwLockReadGuard<'_, serde_json::Value> {
+        self.inner.state_value()
+    }
+
+    /// Raw mutable shared state handle (see [`WorkflowCtx::state_value_mut`]).
+    pub fn state_value_mut(&self) -> std::sync::RwLockWriteGuard<'_, serde_json::Value> {
+        self.inner.state_value_mut()
+    }
+
+    /// Typed read of the shared state (see [`WorkflowCtx::state`]).
+    pub fn state<T: serde::de::DeserializeOwned>(&self) -> anyhow::Result<T> {
+        self.inner.state()
+    }
+
+    /// Typed write to the shared state (see [`WorkflowCtx::set_state`]).
+    pub fn set_state<T: serde::Serialize>(&self, state: &T) -> anyhow::Result<()> {
+        self.inner.set_state(state)
     }
 
     pub async fn step<F, Fut>(
@@ -316,6 +408,8 @@ impl<In> TypedCtx<In> {
 pub struct TypedWorkflowBuilder<In> {
     id: String,
     version: Option<String>,
+    initialize: InitializeFn,
+    state_validator: Option<StateValidatorFn>,
     parse: InputParser<In>,
 }
 
@@ -330,6 +424,26 @@ impl<In: Send + Sync + 'static> TypedWorkflowBuilder<In> {
         self
     }
 
+    /// Declare the initial per-invocation state (see [`Workflow::initialize`]).
+    pub fn initialize(
+        mut self,
+        f: impl Fn(&serde_json::Value) -> anyhow::Result<serde_json::Value> + Send + Sync + 'static,
+    ) -> Self {
+        self.initialize = Arc::new(f);
+        self
+    }
+
+    /// Declare a typed state (see [`Workflow::state_schema`]).
+    pub fn state_schema<T: serde::de::DeserializeOwned + Send + Sync + 'static>(
+        mut self,
+    ) -> Self {
+        self.state_validator = Some(Arc::new(|v| {
+            serde_json::from_value::<T>(v.clone())?;
+            Ok(())
+        }));
+        self
+    }
+
     /// Finalize with a typed handler. `Out` is inferred from the return value;
     /// the engine stores it serialized as JSON, so on resume the handler
     /// re-runs from scratch with the re-parsed input (same as TanStack).
@@ -339,7 +453,13 @@ impl<In: Send + Sync + 'static> TypedWorkflowBuilder<In> {
         F: Fn(TypedCtx<In>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = anyhow::Result<Out>> + Send + 'static,
     {
-        let TypedWorkflowBuilder { id, version, parse } = self;
+        let TypedWorkflowBuilder {
+            id,
+            version,
+            initialize,
+            state_validator,
+            parse,
+        } = self;
         let parse = Arc::new(parse);
         let handler = Arc::new(handler);
         let engine_handler: WorkflowHandler = Arc::new(move |ctx: WorkflowCtx| {
@@ -360,6 +480,8 @@ impl<In: Send + Sync + 'static> TypedWorkflowBuilder<In> {
                 id,
                 version,
                 handler: engine_handler,
+                initialize,
+                state_validator,
             },
             _input: PhantomData,
             _output: PhantomData,
