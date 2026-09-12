@@ -120,8 +120,10 @@ let outcome = run_workflow(
 
 ## 耐久原语
 
-`ctx` 上所有会产生 checkpoint 的原语。是否真的写到磁盘由 `RunStore` 实现决定
-（`InMemoryStore` 只进内存），引擎保证的只是「进事件日志、参与 replay」。
+`ctx` 上所有会产生 checkpoint 的原语。持久到哪儿由 `RunStore` 实现决定——内存、
+本地文件、SQL 数据库、云 KV 都可能（TanStack 侧就有 drizzle-postgres 与
+Cloudflare D1 的 store adapter），引擎不假定介质，也不假定一定有磁盘。它保证的
+只是「进事件日志、参与 replay」。
 key **必填**（确定性 / 可重入所需，与 TanStack 的可选 `id` 不同）。
 
 | 方法 | 语义 |
@@ -200,8 +202,9 @@ pub trait RunStore: Send + Sync {
 `StoreError::Conflict`，引擎侧会 rebase + retry（`engine/mod.rs:140`）。做不到截断的
 store 必须报 `StoreError::Io`，不许静默 no-op。
 
-内置 `InMemoryStore`（phase-0，含 subscribe fan-out）；示例层有独立落盘实现
-`FileRunStore`（`run.json` + `events.jsonl`，`publish = false`）。
+内置 `InMemoryStore`（phase-0，含 subscribe fan-out）；示例层另有以文件为介质的
+`FileRunStore`（`run.json` + `events.jsonl`，`publish = false`）。两者都只是
+`RunStore` 的一种实现，换成数据库后端不需要动引擎。
 
 ## 与 TanStack 的关系
 
