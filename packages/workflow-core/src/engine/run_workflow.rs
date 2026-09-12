@@ -323,8 +323,111 @@ mod tests {
     };
     use crate::engine::testkit::TestLog;
     use crate::store::InMemoryStore;
+    use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+
+    #[derive(serde::Deserialize, serde::Serialize)]
+    struct StrictState {
+        n: i64,
+    }
+
+    /// 未显式给 `run_id` 时引擎生成 `run_<now_ms>`，并照常写 run.json。
+    #[tokio::test]
+    async fn run_id_defaults_to_generated_when_absent() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("gen-id").handler(|ctx: WorkflowCtx| async move {
+            ctx.step("a", |_sc: StepCtx| async move { Ok(json!({ "ok": true })) })
+                .await
+        });
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(json!({ "x": 1 })),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            out.run_id.starts_with("run_"),
+            "缺省 run_id 由引擎生成，实际为 {:?}",
+            out.run_id
+        );
+        let st = store
+            .get_run_state(&out.run_id)
+            .unwrap()
+            .expect("run.json 应已写入");
+        assert_eq!(st.status, RunStatus::Finished);
+        assert_eq!(st.input, json!({ "x": 1 }), "input 落在 run.json 信封上");
+    }
+
+    /// `initialize` 失败 → `init_failed`：run 记 Errored，且**不 append 任何事件**
+    /// （什么都没跑）。对齐 TanStack zod `.safeParse` 失败的语义。
+    #[tokio::test]
+    async fn initialize_failure_errors_run_without_events() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("bad-init")
+            .initialize(|_| Err(anyhow::anyhow!("cannot build state")))
+            .handler(|ctx: WorkflowCtx| async move {
+                ctx.step("never", |_sc: StepCtx| async move {
+                    Ok(serde_json::Value::Null)
+                })
+                .await
+            });
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(json!({})).run_id("bad-init:r"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Errored);
+        assert!(out.error.as_deref().unwrap().contains("cannot build state"));
+        assert!(
+            store.get_events("bad-init:r").unwrap().is_empty(),
+            "init 失败不应留下任何事件"
+        );
+        let st = store.get_run_state("bad-init:r").unwrap().unwrap();
+        assert_eq!(st.status, RunStatus::Errored);
+        assert!(st.output.is_none());
+    }
+
+    /// `state_schema` 形状不匹配走同一条 `init_failed` 路径。
+    #[tokio::test]
+    async fn state_shape_mismatch_errors_run_without_events() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = create_workflow(
+            CreateWorkflowConfig::new("bad-state")
+                .input::<serde_json::Value>()
+                .initialize(|_| Ok(json!({ "n": "not-a-number" })))
+                .state::<StrictState>(),
+        )
+        .handler(|ctx: BaseCtx<serde_json::Value, StrictState>| async move {
+            Ok(json!({ "n": ctx.state.n }))
+        });
+        let wf: Workflow = wf.into_workflow();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(json!({})).run_id("bad-state:r"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Errored);
+        assert!(
+            out.error.as_deref().unwrap().contains("invalid type"),
+            "错误应来自 state 的 serde 形状校验，实际为 {:?}",
+            out.error
+        );
+        assert!(
+            store.get_events("bad-state:r").unwrap().is_empty(),
+            "state 校验失败同样不落事件"
+        );
+        let st = store.get_run_state("bad-state:r").unwrap().unwrap();
+        assert_eq!(st.status, RunStatus::Errored);
+    }
 
     /// `select_workflow_version`（TanStack `selectWorkflowVersion`）：持久化的
     /// `workflow_version` 在 `[current] + previous_versions` 中路由；未知/缺省

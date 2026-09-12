@@ -126,7 +126,7 @@ L198）+ `types.ts`（`Ctx<TIn, TState, TExt>` L386）。
 
 ## 验证覆盖
 
-- `cargo test -p workflow-core`：39 个引擎级测试覆盖 Phase 1-5（named wait /
+- `cargo test -p workflow-core`：42 个引擎级测试覆盖 Phase 1-5（named wait /
   sleep_until 过去/定时 / emit 不进日志 / now·uuid 确定性 / cancel_run
   三态 + 重打可恢复 / runtime budget / yield park+replay / **middleware
   produce + wrap 注册序 / `defaultStepRetry` 兜底 + 覆盖 / select_workflow_version
