@@ -7,8 +7,29 @@ use serde::{Deserialize, Serialize};
 use crate::error::StoreError;
 use crate::event::{RunEvent, RunStatus};
 
+/// 挂起等待中的外部信号（对齐 TanStack `RunState.waitingFor`）。sleep 的
+/// `due_at` 就是这里的 `deadline` —— host 可用它做时间索引的唤醒调度。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitForState {
+    pub step_id: String,
+    pub signal_name: String,
+    pub deadline: Option<i64>,
+}
+
+/// 挂起中的审批（对齐 TanStack `RunState.pendingApproval`）。我们的
+/// `approve` 用 key 作 `approval_id`；`title` 即挂起时给的理由。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingApproval {
+    pub step_id: String,
+    pub approval_id: String,
+    pub title: String,
+    pub description: Option<String>,
+}
+
 /// Minimal, durable metadata for a run. The heavy state lives in the event
 /// log; this is just the envelope the launcher needs to locate runs.
+/// `waiting_for` / `pending_approval` 是挂起态的一等投影（派生自事件日志，
+/// 恢复时清除）——观察者无需扫日志就能告诉 run 在等什么。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunState {
     pub run_id: String,
@@ -18,6 +39,12 @@ pub struct RunState {
     pub input: serde_json::Value,
     pub output: Option<serde_json::Value>,
     pub error: Option<String>,
+    /// 挂起等待外部 signal / sleep 到期（sleep 有 deadline）。
+    #[serde(default)]
+    pub waiting_for: Option<WaitForState>,
+    /// 挂起等待审批。
+    #[serde(default)]
+    pub pending_approval: Option<PendingApproval>,
     pub created_at: i64,
     pub updated_at: i64,
 }

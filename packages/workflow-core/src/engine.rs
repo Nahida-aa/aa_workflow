@@ -365,6 +365,8 @@ pub async fn run_workflow(
             input: opts.input.clone(),
             output: None,
             error: None,
+            waiting_for: None,
+            pending_approval: None,
             created_at: ts,
             updated_at: ts,
         },
@@ -462,6 +464,7 @@ pub async fn exec_pause(
     dur: Option<Duration>,
 ) -> anyhow::Result<serde_json::Value> {
     if let Some(payload) = find_resume(&inner.store, &inner.run_id, step_id) {
+        clear_run_wait(&inner.store, &inner.run_id);
         return Ok(payload);
     }
 
@@ -483,14 +486,31 @@ pub async fn exec_pause(
         };
         inner.append(&ev)?;
         inner.publish(&ev);
-        set_run_status(&inner.store, &inner.run_id, RunStatus::Paused);
     }
+    // 投影 run.json（fresh 与崩溃后 replay 一致：都展示 Paused + 等待说明）。
+    project_run_wait(
+        &inner.store,
+        &inner.run_id,
+        match dur {
+            Some(_) => WaitKind::Signal {
+                step_id: step_id.to_string(),
+                signal_name: step_id.to_string(),
+                deadline: due_at,
+            },
+            None => WaitKind::Approval {
+                step_id: step_id.to_string(),
+                approval_id: step_id.to_string(),
+                title: reason.to_string(),
+                description: None,
+            },
+        },
+    );
 
     // Sleeps: poll until `due_at` passes, then deliver the resume ourselves.
     // Approvals: poll until an external `signal_run` appends the resume.
     loop {
         if let Some(payload) = find_resume(&inner.store, &inner.run_id, step_id) {
-            set_run_status(&inner.store, &inner.run_id, RunStatus::Running);
+            clear_run_wait(&inner.store, &inner.run_id);
             return Ok(payload);
         }
         let wait = match due_at {
@@ -527,12 +547,59 @@ fn find_resume(
     })
 }
 
-/// Best-effort run-state flip (keeps the `run.json` view consistent for
-/// observers); failures are ignored — the event log stays authoritative.
-fn set_run_status(store: &Arc<dyn RunStore>, run_id: &str, status: RunStatus) {
+/// 挂起时的 run.json 投影种类。
+enum WaitKind {
+    Signal {
+        step_id: String,
+        signal_name: String,
+        deadline: Option<i64>,
+    },
+    Approval {
+        step_id: String,
+        approval_id: String,
+        title: String,
+        description: Option<String>,
+    },
+}
+
+/// 挂起时把 run.json 投影成 `Paused` + `waiting_for` / `pending_approval`
+/// （对齐 TanStack `RunState`）。fresh 与崩溃后 replay 都会调用，保证
+/// observer 不需要扫事件日志就知道 run 在等什么。best-effort：失败忽略，
+/// 事件日志仍为准。
+fn project_run_wait(store: &Arc<dyn RunStore>, run_id: &str, kind: WaitKind) {
     if let Ok(Some(mut st)) = store.get_run_state(run_id) {
-        st.status = status;
+        st.status = RunStatus::Paused;
         st.updated_at = now_ms();
+        match kind {
+            WaitKind::Signal { step_id, signal_name, deadline } => {
+                st.waiting_for = Some(crate::store::WaitForState {
+                    step_id,
+                    signal_name,
+                    deadline,
+                });
+                st.pending_approval = None;
+            }
+            WaitKind::Approval { step_id, approval_id, title, description } => {
+                st.pending_approval = Some(crate::store::PendingApproval {
+                    step_id,
+                    approval_id,
+                    title,
+                    description,
+                });
+                st.waiting_for = None;
+            }
+        }
+        let _ = store.set_run_state(run_id, &st);
+    }
+}
+
+/// 恢复时清除 wait 投影并回到 `Running`。best-effort。
+fn clear_run_wait(store: &Arc<dyn RunStore>, run_id: &str) {
+    if let Ok(Some(mut st)) = store.get_run_state(run_id) {
+        st.status = RunStatus::Running;
+        st.updated_at = now_ms();
+        st.waiting_for = None;
+        st.pending_approval = None;
         let _ = store.set_run_state(run_id, &st);
     }
 }
@@ -1334,11 +1401,17 @@ mod tests {
         .await;
         let st = store.get_run_state("r1").unwrap().unwrap();
         assert_eq!(st.status, RunStatus::Paused);
+        let pa = st.pending_approval.as_ref().expect("run.json 应投影 pending_approval");
+        assert_eq!(pa.step_id, "release");
+        assert_eq!(pa.title, "Approve the release?");
+        assert!(st.waiting_for.is_none());
 
         signal_run(store.as_ref(), "r1", "release", serde_json::json!({ "approved": true })).unwrap();
         let out = task.await.unwrap().unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output, Some(serde_json::json!({ "approved": true })));
+        let st = store.get_run_state("r1").unwrap().unwrap();
+        assert!(st.waiting_for.is_none() && st.pending_approval.is_none(), "恢复后投影应被清除");
         assert_eq!(
             decided.lock().unwrap().as_ref(),
             Some(&serde_json::json!({ "approved": true }))
@@ -1439,30 +1512,49 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+#[tokio::test]
     async fn sleep_pauses_then_auto_resumes() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let wf = Workflow::new("sleeper").handler(|ctx: WorkflowCtx| async move {
-            ctx.sleep("cooldown", Duration::from_millis(60)).await?;
+            ctx.sleep("cooldown", Duration::from_millis(250)).await?;
             ctx.step("after", move |_sc: StepCtx| async move {
                 Ok(serde_json::json!({ "done": true }))
             })
             .await?;
             Ok(serde_json::Value::Null)
         });
-        let start = std::time::Instant::now();
-        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
-            .await
-            .unwrap();
-        assert_eq!(out.status, RunStatus::Finished);
-        assert!(start.elapsed() >= Duration::from_millis(60));
-
-        let evs = store.get_events(&out.run_id).unwrap();
-        let paused = evs.iter().find_map(|e| match e {
-            RunEvent::StepPaused { step_id, due_at, .. } if step_id == "cooldown" => *due_at,
-            _ => None,
+        let store2 = store.clone();
+        let wf2 = wf.clone();
+        let task = tokio::spawn(async move {
+            run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id("s1"), None)
+                .await
         });
-        assert!(paused.is_some(), "sleep must record due_at for a timer host");
+
+        // 等待进入 sleep：status=Paused + waiting_for{signal_name,deadline}
+        let mut paused: Option<RunState> = None;
+        for _ in 0..2000 {
+            if let Some(st) = store.get_run_state("s1").unwrap() {
+                if st.status == RunStatus::Paused && st.waiting_for.is_some() {
+                    paused = Some(st);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let paused = paused.expect("sleep 中应投影 status=Paused + waiting_for");
+        let wf2_state = paused.waiting_for.as_ref().unwrap();
+        assert_eq!(wf2_state.signal_name, "cooldown");
+        assert!(wf2_state.deadline.is_some(), "sleep 的 due_at 应投影为 deadline");
+
+        let out = task.await.unwrap().unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        let st = store.get_run_state("s1").unwrap().unwrap();
+        assert!(
+            st.waiting_for.is_none() && st.pending_approval.is_none(),
+            "autoresume 后投影应清除"
+        );
+
+        let evs = store.get_events("s1").unwrap();
         let resume = evs.iter().find_map(|e| match e {
             RunEvent::StepResume { step_id, payload, .. } if step_id == "cooldown" => payload.clone(),
             _ => None,

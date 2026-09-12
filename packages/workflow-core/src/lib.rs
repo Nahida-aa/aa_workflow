@@ -36,4 +36,4 @@ pub use engine::{run_workflow, run_workflow_sync, signal_run, RunOptions, RunOut
 pub use error::{StoreError, WorkflowError};
 pub use event::{fold_step_states, RunEvent, RunStatus, StepAttempt, StepState, StepStatus};
 pub use resource::{Gate, GateGuard, ResourceKey};
-pub use store::{InMemoryStore, RunState, RunStore};
+pub use store::{InMemoryStore, PendingApproval, RunState, RunStore, WaitForState};
