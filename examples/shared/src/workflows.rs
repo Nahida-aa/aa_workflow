@@ -2,8 +2,8 @@
 //!
 //! 输入用 `.input_schema::<T>()` 声明（Rust 版 zod `inputSchema`：serde
 //! Deserialize 即运行时校验，缺字段/错类型在首次恢复时报 schema 错误）；
-//! handler 收到 [`TypedCtx<T>`]，`ctx.input()` 直接是 `&T`。输出类型从
-//! handler 返回值自动推断（对齐 TanStack 的返回值推断，无 output 声明）。
+//! handler 收到 [`TypedCtx<In>`]，`ctx.input` 字段直接是 `In`（借用即 `&In`）。
+//! 输出类型从 handler 返回值自动推断（对齐 TanStack 的返回值推断，无 output 声明）。
 //!
 //! - [`fulfillment_saga`]（id `fulfillment-saga`）— 并行（`tokio::try_join!`）+ retry
 //!   + 分支：演示 authoring 面；扣款等副作用**不注入**，走模块级 [`payment_gateway`]
@@ -21,18 +21,20 @@
 //! - [`state_demo`]（id `state-demo`）— per-invocation state（对齐 TanStack
 //!   `initialize` + `stateSchema`）：`state_schema::<T>()` 声明 typed state，
 //!   `initialize(|input| ...)` 每次 start/resume 重建 state（**不落盘**），handler
-//!   用 `ctx.state::<T>()` / `ctx.set_state(&t)` 读写。step 闭包**外**的 mutation
-//!   随重建重放，闭包**内**的被 replay 短路丢失（与 TanStack 0.0.4 一致）。
+//!   直接读写 `ctx.state` 字段（typed 时为 `T`，untyped 时为 `Value`）。step
+//!   闭包**外**的 mutation 随重建重放，闭包**内**的被 replay 短路丢失
+//!   （与 TanStack 0.0.4 一致）。
 
 use std::time::Duration;
 use workflow_core::{
-    Backoff, RetryPolicy, StepCtx, StepOptions, TypedCtx, TypedWorkflow, Workflow, WorkflowCtx,
+    Backoff, BaseCtx, RetryPolicy, StepCtx, StepOptions, TypedCtx, TypedWorkflow, Workflow,
+    WorkflowCtx,
 };
 
 // ========================================================================
 // 输入类型 = workflow 的「schema」（Rust 版 zod `inputSchema`）：serde
 // Deserialize 即运行时校验，`.input_schema::<In>()` 后 handler 拿到
-// `TypedCtx<In>`，`ctx.input()` 直接是 `&In`，没有 `.get(...)` 链。
+// `TypedCtx<In>`，`ctx.input` 直接是 `In`，没有 `.get(...)` 链。
 // ========================================================================
 
 /// 履约 saga 输入。
@@ -170,7 +172,7 @@ pub fn fulfillment_saga() -> TypedWorkflow<FulfillmentSagaInput, serde_json::Val
     Workflow::new("fulfillment-saga")
         .input_schema::<FulfillmentSagaInput>()
         .handler(|ctx: TypedCtx<FulfillmentSagaInput>| async move {
-            let input = ctx.input();
+            let input = &ctx.input;
             let order_id = input.order_id.clone();
             let expedited = input.expedited;
 
@@ -230,7 +232,7 @@ pub fn email_digest() -> TypedWorkflow<EmailDigestInput, serde_json::Value> {
     Workflow::new("email-digest")
         .input_schema::<EmailDigestInput>()
         .handler(move |ctx: TypedCtx<EmailDigestInput>| async move {
-            let days = ctx.input().days;
+            let days = ctx.input.days;
 
             let scanned = ctx
                 .step("scan-events", move |_sc: StepCtx| {
@@ -313,7 +315,7 @@ pub fn fulfillment() -> TypedWorkflow<FulfillmentInput, serde_json::Value> {
     Workflow::new("fulfillment")
         .input_schema::<FulfillmentInput>()
         .handler(|ctx: TypedCtx<FulfillmentInput>| async move {
-            let input = ctx.input();
+            let input = &ctx.input;
             let order_id = input.order_id.clone();
             let ready_at = input.ready_at;
 
@@ -375,7 +377,7 @@ pub fn approval_order() -> TypedWorkflow<ApprovalOrderInput, serde_json::Value> 
     Workflow::new("approval-order")
         .input_schema::<ApprovalOrderInput>()
         .handler(|ctx: TypedCtx<ApprovalOrderInput>| async move {
-            let input = ctx.input();
+            let input = &ctx.input;
             let order_id = input.order_id.clone();
             let amount = input.amount;
             let currency = input.currency.clone();
@@ -446,7 +448,7 @@ pub fn invoice() -> TypedWorkflow<InvoiceInput, serde_json::Value> {
     Workflow::new("invoice")
         .input_schema::<InvoiceInput>()
         .handler(|ctx: TypedCtx<InvoiceInput>| async move {
-            let input = ctx.input();
+            let input = &ctx.input;
             let order_id = input.order_id.clone();
             let t1 = input.t1;
             let t2 = input.t2;
@@ -487,7 +489,7 @@ pub fn compliance() -> TypedWorkflow<ComplianceInput, serde_json::Value> {
     Workflow::new("compliance")
         .input_schema::<ComplianceInput>()
         .handler(|ctx: TypedCtx<ComplianceInput>| async move {
-            let subject_id = ctx.input().subject_id.clone();
+            let subject_id = ctx.input.subject_id.clone();
 
             ctx.approve("legal-review", "waiting for legal-review-done")
                 .await?;
@@ -521,7 +523,7 @@ pub fn refund() -> TypedWorkflow<RefundInput, serde_json::Value> {
     Workflow::new("refund")
         .input_schema::<RefundInput>()
         .handler(|ctx: TypedCtx<RefundInput>| async move {
-            let input = ctx.input();
+            let input = &ctx.input;
             let order_id = input.order_id.clone();
             let amount = input.amount;
             let currency = input.currency.clone();
@@ -582,8 +584,8 @@ pub struct StateDemoInput {
 }
 
 /// typed state 的形状（Rust 版 zod `stateSchema`）：`state_schema::<T>()`
-/// 声明契约，`initialize` 每次调用从输入重建，handler 用 `ctx.state::<T>()`
-/// 读、`ctx.set_state(&t)` 写。
+/// 声明契约，`initialize` 每次调用从输入重建，handler 的 `ctx.state` 就是
+/// typed 字段 `CounterState`，直接读写。
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CounterState {
@@ -606,15 +608,12 @@ pub fn state_demo() -> TypedWorkflow<StateDemoInput, serde_json::Value> {
                 "settleEvents": serde_json::Value::Array(vec![]),
             }))
         })
-        .handler(|ctx: TypedCtx<StateDemoInput>| async move {
-            let input = ctx.input();
-            let order_id = input.order_id.clone();
-            let amount = input.amount;
+        .handler(|mut ctx: BaseCtx<StateDemoInput, CounterState>| async move {
+            let order_id = ctx.input.order_id.clone();
+            let amount = ctx.input.amount;
 
             // step 闭包之外的 mutation —— resume 时随 initialize 重建+重跑。
-            let mut st: CounterState = ctx.state()?;
-            st.total += 1;
-            ctx.set_state(&st)?;
+            ctx.state.total += 1;
 
             let order_id_prepare = order_id.clone();
             let prepared = ctx
@@ -630,16 +629,13 @@ pub fn state_demo() -> TypedWorkflow<StateDemoInput, serde_json::Value> {
             ctx.approve("manual-release", "gate pending human release")
                 .await?;
 
-            let mut st2: CounterState = ctx.state()?;
-            st2.settle_events.push("released".into());
-            st2.total += amount;
-            ctx.set_state(&st2)?;
+            ctx.state.settle_events.push("released".into());
+            ctx.state.total += amount;
 
-            let final_state: CounterState = ctx.state()?;
             Ok(serde_json::json!({
                 "orderId": order_id,
-                "total": final_state.total,
-                "settleEvents": final_state.settle_events,
+                "total": ctx.state.total,
+                "settleEvents": ctx.state.settle_events,
                 "preparedAt": prepared["preparedAt"],
                 "settled": true,
             }))
@@ -661,8 +657,8 @@ pub fn event_gate() -> TypedWorkflow<EventGateInput, serde_json::Value> {
     Workflow::new("event-gate")
         .input_schema::<EventGateInput>()
         .handler(|ctx: TypedCtx<EventGateInput>| async move {
-            let market = ctx.input().market.clone();
-            let predicted_at = ctx.input().predicted_at;
+            let market = ctx.input.market.clone();
+            let predicted_at = ctx.input.predicted_at;
 
             ctx.emit(
                 "gate-opened",
@@ -1252,24 +1248,32 @@ mod tests {
         assert_eq!(st.status, RunStatus::Errored, "run state 也应持久化为 Errored");
     }
 
-    /// `ctx.state::<T>()` / `ctx.set_state(&t)` 往返一致（typed 访问器契约）。
+    /// `state_schema::<St>()` 让 builder 重命名泛型：handler 拿到
+    /// `BaseCtx<In, St>`，`ctx.state` 是 typed 字段直接读写；durable 边界
+    /// （`step`）把工作副本 flush 回引擎镜像。
     #[tokio::test]
-    async fn state_typed_accessors_roundtrip() {
+    async fn state_typed_field_roundtrip() {
         let store = Arc::new(InMemoryStore::new());
         let wf = Workflow::new("state-roundtrip")
+            .input_schema::<serde_json::Value>()
             .state_schema::<CounterState>()
             .initialize(|_input| {
                 Ok(serde_json::json!({ "total": 7, "settleEvents": ["seed"] }))
             })
-            .handler(|ctx: WorkflowCtx| async move {
-                let mut st: CounterState = ctx.state()?;
-                assert_eq!((st.total, st.settle_events.len()), (7, 1), "initialize 已注入");
-                st.total = 99;
-                st.settle_events.push("mutated".into());
-                ctx.set_state(&st)?;
-                let read: CounterState = ctx.state()?;
-                assert_eq!((read.total, read.settle_events.len()), (99, 2));
-                Ok(serde_json::json!(read.total))
+            .handler(|mut ctx: BaseCtx<serde_json::Value, CounterState>| async move {
+                assert_eq!(
+                    (ctx.state.total, ctx.state.settle_events.len()),
+                    (7, 1),
+                    "initialize 已注入"
+                );
+                ctx.state.total = 99;
+                ctx.state.settle_events.push("mutated".into());
+                // durable 边界：flush 执行（镜像写回，per-invocation 语义）。
+                ctx.step("flush-check", |_sc: StepCtx| async move {
+                    Ok(serde_json::json!({ "flushed": true }))
+                })
+                .await?;
+                Ok(serde_json::json!(ctx.state.total))
             });
         let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
             .await
@@ -1372,67 +1376,64 @@ mod tests {
         assert_eq!(project(&out_b.output.unwrap()), expected, "崩溃重启后输出应一致（state 重建+重放）");
     }
 
-    /// 并发 step（`tokio::try_join!`）同时读写 state：访问器从不跨 `.await` 持锁，
-    /// 因此不死锁；last-write-wins（对齐 TanStack 的 mutable `ctx.state`）。
+    /// 并行 step（`tokio::try_join!`）各自持 `ctx.clone()` 时的 state 快照：
+    /// 互不共享、不持锁跨 `.await`（与 TanStack 的 in-place 共享对象不同——
+    /// 克隆即分裂，见 PARITY.md）。driver 位点的 mutation 在 durable 边界
+    /// `approve` 时 flush 回引擎镜像。
     #[tokio::test]
-    async fn state_concurrent_steps_no_deadlock() {
+    async fn state_parallel_steps_snapshot_then_driver_flush() {
         let store = Arc::new(InMemoryStore::new());
         let wf = Workflow::new("state-concurrency")
             .state_schema::<CounterState>()
             .initialize(|_| Ok(serde_json::json!({ "total": 0, "settleEvents": [] })))
-            .handler(|ctx: WorkflowCtx| async move {
-                // `step` borrows `&self`（ctx 活到 handler 结尾）；闭包捕获各自 clone，
-                // 3 个 future 并发等待（`tokio::try_join!`）——并发写 state 不死锁。
+            .handler(|mut ctx: WorkflowCtx| async move {
+                // clone 发生在 step 创建时 = state 快照；闭包内看到的都与 driver
+                // 无关，3 个并发等待互不锁（state 是字段，不经过 RwLock）。
                 let qa = ctx.clone();
                 let fa = ctx.step("a", move |_sc: StepCtx| {
                     let qa = qa;
-                    async move {
-                        let mut st: CounterState = qa.state()?;
-                        st.total += 1;
-                        qa.set_state(&st)?;
-                        let read: CounterState = qa.state()?;
-                        Ok(serde_json::json!(read.total))
-                    }
+                    async move { Ok(qa.state["total"].clone()) }
                 });
                 let qb = ctx.clone();
                 let fb = ctx.step("b", move |_sc: StepCtx| {
                     let qb = qb;
-                    async move {
-                        let mut st: CounterState = qb.state()?;
-                        st.total += 1;
-                        qb.set_state(&st)?;
-                        let read: CounterState = qb.state()?;
-                        Ok(serde_json::json!(read.total))
-                    }
+                    async move { Ok(qb.state["total"].clone()) }
                 });
                 let qc = ctx.clone();
                 let fc = ctx.step("c", move |_sc: StepCtx| {
                     let qc = qc;
-                    async move {
-                        let mut st: CounterState = qc.state()?;
-                        st.total += 1;
-                        qc.set_state(&st)?;
-                        let read: CounterState = qc.state()?;
-                        Ok(serde_json::json!(read.total))
-                    }
+                    async move { Ok(qc.state["total"].clone()) }
                 });
                 let (ra, rb, rc): (serde_json::Value, serde_json::Value, serde_json::Value) =
                     tokio::try_join!(fa, fb, fc)?;
-                let bits = [ra.as_i64().unwrap(), rb.as_i64().unwrap(), rc.as_i64().unwrap()];
-                Ok(serde_json::json!({ "steps": bits }))
+                assert_eq!(
+                    (ra, rb, rc),
+                    (serde_json::json!(0), serde_json::json!(0), serde_json::json!(0)),
+                    "快照分裂：各看 clone 时 total=0"
+                );
+
+                // driver 位点 mutation → durable 边界 flush 回引擎镜像。
+                ctx.state["total"] = serde_json::json!(1);
+                ctx.approve("flush-gate", "driver mutation flushed here").await?;
+                Ok(serde_json::json!({ "total": ctx.state["total"] }))
             });
-        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
+        let store2 = store.clone();
+        let wf2 = wf.clone();
+        let task = tokio::spawn(async move {
+            run_workflow(
+                &wf2,
+                store2,
+                &RunOptions::new(serde_json::json!({})).run_id("state:flush"),
+                None,
+            )
             .await
+        });
+        wait_paused(&store, "state:flush", "flush-gate").await;
+        signal_run(store.as_ref(), "state:flush", "flush-gate", serde_json::json!({ "ok": true }))
             .unwrap();
-        assert_eq!(out.status, RunStatus::Finished, "并发写 state 不应死锁");
-        let steps = out.output.clone().unwrap()["steps"].clone();
-        let vals: Vec<i64> = steps
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_i64().unwrap())
-            .collect();
-        assert!(vals.iter().all(|v| (1..=3).contains(v)), "last-write-wins 猜中 1..=3: {vals:?}");
+        let out = task.await.unwrap().unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        assert_eq!(out.output, Some(serde_json::json!({ "total": 1 })));
     }
 
     /// TanStack 0.0.4 同款 sharp edge：重启重放（crash → re-run handler）时，
@@ -1449,16 +1450,18 @@ mod tests {
                     "settleEvents": [],
                 }))
             })
-            .handler(|ctx: WorkflowCtx| async move {
-                // mutation 在 step 闭包内：重放时整个闭包被跳过 → 修改丢失。
+            .handler(|mut ctx: WorkflowCtx| async move {
+                // mutation 在 step 闭包内：重放时整个闭包被跳过 → 修改丢失；
+                // 且闭包持 clone 快照，首个 drive 内也不写 driver 的字段。
                 let inner = ctx.clone();
                 ctx.step("bump-inside", move |_sc: StepCtx| {
-                    let ctx = inner;
+                    let mut ctx = inner;
                     async move {
-                        let mut st: CounterState = ctx.state()?;
+                        let mut st: CounterState = serde_json::from_value(ctx.state.clone())?;
                         st.total += 1;
-                        ctx.set_state(&st)?;
-                        Ok(serde_json::json!({ "bumped": true }))
+                        ctx.state = serde_json::to_value(st)?;
+                        let bumped = ctx.state["total"].clone();
+                        Ok(serde_json::json!({ "bumped": true, "total": bumped }))
                     }
                 })
                 .await?;
@@ -1466,11 +1469,11 @@ mod tests {
                 ctx.approve("gate", "sharp edge gate").await?;
 
                 // step 闭包之外的重放 mutation：重跑后仍会执行。
-                let mut st: CounterState = ctx.state()?;
+                let mut st: CounterState = serde_json::from_value(ctx.state.clone())?;
                 st.settle_events.push("outside".into());
-                ctx.set_state(&st)?;
+                ctx.state = serde_json::to_value(st)?;
 
-                let final_state: CounterState = ctx.state()?;
+                let final_state: CounterState = serde_json::from_value(ctx.state.clone())?;
                 Ok(serde_json::json!({
                     "total": final_state.total,
                     "settleEvents": final_state.settle_events,

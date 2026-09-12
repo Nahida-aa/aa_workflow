@@ -1,4 +1,4 @@
-//! 引擎驱动：代码即 DAG 的执行器。`DrvInner` 是共享驱动态（step 重放 /
+//! 引擎驱动：代码即 DAG 的执行器。`EngineRuntime` 是共享驱动态（step 重放 /
 //! 结果缓存 / CAS 追加），`exec_step` 跑单个 durable step，
 //! `exec_pause` + `signal_run` 实现 durable 等待（approval / sleep）。
 //! 单次 invocation 的顶层编排（`run_workflow` / `run_workflow_sync` /
@@ -94,13 +94,14 @@ pub fn cancel_run(store: &dyn RunStore, run_id: &str) -> Result<(), WorkflowErro
 /// Shared driver state handed to every step (and to the `<WorkflowCtx>`).
 /// This is the code-as-DAG substrate: the "graph" is just this state plus the
 /// handler's control flow, discovered as the handler runs.
-pub struct DrvInner {
+pub struct EngineRuntime {
     pub run_id: String,
     pub input: serde_json::Value,
     /// Per-invocation state, rebuilt from `initialize(input)` on every start
     /// and resume (see `define::Workflow::initialize`). Guarded by a
-    /// `std::sync::RwLock`; step closures access it via the typed
-    /// `ctx.state::<T>()` / `ctx.set_state` accessors. Never persisted.
+    /// `std::sync::RwLock`; it is the live image that `BaseCtx::state` (the
+    /// handler's field working copy) snapshots at drive start and flushes back
+    /// to before every durable primitive. Never persisted.
     pub state: Arc<std::sync::RwLock<serde_json::Value>>,
     pub store: Arc<dyn RunStore>,
     pub gate: Arc<Gate>,
@@ -127,7 +128,7 @@ pub struct DrvInner {
     pub publisher: Option<Arc<dyn Fn(&RunEvent) + Send + Sync>>,
 }
 
-impl DrvInner {
+impl EngineRuntime {
     /// Appends a checkpoint with optimistic CAS; on a lost race re-bases the
     /// cursor and retries (the other writer won, its event precedes ours).
     fn append(&self, ev: &RunEvent) -> Result<(), WorkflowError> {
@@ -189,7 +190,7 @@ impl DrvInner {
 /// Runs one durable step: replay short-circuit, fresh execution with
 /// retry/timeout/gate, checkpoint append. Returns the step's result.
 pub(crate) async fn exec_step<F, Fut>(
-    inner: &Arc<DrvInner>,
+    inner: &Arc<EngineRuntime>,
     step_id: &str,
     opts: &StepOptions,
     run: F,
@@ -375,7 +376,7 @@ pub const DEFAULT_MIN_YIELD_REMAINING_MS: u64 = 1000;
 /// sees the **same** clock across resumes. The checkpoint id uses a
 /// per-invocation atomic counter (`__now-0`, `__now-1`, …) so concurrent
 /// calls stay unique; replay permutes them to the same ids and reads the cache.
-pub fn exec_now(inner: &Arc<DrvInner>) -> anyhow::Result<i64> {
+pub fn exec_now(inner: &Arc<EngineRuntime>) -> anyhow::Result<i64> {
     let k = inner.now_counter.fetch_add(1, Ordering::SeqCst);
     let step_id = format!("__now-{k}");
     for ev in inner.store.get_events(&inner.run_id)? {
@@ -400,7 +401,7 @@ pub fn exec_now(inner: &Arc<DrvInner>) -> anyhow::Result<i64> {
 /// Deterministic id behind [`WorkflowCtx::uuid`](crate::define::WorkflowCtx::uuid)
 /// (TanStack `ctx.uuid`): a generated UUIDv4, recorded as a `UuidRecorded`
 /// checkpoint. On replay the recorded id is served — stable across resumes.
-pub fn exec_uuid(inner: &Arc<DrvInner>) -> anyhow::Result<String> {
+pub fn exec_uuid(inner: &Arc<EngineRuntime>) -> anyhow::Result<String> {
     let k = inner.uuid_counter.fetch_add(1, Ordering::SeqCst);
     let step_id = format!("__uuid-{k}");
     for ev in inner.store.get_events(&inner.run_id)? {
@@ -437,7 +438,7 @@ pub fn exec_uuid(inner: &Arc<DrvInner>) -> anyhow::Result<String> {
 /// - named waits wait until an external [`signal_event`] appends `StepResume`;
 /// - sleeps also arm a `tokio` timer that auto-delivers the resume.
 pub async fn exec_pause(
-    inner: &Arc<DrvInner>,
+    inner: &Arc<EngineRuntime>,
     step_id: &str,
     signal_name: &str,
     reason: &str,

@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::engine::DrvInner;
+use crate::engine::EngineRuntime;
 use crate::event::{RunEvent, StepState};
 
 /// Boxed async step-returning future. Steps are spawned inside the engine's
@@ -21,7 +21,7 @@ pub type WorkflowHandler =
 /// Per-invocation view handed step closures. Mirrors TanStack's `StepContext`.
 #[derive(Clone)]
 pub struct StepCtx {
-    pub(crate) inner: Arc<DrvInner>,
+    pub(crate) inner: Arc<EngineRuntime>,
     pub step_id: String,
     pub attempt: usize,
 }
@@ -56,52 +56,73 @@ impl StepCtx {
     }
 }
 
-/// Anything the handler needs to run steps durably. Held for the whole
-/// handler execution; steps read their own context through [`StepCtx`].
+/// The handler's argument — mirrors TanStack's `BaseCtx<TInput, TState>`
+/// interface member-for-member. Public surface is exactly [`Self::run_id`]
+/// (`runId`), [`Self::input`] (`input`) and [`Self::state`] (`state`), plus
+/// the durable primitives as methods (`step` / `sleep` / `sleep_until` /
+/// `wait_for_event` / `approve` / `now` / `uuid` / `emit`), a
+/// [`is_cancelled`](Self::is_cancelled) `signal` and the runtime budget
+/// helpers ([`deadline`](Self::deadline) / [`time_remaining`](Self::time_remaining)
+/// / [`should_yield`](Self::should_yield) / [`yield_`](Self::yield_)).
+///
+/// The engine handle is *not* part of the public API: TanStack holds it in JS
+/// closure scope (invisible on `ctx`), so here it lives in a
+/// `#[doc(hidden)]` crate-private field — reachable but never nameable by
+/// callers.
+///
+/// State semantics: `state` is the handler's working copy, seeded from the
+/// engine's live image at drive start and flushed back to it before every
+/// durable primitive. `ctx.input` / `ctx.state` are plain owned fields —
+/// clone (or move) values as needed across `await` points.
 #[derive(Clone)]
-pub struct WorkflowCtx {
-    pub(crate) inner: Arc<DrvInner>,
+pub struct BaseCtx<In = serde_json::Value, St = serde_json::Value> {
+    /// `runId: string`
+    pub run_id: String,
+    /// `input: TInput` — frozen run input (typed or `Value`)
+    pub input: In,
+    /// `state: TState` — working state copy, flushed at durable boundaries
+    pub state: St,
+    /// Engine-side runtime, mirror of TanStack's closure-captured `engine`.
+    /// Not part of the public API.
+    #[doc(hidden)]
+    pub(crate) engine: Arc<EngineRuntime>,
 }
 
-impl WorkflowCtx {
-    pub fn run_id(&self) -> &str {
-        &self.inner.run_id
-    }
+/// Default (untyped) ctx: `BaseCtx<Value, Value>`.
+pub type WorkflowCtx = BaseCtx<serde_json::Value, serde_json::Value>;
 
-    /// Returns the frozen run input.
-    pub fn input(&self) -> &serde_json::Value {
-        &self.inner.input
-    }
+/// Typed-input ctx: `BaseCtx<In, Value>`. For a typed `state: St` as well,
+/// write `BaseCtx<In, St>` directly (via [`TypedWorkflowBuilder::state_schema`]).
+pub type TypedCtx<In> = BaseCtx<In, serde_json::Value>;
 
-    /// Raw shared state handle (guard borrows `&self`; scope writes tightly,
-    /// never hold the guard across an `.await`).
-    pub fn state_value(&self) -> std::sync::RwLockReadGuard<'_, serde_json::Value> {
-        self.inner
+impl BaseCtx<serde_json::Value, serde_json::Value> {
+    /// Engine-facing drive-start construction: freeze the run input and
+    /// snapshot the current state image.
+    pub(crate) fn untyped(engine: Arc<EngineRuntime>) -> Self {
+        let state = engine
             .state
             .read()
             .expect("workflow state lock poisoned")
+            .clone();
+        Self {
+            run_id: engine.run_id.clone(),
+            input: engine.input.clone(),
+            state,
+            engine,
+        }
     }
+}
 
-    /// Raw mutable shared state handle (guard borrows `&self`; scope writes
-    /// tightly, never hold the guard across an `.await`).
-    pub fn state_value_mut(&self) -> std::sync::RwLockWriteGuard<'_, serde_json::Value> {
-        self.inner
-            .state
-            .write()
-            .expect("workflow state lock poisoned")
-    }
-
-    /// Typed read: clone the current state and deserialize it as `T`.
-    pub fn state<T: serde::de::DeserializeOwned>(&self) -> anyhow::Result<T> {
-        let g = self.state_value();
-        Ok(serde_json::from_value(g.clone())?)
-    }
-
-    /// Typed write: serialize `s` into the shared state (last write wins —
-    /// TanStack's mutable `ctx.state` semantics).
-    pub fn set_state<T: serde::Serialize>(&self, state: &T) -> anyhow::Result<()> {
-        let mut g = self.state_value_mut();
-        *g = serde_json::to_value(state)?;
+impl<In, St> BaseCtx<In, St> {
+    /// Write [`Self::state`] back into the engine's live image. Called before
+    /// every durable primitive; the image is what pause snapshots and the
+    /// next drive read. Cheap for the common `Value`/small-struct case.
+    pub(crate) fn flush_state(&self) -> anyhow::Result<()>
+    where
+        St: serde::Serialize,
+    {
+        let v = serde_json::to_value(&self.state)?;
+        *self.engine.state.write().expect("workflow state lock poisoned") = v;
         Ok(())
     }
 
@@ -119,6 +140,7 @@ impl WorkflowCtx {
     where
         F: FnOnce(StepCtx) -> Fut + Clone + Send + 'static,
         Fut: Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static,
+        St: serde::Serialize,
     {
         self.step_with(step_id, StepOptions::default(), run).await
     }
@@ -131,8 +153,12 @@ impl WorkflowCtx {
         &self,
         key: impl Into<String>,
         reason: impl AsRef<str>,
-    ) -> anyhow::Result<serde_json::Value> {
-        crate::engine::exec_pause(&self.inner, &key.into(), "__approval", reason.as_ref(), None).await
+    ) -> anyhow::Result<serde_json::Value>
+    where
+        St: serde::Serialize,
+    {
+        self.flush_state()?;
+        crate::engine::exec_pause(&self.engine, &key.into(), "__approval", reason.as_ref(), None).await
     }
 
     /// Durable sleep: pauses the run until `dur` elapses. `key` is the
@@ -143,8 +169,12 @@ impl WorkflowCtx {
         &self,
         key: impl Into<String>,
         dur: std::time::Duration,
-    ) -> anyhow::Result<serde_json::Value> {
-        crate::engine::exec_pause(&self.inner, &key.into(), "__timer", "sleep", Some(dur)).await
+    ) -> anyhow::Result<serde_json::Value>
+    where
+        St: serde::Serialize,
+    {
+        self.flush_state()?;
+        crate::engine::exec_pause(&self.engine, &key.into(), "__timer", "sleep", Some(dur)).await
     }
 
     /// Durable absolute-time wait: pauses until wall-clock `ts_ms` (equivalent
@@ -154,7 +184,10 @@ impl WorkflowCtx {
         &self,
         key: impl Into<String>,
         ts_ms: i64,
-    ) -> anyhow::Result<serde_json::Value> {
+    ) -> anyhow::Result<serde_json::Value>
+    where
+        St: serde::Serialize,
+    {
         let rem =
             Duration::from_millis(i64::saturating_sub(ts_ms, crate::engine::now_ms()).max(0) as u64);
         self.sleep(key, rem).await
@@ -169,18 +202,22 @@ impl WorkflowCtx {
         &self,
         key: impl Into<String>,
         event_name: impl AsRef<str>,
-    ) -> anyhow::Result<serde_json::Value> {
+    ) -> anyhow::Result<serde_json::Value>
+    where
+        St: serde::Serialize,
+    {
         let name = event_name.as_ref();
-        crate::engine::exec_pause(&self.inner, &key.into(), name, "event", None).await
+        self.flush_state()?;
+        crate::engine::exec_pause(&self.engine, &key.into(), name, "event", None).await
     }
 
     /// Emit an observability event to the publisher. Never appended to the
     /// log, so it is outside replay — `fold_step_states` and resume ignore it
     /// (mirrors TanStack's `emit` / `CUSTOM`).
     pub fn emit(&self, name: impl AsRef<str>, value: serde_json::Value) {
-        self.inner.publish(&RunEvent::Custom {
+        self.engine.publish(&RunEvent::Custom {
             ts: crate::engine::now_ms(),
-            run_id: self.inner.run_id.clone(),
+            run_id: self.run_id.clone(),
             name: name.as_ref().to_string(),
             value,
         });
@@ -190,14 +227,14 @@ impl WorkflowCtx {
     /// timestamp as a checkpoint; replay serves the recorded value, so a run
     /// sees the same clock across resumes. Returns `Err` only on store failure.
     pub fn now(&self) -> anyhow::Result<i64> {
-        crate::engine::exec_now(&self.inner)
+        crate::engine::exec_now(&self.engine)
     }
 
     /// Deterministic id (TanStack `ctx.uuid`): records a generated UUIDv4 as a
     /// checkpoint; replay serves the recorded id, so the same value is seen
     /// across resumes. Returns `Err` only on store failure.
     pub fn uuid(&self) -> anyhow::Result<String> {
-        crate::engine::exec_uuid(&self.inner)
+        crate::engine::exec_uuid(&self.engine)
     }
 
     /// Whether this run was cancelled via [`cancel_run`](crate::engine::cancel_run).
@@ -205,9 +242,9 @@ impl WorkflowCtx {
     /// in-flight `await` (same granularity as JS `AbortSignal`: the closure
     /// must check cooperatively).
     pub fn is_cancelled(&self) -> bool {
-        self.inner
+        self.engine
             .store
-            .get_run_state(&self.inner.run_id)
+            .get_run_state(&self.run_id)
             .ok()
             .flatten()
             .map(|st| st.status == crate::event::RunStatus::Aborted)
@@ -217,12 +254,12 @@ impl WorkflowCtx {
     /// Absolute UTC ms runtime budget for this drive (TanStack `deadline`);
     /// `None` when the host set no budget.
     pub fn deadline(&self) -> Option<i64> {
-        self.inner.deadline
+        self.engine.deadline
     }
 
     /// Ms of runtime budget left (`u64::MAX` when no deadline).
     pub fn time_remaining(&self) -> u64 {
-        match self.inner.deadline {
+        match self.engine.deadline {
             Some(d) => i64::saturating_sub(d, crate::engine::now_ms()).max(0) as u64,
             None => u64::MAX,
         }
@@ -231,24 +268,28 @@ impl WorkflowCtx {
     /// True once the budget is nearly exhausted: `time_remaining() <
     /// min_yield_remaining_ms` (default 1000ms).
     pub fn should_yield(&self) -> bool {
-        self.time_remaining() < self.inner.min_yield_remaining_ms
+        self.time_remaining() < self.engine.min_yield_remaining_ms
     }
 
     /// Cooperative hand-back of the runtime budget (TanStack `yield`): durably
     /// parks the run on a `"__timer"` wait until [`RunOptions::yield_resume_at`]
     /// (or now+1ms), so a host can re-invoke with a freshly extended deadline.
     /// Deterministic id `__yield-{n}` (per-invocation counter), replay-safe.
-    pub async fn yield_(&self) -> anyhow::Result<serde_json::Value> {
-        let k = self.inner.yield_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    pub async fn yield_(&self) -> anyhow::Result<serde_json::Value>
+    where
+        St: serde::Serialize,
+    {
+        self.flush_state()?;
+        let k = self.engine.yield_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let step_id = format!("__yield-{k}");
         let target = self
-            .inner
+            .engine
             .yield_resume_at
             .unwrap_or_else(|| crate::engine::now_ms() + 1);
         let dur = std::time::Duration::from_millis(
             i64::saturating_sub(target, crate::engine::now_ms()).max(0) as u64,
         );
-        crate::engine::exec_pause(&self.inner, &step_id, "__timer", "yield", Some(dur)).await
+        crate::engine::exec_pause(&self.engine, &step_id, "__timer", "yield", Some(dur)).await
     }
 
     /// [`step`](Self::step) with per-step options (retry policy, timeout,
@@ -262,8 +303,10 @@ impl WorkflowCtx {
     where
         F: FnOnce(StepCtx) -> Fut + Clone + Send + 'static,
         Fut: Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static,
+        St: serde::Serialize,
     {
-        crate::engine::exec_step(&self.inner, step_id, &opts, run).await
+        self.flush_state()?;
+        crate::engine::exec_step(&self.engine, step_id, &opts, run).await
     }
 }
 
@@ -399,8 +442,8 @@ impl Workflow {
     /// Declare a typed state (serde `Deserialize` type = schema). The initial
     /// state built by [`initialize`](Self::initialize) is shape-checked against
     /// `T` on every invocation; a mismatch errors the run (zod `.safeParse`
-    /// counterpart for `stateSchema`). Typed access at runtime goes through
-    /// [`WorkflowCtx`]'s `state::<T>()` / `set_state::<T>()` accessors.
+    /// counterpart for `stateSchema`). Typed access at runtime is the `ctx.state`
+    /// field.
     pub fn state_schema<T: serde::de::DeserializeOwned + Send + Sync + 'static>(mut self) -> Self {
         self.state_validator = Some(Arc::new(|v| {
             serde_json::from_value::<T>(v.clone())?;
@@ -424,8 +467,8 @@ impl Workflow {
     /// mistyped fields fail the run on its first resume with a field-path
     /// error — the Rust counterpart of zod's `inputSchema` `.safeParse`.
     /// Returns a [`TypedWorkflowBuilder`] whose handler receives
-    /// [`TypedCtx`] with `ctx.input()` already deserialized.
-    pub fn input_schema<In>(self) -> TypedWorkflowBuilder<In>
+    /// [`TypedCtx<In>`] with `ctx.input` already deserialized.
+    pub fn input_schema<In>(self) -> TypedWorkflowBuilder<In, serde_json::Value>
     where
         In: serde::de::DeserializeOwned + Send + Sync + 'static,
     {
@@ -435,6 +478,7 @@ impl Workflow {
             initialize: self.initialize,
             state_validator: self.state_validator,
             parse: Arc::new(|v| serde_json::from_value(v.clone()).map_err(anyhow::Error::from)),
+            _state: PhantomData,
         }
     }
 }
@@ -442,158 +486,25 @@ impl Workflow {
 /// Parses frozen run input into the workflow's typed input.
 type InputParser<In> = Arc<dyn Fn(&serde_json::Value) -> anyhow::Result<In> + Send + Sync>;
 
-/// Typed view handed to a typed handler. Re-parses the frozen run input on
-/// every resume (deterministic: input JSON never mutates); the parsed value is
-/// cached in an `Arc` so the handler and closures it spawns share it.
-#[derive(Clone)]
-pub struct TypedCtx<In> {
-    inner: WorkflowCtx,
-    input: Arc<In>,
-}
-
-impl<In> TypedCtx<In> {
-    pub fn run_id(&self) -> &str {
-        self.inner.run_id()
-    }
-
-    /// The typed, validated run input.
-    pub fn input(&self) -> &In {
-        &self.input
-    }
-
-    /// Raw shared state handle (see [`WorkflowCtx::state_value`]).
-    pub fn state_value(&self) -> std::sync::RwLockReadGuard<'_, serde_json::Value> {
-        self.inner.state_value()
-    }
-
-    /// Raw mutable shared state handle (see [`WorkflowCtx::state_value_mut`]).
-    pub fn state_value_mut(&self) -> std::sync::RwLockWriteGuard<'_, serde_json::Value> {
-        self.inner.state_value_mut()
-    }
-
-    /// Typed read of the shared state (see [`WorkflowCtx::state`]).
-    pub fn state<T: serde::de::DeserializeOwned>(&self) -> anyhow::Result<T> {
-        self.inner.state()
-    }
-
-    /// Typed write to the shared state (see [`WorkflowCtx::set_state`]).
-    pub fn set_state<T: serde::Serialize>(&self, state: &T) -> anyhow::Result<()> {
-        self.inner.set_state(state)
-    }
-
-    pub async fn step<F, Fut>(
-        &self,
-        step_id: &str,
-        run: F,
-    ) -> anyhow::Result<serde_json::Value>
-    where
-        F: FnOnce(StepCtx) -> Fut + Clone + Send + 'static,
-        Fut: Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static,
-    {
-        self.inner.step(step_id, run).await
-    }
-
-    pub async fn step_with<F, Fut>(
-        &self,
-        step_id: &str,
-        opts: StepOptions,
-        run: F,
-    ) -> anyhow::Result<serde_json::Value>
-    where
-        F: FnOnce(StepCtx) -> Fut + Clone + Send + 'static,
-        Fut: Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static,
-    {
-        self.inner.step_with(step_id, opts, run).await
-    }
-
-    pub async fn approve(
-        &self,
-        key: impl Into<String>,
-        reason: impl AsRef<str>,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.approve(key, reason).await
-    }
-
-    pub async fn sleep(
-        &self,
-        key: impl Into<String>,
-        dur: std::time::Duration,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.sleep(key, dur).await
-    }
-
-    /// Durable absolute-time wait (see [`WorkflowCtx::sleep_until`]).
-    pub async fn sleep_until(
-        &self,
-        key: impl Into<String>,
-        ts_ms: i64,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.sleep_until(key, ts_ms).await
-    }
-
-    /// Durable named wait (see [`WorkflowCtx::wait_for_event`]).
-    pub async fn wait_for_event(
-        &self,
-        key: impl Into<String>,
-        event_name: impl AsRef<str>,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.inner.wait_for_event(key, event_name).await
-    }
-
-    /// Emit an observability event (see [`WorkflowCtx::emit`]).
-    pub fn emit(&self, name: impl AsRef<str>, value: serde_json::Value) {
-        self.inner.emit(name, value)
-    }
-
-    /// Deterministic wall-clock (see [`WorkflowCtx::now`]).
-    pub fn now(&self) -> anyhow::Result<i64> {
-        self.inner.now()
-    }
-
-    /// Deterministic id (see [`WorkflowCtx::uuid`]).
-    pub fn uuid(&self) -> anyhow::Result<String> {
-        self.inner.uuid()
-    }
-
-    /// Whether this run was cancelled (see [`WorkflowCtx::is_cancelled`]).
-    pub fn is_cancelled(&self) -> bool {
-        self.inner.is_cancelled()
-    }
-
-    /// Runtime budget deadline (see [`WorkflowCtx::deadline`]).
-    pub fn deadline(&self) -> Option<i64> {
-        self.inner.deadline()
-    }
-
-    /// Ms of runtime budget left (see [`WorkflowCtx::time_remaining`]).
-    pub fn time_remaining(&self) -> u64 {
-        self.inner.time_remaining()
-    }
-
-    /// Whether the budget is nearly exhausted (see [`WorkflowCtx::should_yield`]).
-    pub fn should_yield(&self) -> bool {
-        self.inner.should_yield()
-    }
-
-    /// Cooperative runtime hand-back (see [`WorkflowCtx::yield_`]).
-    pub async fn yield_(&self) -> anyhow::Result<serde_json::Value> {
-        self.inner.yield_().await
-    }
-}
-
-/// Chainable builder returned by [`Workflow::input_schema`]. The handler's
+/// Chainable builder returned by [`Workflow::input_schema`]. `In` is the typed
+/// run input (`ctx.input`), `St` the typed state (`ctx.state`) — both mirrored
+/// on the [`BaseCtx<In, St>`](BaseCtx) the handler receives. The handler's
 /// output type `Out` is inferred from the closure's return value — no output
 /// schema declaration needed, mirroring TanStack's handler return type
 /// inference (their `output` schema only *constrains*, it never declares).
-pub struct TypedWorkflowBuilder<In> {
+pub struct TypedWorkflowBuilder<In, St = serde_json::Value> {
     id: String,
     version: Option<String>,
     initialize: InitializeFn,
     state_validator: Option<StateValidatorFn>,
     parse: InputParser<In>,
+    _state: PhantomData<St>,
 }
 
-impl<In: Send + Sync + 'static> TypedWorkflowBuilder<In> {
+impl<In, St> TypedWorkflowBuilder<In, St>
+where
+    In: serde::de::DeserializeOwned + Send + Sync + 'static,
+{
     /// Replace the default serde parse with a custom one (e.g.
     /// `serde_path_to_error` for friendlier field-path messages).
     pub fn with_parser(
@@ -613,24 +524,36 @@ impl<In: Send + Sync + 'static> TypedWorkflowBuilder<In> {
         self
     }
 
-    /// Declare a typed state (see [`Workflow::state_schema`]).
-    pub fn state_schema<T: serde::de::DeserializeOwned + Send + Sync + 'static>(
-        mut self,
-    ) -> Self {
-        self.state_validator = Some(Arc::new(|v| {
-            serde_json::from_value::<T>(v.clone())?;
-            Ok(())
-        }));
-        self
+    /// Declare a typed state: re-types the builder so the handler's ctx is
+    /// `BaseCtx<In, NewSt>` and `ctx.state` is `NewSt`. The built state is
+    /// shape-checked against `NewSt` on every invocation (zod `.safeParse`
+    /// counterpart for `stateSchema`).
+    pub fn state_schema<NewSt>(self) -> TypedWorkflowBuilder<In, NewSt>
+    where
+        NewSt: serde::de::DeserializeOwned + Send + Sync + 'static,
+    {
+        TypedWorkflowBuilder {
+            id: self.id,
+            version: self.version,
+            initialize: self.initialize,
+            state_validator: Some(Arc::new(|v| {
+                serde_json::from_value::<NewSt>(v.clone())?;
+                Ok(())
+            })),
+            parse: self.parse,
+            _state: PhantomData,
+        }
     }
 
     /// Finalize with a typed handler. `Out` is inferred from the return value;
     /// the engine stores it serialized as JSON, so on resume the handler
-    /// re-runs from scratch with the re-parsed input (same as TanStack).
+    /// re-runs from scratch with the re-parsed input and state (same as
+    /// TanStack).
     pub fn handler<F, Fut, Out>(self, handler: F) -> TypedWorkflow<In, Out>
     where
         Out: serde::Serialize + Send + Sync + 'static,
-        F: Fn(TypedCtx<In>) -> Fut + Send + Sync + 'static,
+        St: serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
+        F: Fn(BaseCtx<In, St>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = anyhow::Result<Out>> + Send + 'static,
     {
         let TypedWorkflowBuilder {
@@ -639,6 +562,7 @@ impl<In: Send + Sync + 'static> TypedWorkflowBuilder<In> {
             initialize,
             state_validator,
             parse,
+            _state,
         } = self;
         let parse = Arc::new(parse);
         let handler = Arc::new(handler);
@@ -646,12 +570,15 @@ impl<In: Send + Sync + 'static> TypedWorkflowBuilder<In> {
             let parse = Arc::clone(&parse);
             let handler = Arc::clone(&handler);
             Box::pin(async move {
-                let input = parse(ctx.input())?;
-                let out = handler(TypedCtx {
-                    inner: ctx,
-                    input: Arc::new(input),
-                })
-                .await?;
+                let input = parse(&ctx.input)?;
+                let state: St = serde_json::from_value(ctx.state.clone())?;
+                let typed = BaseCtx {
+                    run_id: ctx.run_id,
+                    input,
+                    state,
+                    engine: ctx.engine.clone(),
+                };
+                let out = handler(typed).await?;
                 Ok(serde_json::to_value(out)?)
             })
         });

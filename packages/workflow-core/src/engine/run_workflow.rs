@@ -1,9 +1,9 @@
 
 //! 单次 invocation 的驱动入口：把 workflow **跑起来 / 续跑** 的顶层编排。
 //!
-//! 引擎本体（`DrvInner` 驱动态、`exec_step` / `exec_pause` / `signal_run`）
+//! 引擎本体（`EngineRuntime` 驱动态、`exec_step` / `exec_pause` / `signal_run`）
 //! 在 [`super`](crate::engine) 中；这里只负责一次 `run_workflow` 调用内部：
-//! 从 store 构造 run state、算 per-invocation state、造 `DrvInner`、跑 handler、
+//! 从 store 构造 run state、算 per-invocation state、造 `EngineRuntime`、跑 handler、
 //! 收尾写终态事件与 run.json。每次调用（start / resume）都独立走完整条路径。
 
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Mutex;
 
 use crate::define::Workflow;
-use crate::engine::{now_ms, DrvInner, StepHalt, WorkflowCancelled, DEFAULT_MIN_YIELD_REMAINING_MS};
+use crate::engine::{now_ms, EngineRuntime, StepHalt, WorkflowCancelled, DEFAULT_MIN_YIELD_REMAINING_MS};
 use crate::error::WorkflowError;
 use crate::event::{RunEvent, RunStatus, StepStatus, fold_step_states};
 use crate::resource::Gate;
@@ -151,7 +151,7 @@ pub async fn run_workflow(
     // Per-invocation state: re-derived from `initialize(input)` on every
     // start and resume (mirrors TanStack, where state is rebuilt from
     // `initialize({ input })` and never persisted). The handler input the
-    // workflow sees is `opts.input` (see `DrvInner.input`), so initialize
+    // workflow sees is `opts.input` (see `EngineRuntime.input`), so initialize
     // shares that source for consistency.
     let state = match (workflow.initialize)(&opts.input) {
         Ok(s) => s,
@@ -175,7 +175,7 @@ pub async fn run_workflow(
         None => false,
     };
 
-    let inner = Arc::new(DrvInner {
+    let inner = Arc::new(EngineRuntime {
         run_id: run_id.clone(),
         input: opts.input.clone(),
         state: Arc::new(std::sync::RwLock::new(state)),
@@ -195,7 +195,7 @@ pub async fn run_workflow(
     });
     inner.publish(&RunEvent::RunStarted { ts, run_id: run_id.clone() });
 
-    let ctx = crate::define::WorkflowCtx { inner: inner.clone() };
+    let ctx = crate::define::WorkflowCtx::untyped(inner.clone());
     let handler_result = (workflow.handler)(ctx).await;
 
     let (status, output, error) = match handler_result {

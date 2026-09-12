@@ -9,11 +9,11 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunOptions.runtime�
 
 ## ctx（handler 参数）
 
-| TanStack BaseCtx | Rust（WorkflowCtx / TypedCtx） | 状态 | 备注 |
-| ---------------- | ------------------------------ | ---- | ---- |
-| `runId: string` | `run_id()` | ✅ | |
-| `input: TInput` | `input()` → `&Value` / `&In`（typed） | ✅ | |
-| `state: TState` | `state_value()` / `state<T>()` / `set_state<T>()` | ✅ | Rust 用显式读/写/类型化访问器替代 `ctx.state` 属性直接读写 |
+| TanStack BaseCtx | Rust（BaseCtx<In, St> / WorkflowCtx / TypedCtx） | 状态 | 备注 |
+| ---------------- | ------------------------------------------------ | ---- | ---- |
+| `runId: string` | `run_id: String`（字段） | ✅ | 公开字段，与 TS `runId` 同名同构 |
+| `input: TInput` | `input: In`（字段；未 typed 时 `Value`，`TypedCtx<In>` 即 `BaseCtx<In, Value>`） | ✅ | 与 TS 同名同构；借用即 `&In` |
+| `state: TState` | `state: St`（字段；`St` 由 `TypedWorkflowBuilder::state_schema<St>()` 限定） | ◐ | **实现细节不同**：TS 是 engine 共享对象的 in-place 引用（`baseCtx.state === engine.state`），Rust 是 per-drive 工作副本字段，durable 边界（step/approve/sleep/wait_for_event/yield）flush 回引擎镜像。镜像本身 per-invocation、每次 initialize 重建，故 flush 不参与持久性（与 TS 一致）；差异见差异清单 #7 |
 | `signal: AbortSignal`（run 级） | `is_cancelled()` | ◐ | 语义等价：取消信号可被动查询。差异：(1) 无法注册 `signal.addEventListener`（Rust 无该机制，需轮询）；(2) 引擎在 step 边界才检查——**step 闭包内的 `await` 无法被中断**，与 JS AbortSignal 同粒度但 Rust 侧无法「中止 promise」，闭包必须协作式自检（见下） |
 | `runtime: WorkflowRuntimeContext` | `deadline() / time_remaining() / should_yield() / yield_()` | ◐ | TS 是嵌套对象；Rust **拍平为 ctx 顶层方法**。`yield` 是 Rust 保留字 → 命名 `yield_` |
 | `runtime.deadline?: number` | `deadline() -> Option<i64>` | ✅ | 无 deadline 时 TS 为 `undefined`，Rust 为 `None` |
@@ -69,6 +69,16 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunOptions.runtime�
 4. **`shouldYield` 逐调用 `minRemainingMs`**：未支持（仅 RunOptions 级）。
 5. **`now()/uuid()` 包 `Result`**：设计上仅 store 失败时 Err；正常路径与 TS 等价。
 6. **`approve.description`**：未实现（位置参数缺该项）。
+7. **`state` 写传播（快照 vs in-place 共享）**：TS 中 `ctx.state` 是引擎共享对象
+   （`baseCtx.state === engine.state`，L480），step 闭包捕获 `ctx` 后 in-place
+   mutation 立即可见；Rust 中 `ctx.state` 是字段工作副本，`ctx.clone()` 产生
+   **独立快照**——并行 step 各自持快照互不可见（driver 位点的 mutation 在
+   durable 边界 flush 回镜像）。单 handler 串行流（driver 位点读写）语义等价；
+   是否并发写下依赖克隆分裂，写入只在本 drive 可见。已由
+   `state_parallel_steps_snapshot_then_driver_flush` 测试固化。
+8. **引擎句柄不可见**：`BaseCtx` 持有 `#[doc(hidden)] pub(crate) engine:
+   Arc<EngineRuntime>`——对外 API 恰为 TS 接口成员（runId/input/state + 原语
+   方法），句柄如 TS 一样只在闭包作用域（此处为字段私有）持有。
 
 ## 验证覆盖
 

@@ -32,7 +32,8 @@ pub mod resource;
 pub mod store;
 
 pub use define::{
-    Backoff, RetryPolicy, StepCtx, StepOptions, TypedCtx, TypedWorkflow, Workflow, WorkflowCtx,
+    Backoff, BaseCtx, RetryPolicy, StepCtx, StepOptions, TypedCtx, TypedWorkflow, Workflow,
+    WorkflowCtx,
 };
 pub use engine::{
     cancel_run, run_workflow, run_workflow_sync, signal_event, signal_run, RunOptions, RunOutcome,
