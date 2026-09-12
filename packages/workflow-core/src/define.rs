@@ -230,7 +230,7 @@ impl<In, St, Ext> BaseCtx<In, St, Ext> {
     /// Durable named wait: pauses the run until [`signal_event`](crate::engine::signal_event)
     /// delivers a payload for `event_name`. `key` is the deterministic pause
     /// identity (must not collide with step ids); `event_name` is the channel
-    /// a host signals on (`run.json` `waiting_for.signal_name`). On replay a
+    /// a host signals on (`RunState.waiting_for.signal_name`). On replay a
     /// previously delivered resume short-circuits from the log.
     pub async fn wait_for_event(
         &self,

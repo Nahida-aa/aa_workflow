@@ -103,6 +103,19 @@ impl std::fmt::Display for RunError {
 /// `waiting_for` / `pending_approval` 是挂起态的一等投影（派生自事件日志，
 /// 恢复时清除）——观察者无需扫日志就能告诉 run 在等什么。
 ///
+/// ## 谁写、谁存
+///
+/// **内容由引擎写，介质由 store 定**。引擎在每次 drive 的收尾、以及挂起时
+/// （[`crate::engine`] 的 pause 投影）调用 [`RunStore::set_run_state`] 更新信封；
+/// store 只负责把它放哪儿——内存 map、JSON 文件、数据库行都行。TanStack 同样
+/// 如此：`run-workflow.ts` 有 7 处调 `setRunState`，挂起投影那处的注释就是
+/// “Persist waitingFor on the run state so out-of-process workers can
+/// discover the pending wake”。
+///
+/// 注意别把 `RunState` 和某个具体 store 的文件布局混为一谈：本 crate 不假定
+/// 介质，也没有任何代码知道 `run.json` 这种文件名（那是示例层 `FileRunStore`
+/// 的事）。
+///
 /// `In` / `Out` 默认擦除为 [`serde_json::Value`]，因为 [`RunStore`] 的契约面
 /// 必须能装下任意 workflow 的 input/output（store 是 `dyn`，无法带泛型）。
 /// 想要具体类型的调用方用 [`RunState::into_typed`] 窄化。
@@ -284,7 +297,7 @@ mod tests {
         );
     }
 
-    /// 擦除形态仍能被 store 序列化/反序列化（run.json 兼容性）。
+    /// 擦除形态仍能被 store 序列化/反序列化（RunState 的持久化兼容性）。
     #[test]
     fn erased_run_state_roundtrips_through_json() {
         let st = erased(Some(serde_json::json!({ "ok": true })));
@@ -341,7 +354,7 @@ mod tests {
         }
     }
 
-    /// `step_id` 可选：`None` 时不该出现在 run.json 里（对齐 TS 的可选字段）。
+    /// `step_id` 可选：`None` 时不该出现在序列化的 RunState 里（对齐 TS 的可选字段）。
     #[test]
     fn wait_for_state_omits_absent_step_id() {
         let w = WaitForState {
@@ -362,7 +375,7 @@ mod tests {
         let store = InMemoryStore::new();
         store
             .set_run_state("r", &erased(None))
-            .expect("写入 run.json");
+            .expect("写入 RunState");
         store.delete_run("r", DeleteReason::Finished).unwrap();
         assert!(store.get_run_state("r").unwrap().is_none());
     }

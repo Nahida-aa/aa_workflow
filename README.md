@@ -175,7 +175,7 @@ step 结果。
 per-step 状态是**派生投影**，从不独立存储：`fold_step_states(events) -> HashMap<String, StepState>`
 （`Pending`/`Running`/`Success`/`Failed`/`Paused`）。
 
-`run.json` 把挂起态做成一等投影，观察者不扫日志就知道 run 在等什么：
+`RunState` 把挂起态做成一等投影，观察者不扫日志就知道 run 在等什么：
 `waiting_for: {step_id, signal_name, deadline}` / `pending_approval: {step_id, approval_id, title}`。
 
 **失败即终局**：`StepFailed` 只会 rethrow，不会自动重跑。重试靠 `continue_from`

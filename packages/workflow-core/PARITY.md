@@ -2,7 +2,7 @@
 
 对照真源：`learn_ls/workflow/packages/workflow-core/src/types.ts`（BaseCtx /
 StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunOptions.runtime）。
-本矩阵只覆盖 **ctx 层 API 对等**；引擎内部（checkpoint 日志、replay、run.json）
+本矩阵只覆盖 **ctx 层 API 对等**；引擎内部（checkpoint 日志、replay、RunState 信封）
 的对等由各自文档描述，不在本表。
 
 图例：✅ 完全对等（含语义） · ◐ 对等但有命名/签名差异 · ◯ 部分实现 · ✖ 未实现
@@ -63,7 +63,7 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunOptions.runtime�
 
 1. **`yield` 命名**：Rust 保留字 → `yield_`（引用方需注意）。
 2. **run 级 `signal`**：仅 `is_cancelled()` 谓词；无中止回调注册。实现细节：
-   取消由 `cancel_run` 将 run.json 置 `Aborted`，引擎在 step 入口 / attempt
+   取消由 `cancel_run` 将 RunState 置 `Aborted`，引擎在 step 入口 / attempt
    重试前 / pause 轮询 tick（≤25ms）轮询拾取 → run 以 `Aborted` + `RunErrored
    "workflow aborted"` 终局（对齐 TanStack code `'aborted'`）。
 3. **step 级 `attempt` / `signal`**：`StepCtx.attempt` 与 `StepCtx::is_cancelled()`

@@ -3,7 +3,7 @@
 //! 引擎本体（`EngineRuntime` 驱动态、`exec_step` / `exec_pause` / `signal_run`）
 //! 在 [`super`](crate::engine) 中；这里只负责一次 `run_workflow` 调用内部：
 //! 从 store 构造 run state、算 per-invocation state、造 `EngineRuntime`、跑 handler、
-//! 收尾写终态事件与 run.json。每次调用（start / resume）都独立走完整条路径。
+//! 收尾写终态事件与 RunState 信封。每次调用（start / resume）都独立走完整条路径。
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -330,7 +330,7 @@ mod tests {
         n: i64,
     }
 
-    /// 未显式给 `run_id` 时引擎生成 `run_<now_ms>`，并照常写 run.json。
+    /// 未显式给 `run_id` 时引擎生成 `run_<now_ms>`，并照常写 RunState 信封。
     #[tokio::test]
     async fn run_id_defaults_to_generated_when_absent() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
@@ -354,9 +354,9 @@ mod tests {
         let st = store
             .get_run_state(&out.run_id)
             .unwrap()
-            .expect("run.json 应已写入");
+            .expect("RunState 应已写入");
         assert_eq!(st.status, RunStatus::Finished);
-        assert_eq!(st.input, json!({ "x": 1 }), "input 落在 run.json 信封上");
+        assert_eq!(st.input, json!({ "x": 1 }), "input 落在 RunState 信封上");
     }
 
     /// `initialize` 失败 → `init_failed`：run 记 Errored，且**不 append 任何事件**

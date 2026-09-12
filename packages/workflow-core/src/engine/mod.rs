@@ -485,7 +485,7 @@ pub async fn exec_pause(
         inner.append(&ev)?;
         inner.publish(&ev);
     }
-    // 投影 run.json（fresh 与崩溃后 replay 一致：都展示 Paused + 等待说明）。
+    // 投影 RunState 信封（fresh 与崩溃后 replay 一致：都展示 Paused + 等待说明）。
     project_run_wait(
         &inner.store,
         &inner.run_id,
@@ -560,7 +560,7 @@ fn find_resume(
     })
 }
 
-/// 挂起时的 run.json 投影种类。
+/// 挂起时的 RunState 投影种类。
 enum WaitKind {
     Signal {
         step_id: String,
@@ -575,7 +575,7 @@ enum WaitKind {
     },
 }
 
-/// 挂起时把 run.json 投影成 `Paused` + `waiting_for` / `pending_approval`
+/// 挂起时把 RunState 投影成 `Paused` + `waiting_for` / `pending_approval`
 /// （对齐 TanStack `RunState`）。fresh 与崩溃后 replay 都会调用，保证
 /// observer 不需要扫事件日志就知道 run 在等什么。best-effort：失败忽略，
 /// 事件日志仍为准。
@@ -1338,7 +1338,7 @@ mod tests {
         let pa = st
             .pending_approval
             .as_ref()
-            .expect("run.json 应投影 pending_approval");
+            .expect("RunState 应投影 pending_approval");
         assert_eq!(pa.step_id.as_deref(), Some("release"));
         assert_eq!(pa.title, "Approve the release?");
         assert!(st.waiting_for.is_none());
@@ -2031,7 +2031,7 @@ mod tests {
         assert!(out.output.is_none());
 
         let st = store.get_run_state("ca1").unwrap().unwrap();
-        assert_eq!(st.status, RunStatus::Aborted, "run.json 终态应为 Aborted");
+        assert_eq!(st.status, RunStatus::Aborted, "RunState 终态应为 Aborted");
         assert!(st.waiting_for.is_none() && st.pending_approval.is_none());
 
         // 日志没有 Finished 终态，也不应落在 running/paused（cancel 后不再驱动）
