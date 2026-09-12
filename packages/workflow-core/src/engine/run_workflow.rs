@@ -94,6 +94,22 @@ pub struct RunOutcome {
     pub error: Option<String>,
 }
 
+/// Resolves which workflow definition drives a run, mirroring TanStack's
+/// `selectWorkflowVersion` (registry/select-version.ts): the persisted
+/// `workflow_version` picks among `[workflow] + workflow.previous_versions`.
+/// Unknown / absent persisted versions fall back to the current workflow
+/// (legacy runs started before versioning, or versions that were dropped).
+pub fn select_workflow_version<'a>(workflow: &'a Workflow, persisted: Option<&str>) -> &'a Workflow {
+    match persisted {
+        Some(v) => workflow
+            .previous_versions
+            .iter()
+            .find(|w| w.version.as_deref() == Some(v))
+            .unwrap_or(workflow),
+        None => workflow,
+    }
+}
+
 /// Runs (or resumes) a workflow by driving its async handler.
 ///
 /// Inputs:
@@ -148,16 +164,25 @@ pub async fn run_workflow(
     };
     store.set_run_state(&run_id, &run_state)?;
 
+    // Version routing: resume against the definition whose `version` the run
+    // persisted (workflow or one of its `previous_versions`); first runs use
+    // the current workflow. Mirrors `selectWorkflowVersion`.
+    let persisted_version = run_state
+        .workflow_version
+        .as_deref()
+        .or(workflow.version.as_deref());
+    let active = select_workflow_version(workflow, persisted_version);
+
     // Per-invocation state: re-derived from `initialize(input)` on every
     // start and resume (mirrors TanStack, where state is rebuilt from
     // `initialize({ input })` and never persisted). The handler input the
     // workflow sees is `opts.input` (see `EngineRuntime.input`), so initialize
     // shares that source for consistency.
-    let state = match (workflow.initialize)(&opts.input) {
+    let state = match (active.initialize)(&opts.input) {
         Ok(s) => s,
         Err(e) => return init_failed(&store, run_state, &run_id, &e),
     };
-    if let Some(validate) = &workflow.state_validator
+    if let Some(validate) = &active.state_validator
         && let Err(e) = validate(&state)
     {
         return init_failed(&store, run_state, &run_id, &e);
@@ -192,11 +217,12 @@ pub async fn run_workflow(
         min_yield_remaining_ms: opts.min_yield_remaining_ms.unwrap_or(DEFAULT_MIN_YIELD_REMAINING_MS),
         yield_resume_at: opts.yield_resume_at,
         yield_counter: AtomicUsize::new(0),
+        default_step_retry: active.default_step_retry.clone(),
     });
     inner.publish(&RunEvent::RunStarted { ts, run_id: run_id.clone() });
 
     let ctx = crate::define::WorkflowCtx::untyped(inner.clone());
-    let handler_result = (workflow.handler)(ctx).await;
+    let handler_result = (active.handler)(ctx).await;
 
     let (status, output, error) = match handler_result {
         Ok(output) => (RunStatus::Finished, Some(output), None),

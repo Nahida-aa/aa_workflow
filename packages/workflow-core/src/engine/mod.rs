@@ -17,7 +17,7 @@ use crate::resource::Gate;
 use crate::store::RunStore;
 
 mod run_workflow;
-pub use run_workflow::{run_workflow, run_workflow_sync, RunOptions, RunOutcome};
+pub use run_workflow::{run_workflow, run_workflow_sync, select_workflow_version, RunOptions, RunOutcome};
 
 pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
@@ -126,6 +126,10 @@ pub struct EngineRuntime {
     /// Positional counter for `__yield-{n}` pause keys (per-invocation).
     pub(crate) yield_counter: AtomicUsize,
     pub publisher: Option<Arc<dyn Fn(&RunEvent) + Send + Sync>>,
+    /// Workflow-level fallback retry (TanStack `defaultStepRetry`); steps that
+    /// declare their own [`StepOptions::retry`](crate::define::StepOptions::retry)
+    /// win.
+    pub(crate) default_step_retry: Option<crate::define::RetryPolicy>,
 }
 
 impl EngineRuntime {
@@ -260,7 +264,14 @@ where
         None => None,
     };
 
-    let max_attempts = opts.retry.as_ref().map(|p| p.max_attempts).unwrap_or(1);
+    // Effective retry: per-step policy wins, else the workflow's
+    // `default_step_retry` (TanStack `defaultStepRetry`), else none.
+    let retry = opts
+        .retry
+        .clone()
+        .or_else(|| inner.default_step_retry.clone());
+
+    let max_attempts = retry.as_ref().map(|p| p.max_attempts).unwrap_or(1);
     let mut attempts: Vec<StepAttempt> = Vec::with_capacity(max_attempts);
 
     for attempt in 1..=max_attempts {
@@ -321,13 +332,12 @@ where
                     result: None,
                     error: Some(err.clone()),
                 });
-                let retrying = opts.retry.is_some() && attempt < max_attempts;
+                let retrying = retry.is_some() && attempt < max_attempts;
                 if retrying {
                     if is_cancelled(&inner.store, &inner.run_id) {
                         return Err(WorkflowCancelled.into());
                     }
-                    let delay = opts
-                        .retry
+                    let delay = retry
                         .as_ref()
                         .map(|p| p.backoff.delay_ms(attempt))
                         .unwrap_or(0);
@@ -655,7 +665,10 @@ pub fn signal_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::define::{Backoff, RetryPolicy, Workflow, WorkflowCtx};
+    use crate::define::{
+        create_workflow, Backoff, BaseCtx, BoxFuture, CreateWorkflowConfig, Middleware,
+        RetryPolicy, Workflow, WorkflowCtx,
+    };
     use crate::store::{InMemoryStore, RunState};
     use std::sync::atomic::AtomicBool;
     use tokio::try_join;
@@ -2140,6 +2153,296 @@ mod tests {
         assert!(
             crate::engine::now_ms() - start >= 200,
             "yield 应睡到 yield_resume_at 才放行"
+        );
+    }
+
+    // ====================================================================
+    // 新式 builder（create_workflow / WorkflowBuilder / WorkflowDefinition /
+    // Middleware）与版本路由
+    // ====================================================================
+
+    #[derive(
+        serde::Deserialize, serde::Serialize, Default, Debug, PartialEq, Eq,
+    )]
+    struct UserExt {
+        user: String,
+    }
+
+    /// `middleware.produce` 的输出 deserialize 进 handler 的 `ctx.ext`
+    /// （`WorkflowBuilder::middleware::<PExt>` 决定 `Ext` 类型）；无 produce 时
+    /// 用 [`Default`]。对齐 TanStack `defineMiddleware` 的 context 注入。
+    #[tokio::test]
+    async fn middleware_produce_builds_typed_ext() {
+        let store = Arc::new(InMemoryStore::new());
+        let wf = create_workflow(
+            CreateWorkflowConfig::new("mw-ext").input::<serde_json::Value>(),
+        )
+        .middleware::<UserExt>(
+            Middleware::new().produce(|_ctx| {
+                Ok(serde_json::json!({ "user": "alice", "ignored": true }))
+            }),
+        )
+        .handler(|ctx: BaseCtx<serde_json::Value, serde_json::Value, UserExt>| async move {
+            Ok(serde_json::json!({ "user": ctx.ext.user }))
+        });
+        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
+            .await
+            .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        assert_eq!(
+            out.output,
+            Some(serde_json::json!({ "user": "alice" })),
+            "middleware produce 注入 ctx.ext"
+        );
+
+        // 无 produce → Ext 取 Default()。
+        let store2 = Arc::new(InMemoryStore::new());
+        let wf2 = create_workflow(
+            CreateWorkflowConfig::new("mw-ext-default").input::<serde_json::Value>(),
+        )
+        .middleware::<UserExt>(Middleware::new())
+        .handler(|ctx: BaseCtx<serde_json::Value, serde_json::Value, UserExt>| async move {
+            Ok(serde_json::json!({ "user": ctx.ext.user }))
+        });
+        let out2 = run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})), None)
+            .await
+            .unwrap();
+        assert_eq!(out2.output, Some(serde_json::json!({ "user": "" })));
+    }
+
+    /// `wrap` 按注册序最外层包裹（TanStack `composeMiddlewares` 语义：先注册的
+    /// 在最外）：before-in → before-out → handler → after-out → after-in。
+    #[tokio::test]
+    async fn middleware_wrap_composes_in_registration_order() {
+        fn make_wrap(
+            name: &'static str,
+            order: &Arc<Mutex<Vec<String>>>,
+        ) -> impl Fn(
+            WorkflowCtx,
+            BoxFuture<'static, anyhow::Result<serde_json::Value>>,
+        ) -> BoxFuture<'static, anyhow::Result<serde_json::Value>>
+               + Send
+               + Sync
+               + 'static
+        {
+            let order = order.clone();
+            move |_ctx, next| {
+                let order = order.clone();
+                let name = name;
+                Box::pin(async move {
+                    order.lock().unwrap().push(format!("before-{name}"));
+                    let r = next.await;
+                    order.lock().unwrap().push(format!("after-{name}"));
+                    r
+                })
+            }
+        }
+
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let m_in = Middleware::new().wrap(make_wrap("in", &order));
+        let m_out = Middleware::new().wrap(make_wrap("out", &order));
+        let wf = create_workflow(
+            CreateWorkflowConfig::new("mw-order").input::<serde_json::Value>(),
+        )
+        .middleware::<()>(m_in)
+        .middleware::<()>(m_out)
+        .handler(|ctx: BaseCtx<serde_json::Value>| async move {
+            ctx.step("inner", |_sc: StepCtx| async move {
+                Ok(serde_json::json!({ "ok": true }))
+            })
+            .await
+        });
+        let store = Arc::new(InMemoryStore::new());
+        let out = run_workflow(&wf, store, &RunOptions::new(serde_json::json!({})), None)
+            .await
+            .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec![
+                "before-in".to_string(),
+                "before-out".to_string(),
+                "after-out".to_string(),
+                "after-in".to_string(),
+            ],
+            "先注册的 middleware 在最外"
+        );
+    }
+
+    /// `default_step_retry`：workflow 级兜底 retry，step 未声明自己的
+    /// `StepOptions::retry` 时生效（TanStack `defaultStepRetry`）。
+    #[tokio::test]
+    async fn default_step_retry_fallbacks_without_step_policy() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let wf = create_workflow(
+            CreateWorkflowConfig::new("retry-default")
+                .input::<serde_json::Value>()
+                .default_step_retry(RetryPolicy::new(2, Backoff::Fixed { base_ms: 1 })),
+        )
+        .handler(move |ctx: BaseCtx<serde_json::Value>| {
+            let attempts = attempts.clone();
+            async move {
+                ctx.step("flaky", move |_sc: StepCtx| {
+                    let attempts = attempts.clone();
+                    async move {
+                        if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                            anyhow::bail!("transient failure")
+                        }
+                        Ok(serde_json::json!({ "ok": true }))
+                    }
+                })
+                .await
+            }
+        });
+        let wf: Workflow = wf.into_workflow();
+        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
+            .await
+            .unwrap();
+        assert_eq!(out.status, RunStatus::Finished, "workflow 级 retry 应重试成功");
+        assert_eq!(
+            count_events(&store, out.run_id.as_str(), |e| matches!(
+                e,
+                RunEvent::StepFinished { attempts, .. } if attempts.len() == 2
+            )),
+            1,
+            "flaky step 应留 2 次 attempt"
+        );
+        // step 自己的 retry 优先于 workflow 兜底。
+        let store2: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let attempts2 = Arc::new(AtomicUsize::new(0));
+        let wf2 = create_workflow(
+            CreateWorkflowConfig::new("retry-default-overridden")
+                .input::<serde_json::Value>()
+                .default_step_retry(RetryPolicy::new(3, Backoff::Fixed { base_ms: 1 })),
+        )
+        .handler(move |ctx: BaseCtx<serde_json::Value>| {
+            let attempts = attempts2.clone();
+            // `retry` 放 StepOptions：1 次 attempt，workflow 兜底 3 次不生效。
+            async move {
+                ctx.step_with(
+                    "no-retry",
+                    StepOptions::new().retry(RetryPolicy::new(1, Backoff::Fixed { base_ms: 1 })),
+                    move |_sc: StepCtx| {
+                        let attempts = attempts.clone();
+                        async move {
+                            attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            anyhow::bail!("always fails")
+                        }
+                    },
+                )
+                .await
+            }
+        });
+        let wf2: Workflow = wf2.into_workflow();
+        let out2 = run_workflow(&wf2, store2.clone(), &RunOptions::new(serde_json::json!({})), None)
+            .await
+            .unwrap();
+        assert_eq!(out2.status, RunStatus::Errored, "step 自己的 retry=1 → 失败");
+        let st = store2.get_run_state(&out2.run_id).unwrap().unwrap();
+        assert!(
+            st.status == RunStatus::Errored
+                && count_events(&store2, &out2.run_id, |e| matches!(
+                    e,
+                    RunEvent::StepFailed { attempts, .. } if attempts.len() == 1
+                )) == 1,
+            "per-step retry 覆盖 workflow 兜底"
+        );
+    }
+
+    /// `select_workflow_version`（TanStack `selectWorkflowVersion`）：持久化的
+    /// `workflow_version` 在 `[current] + previous_versions` 中路由；未知/缺省
+    /// 回退当前版本。
+    #[test]
+    fn select_workflow_version_routes_and_falls_back() {
+        let v1 = Workflow::new("wf").version("v1");
+        let v2 = Workflow::new("wf")
+            .version("v2")
+            .previous_versions(vec![v1.clone()]);
+        assert_eq!(
+            select_workflow_version(&v2, Some("v1")).version.as_deref(),
+            Some("v1"),
+            "路由到 previous version"
+        );
+        assert_eq!(
+            select_workflow_version(&v2, Some("v2")).version.as_deref(),
+            Some("v2")
+        );
+        assert_eq!(
+            select_workflow_version(&v2, None).version.as_deref(),
+            Some("v2"),
+            "无持久化版本 → 当前"
+        );
+        assert_eq!(
+            select_workflow_version(&v2, Some("v9")).version.as_deref(),
+            Some("v2"),
+            "未知版本 → 当前"
+        );
+    }
+
+    /// resume 按持久化 `workflow_version` 路由到 previous version 的 handler；
+    /// 全新 run 用当前版本。
+    #[tokio::test]
+    async fn resume_routes_by_persisted_workflow_version() {
+        let store = Arc::new(InMemoryStore::new());
+        let v1 = create_workflow(
+            CreateWorkflowConfig::new("ver-wf").version("v1").input::<serde_json::Value>(),
+        )
+        .handler(|ctx: BaseCtx<serde_json::Value>| async move {
+            ctx.step("s", |_sc: StepCtx| async move {
+                Ok(serde_json::json!({ "ver": "v1" }))
+            })
+            .await
+        })
+        .into_workflow();
+
+        let out1 = run_workflow(
+            &v1,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("ver:r"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out1.output, Some(serde_json::json!({ "ver": "v1" })));
+
+        let v2 = create_workflow(
+            CreateWorkflowConfig::new("ver-wf").version("v2").input::<serde_json::Value>(),
+        )
+        .previous_versions(vec![v1])
+        .handler(|ctx: BaseCtx<serde_json::Value>| async move {
+            ctx.step("s", |_sc: StepCtx| async move {
+                Ok(serde_json::json!({ "ver": "v2" }))
+            })
+            .await
+        });
+
+        let out2 = run_workflow(
+            &v2,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("ver:r"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out2.output,
+            Some(serde_json::json!({ "ver": "v1" })),
+            "resume 路由到持久化的 previous version"
+        );
+
+        let out3 = run_workflow(
+            &v2,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("ver:r2"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out3.output,
+            Some(serde_json::json!({ "ver": "v2" })),
+            "全新 run 用当前版本"
         );
     }
 }

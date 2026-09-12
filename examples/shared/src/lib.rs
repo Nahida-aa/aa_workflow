@@ -6,8 +6,9 @@
 //!   append-only `events.jsonl`，CAS append + subscribe），证明 store 契约可插拔；
 //! - [`workflows`] — 示例 workflow 定义（handler 形态，代码即 DAG），场景集对齐
 //!   wf-demo：并行/retry/分支、resume/`continue_from`、approval、双定时器 sleep、
-//!   连续事件等待、信号→定时→审批→步骤混合链；输入走 `.input_schema::<T>()`
-//!   typed schema（serde 校验），输出从返回值推断；
+//!   连续事件等待、信号→定时→审批→步骤混合链；输入走
+//!   `create_workflow(CreateWorkflowConfig::new(id).input::<T>())` typed schema
+//!   （serde 校验），输出从返回值推断；
 //! - [`runtime`] — host 无关的薄壳辅助：`drive` 把 start / resume / continue_from
 //!   收成一个调用，外加 publisher → tracing；
 //! - [`registry`] — 按 id 取示例 workflow（对齐 wf-demo 的 `WORKFLOWS` map）。

@@ -75,27 +75,33 @@ impl StepCtx {
 /// durable primitive. `ctx.input` / `ctx.state` are plain owned fields —
 /// clone (or move) values as needed across `await` points.
 #[derive(Clone)]
-pub struct BaseCtx<In = serde_json::Value, St = serde_json::Value> {
+pub struct BaseCtx<TInput = serde_json::Value, TState = serde_json::Value, TExt = ()> {
     /// `runId: string`
     pub run_id: String,
     /// `input: TInput` — frozen run input (typed or `Value`)
-    pub input: In,
+    pub input: TInput,
     /// `state: TState` — working state copy, flushed at durable boundaries
-    pub state: St,
+    pub state: TState,
+    /// `TExtensions` — ctx extension bundle, the `{...context}` accumulated by
+    /// middleware. `()` (the default) when no middleware declares one. Built by
+    /// the middleware's `produce` and re-deserialized on every drive, so it is
+    /// deterministic across resume.
+    pub ext: TExt,
     /// Engine-side runtime, mirror of TanStack's closure-captured `engine`.
     /// Not part of the public API.
     #[doc(hidden)]
     pub(crate) engine: Arc<EngineRuntime>,
 }
 
-/// Default (untyped) ctx: `BaseCtx<Value, Value>`.
-pub type WorkflowCtx = BaseCtx<serde_json::Value, serde_json::Value>;
+/// The full ctx type. Generic `TExt` matches TS's `Ctx<TInput, TState, TExt>`,
+/// where `TExt` defaults to `{}` (our `()`).
+pub type Ctx<TInput = serde_json::Value, TState = serde_json::Value, TExt = ()> =
+    BaseCtx<TInput, TState, TExt>;
 
-/// Typed-input ctx: `BaseCtx<In, Value>`. For a typed `state: St` as well,
-/// write `BaseCtx<In, St>` directly (via [`TypedWorkflowBuilder::state_schema`]).
-pub type TypedCtx<In> = BaseCtx<In, serde_json::Value>;
+/// Default (untyped) ctx: `Ctx<Value, Value, ()>`.
+pub type WorkflowCtx = Ctx<serde_json::Value, serde_json::Value, ()>;
 
-impl BaseCtx<serde_json::Value, serde_json::Value> {
+impl BaseCtx<serde_json::Value, serde_json::Value, ()> {
     /// Engine-facing drive-start construction: freeze the run input and
     /// snapshot the current state image.
     pub(crate) fn untyped(engine: Arc<EngineRuntime>) -> Self {
@@ -108,12 +114,13 @@ impl BaseCtx<serde_json::Value, serde_json::Value> {
             run_id: engine.run_id.clone(),
             input: engine.input.clone(),
             state,
+            ext: (),
             engine,
         }
     }
 }
 
-impl<In, St> BaseCtx<In, St> {
+impl<In, St, Ext> BaseCtx<In, St, Ext> {
     /// Write [`Self::state`] back into the engine's live image. Called before
     /// every durable primitive; the image is what pause snapshots and the
     /// next drive read. Cheap for the common `Value`/small-struct case.
@@ -122,7 +129,11 @@ impl<In, St> BaseCtx<In, St> {
         St: serde::Serialize,
     {
         let v = serde_json::to_value(&self.state)?;
-        *self.engine.state.write().expect("workflow state lock poisoned") = v;
+        *self
+            .engine
+            .state
+            .write()
+            .expect("workflow state lock poisoned") = v;
         Ok(())
     }
 
@@ -132,11 +143,7 @@ impl<In, St> BaseCtx<In, St> {
     ///
     /// The step closure is async so that concurrent steps compose via
     /// `tokio::try_join!` — parallel durable execution, no custom primitive.
-    pub async fn step<F, Fut>(
-        &self,
-        step_id: &str,
-        run: F,
-    ) -> anyhow::Result<serde_json::Value>
+    pub async fn step<F, Fut>(&self, step_id: &str, run: F) -> anyhow::Result<serde_json::Value>
     where
         F: FnOnce(StepCtx) -> Fut + Clone + Send + 'static,
         Fut: Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static,
@@ -158,7 +165,14 @@ impl<In, St> BaseCtx<In, St> {
         St: serde::Serialize,
     {
         self.flush_state()?;
-        crate::engine::exec_pause(&self.engine, &key.into(), "__approval", reason.as_ref(), None).await
+        crate::engine::exec_pause(
+            &self.engine,
+            &key.into(),
+            "__approval",
+            reason.as_ref(),
+            None,
+        )
+        .await
     }
 
     /// Durable sleep: pauses the run until `dur` elapses. `key` is the
@@ -188,8 +202,9 @@ impl<In, St> BaseCtx<In, St> {
     where
         St: serde::Serialize,
     {
-        let rem =
-            Duration::from_millis(i64::saturating_sub(ts_ms, crate::engine::now_ms()).max(0) as u64);
+        let rem = Duration::from_millis(
+            i64::saturating_sub(ts_ms, crate::engine::now_ms()).max(0) as u64
+        );
         self.sleep(key, rem).await
     }
 
@@ -280,7 +295,10 @@ impl<In, St> BaseCtx<In, St> {
         St: serde::Serialize,
     {
         self.flush_state()?;
-        let k = self.engine.yield_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let k = self
+            .engine
+            .yield_counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let step_id = format!("__yield-{k}");
         let target = self
             .engine
@@ -341,7 +359,10 @@ pub struct RetryPolicy {
 
 impl RetryPolicy {
     pub fn new(max_attempts: usize, backoff: Backoff) -> Self {
-        Self { max_attempts, backoff }
+        Self {
+            max_attempts,
+            backoff,
+        }
     }
 }
 
@@ -401,14 +422,30 @@ type InitializeFn =
 /// Shape-check for the initial state (installed by `Workflow::state_schema::<T>()`).
 type StateValidatorFn = Arc<dyn Fn(&serde_json::Value) -> anyhow::Result<()> + Send + Sync>;
 
-/// A declared workflow: just an id, optional version, and the async handler.
+/// A declared workflow: id, optional version, the async handler, plus the
+/// builder-derived extras (`description`, `default_step_retry`, `middlewares`,
+/// `previous_versions`, `output_validator`) that TanStack carries on the
+/// workflow object.
 #[derive(Clone)]
 pub struct Workflow {
     pub id: String,
     pub version: Option<String>,
+    pub description: Option<String>,
+    /// Fallback retry policy for steps that declare none
+    /// (TanStack `defaultStepRetry`). Per-step [`StepOptions::retry`] wins.
+    pub default_step_retry: Option<RetryPolicy>,
+    /// Middleware list, in the order TanStack's `composeMiddlewares` chains
+    /// them (first = outermost wrapping of the typed handler).
+    pub middlewares: Vec<Middleware>,
+    /// Older versions of the same workflow. Resume routes by the persisted
+    /// `workflow_version` to the matching entry (see
+    /// [`select_workflow_version`](crate::engine::select_workflow_version)).
+    pub previous_versions: Vec<Workflow>,
     pub handler: WorkflowHandler,
     pub initialize: InitializeFn,
     pub state_validator: Option<StateValidatorFn>,
+    /// Shape-check for the handler's `Out` value (config `output` schema).
+    pub output_validator: Option<StateValidatorFn>,
 }
 
 impl Workflow {
@@ -416,14 +453,39 @@ impl Workflow {
         Self {
             id: id.into(),
             version: None,
+            description: None,
+            default_step_retry: None,
+            middlewares: Vec::new(),
+            previous_versions: Vec::new(),
             handler: Arc::new(|_ctx: WorkflowCtx| Box::pin(async { Ok(serde_json::Value::Null) })),
             initialize: Arc::new(|_| Ok(serde_json::Value::Object(Default::default()))),
             state_validator: None,
+            output_validator: None,
         }
     }
 
     pub fn version(mut self, version: impl Into<String>) -> Self {
         self.version = Some(version.into());
+        self
+    }
+
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// Fallback retry policy for steps that declare no
+    /// [`StepOptions::retry`](StepOptions::retry).
+    pub fn default_step_retry(mut self, retry: RetryPolicy) -> Self {
+        self.default_step_retry = Some(retry);
+        self
+    }
+
+    /// Same as
+    /// [`WorkflowBuilder::previous_versions`](WorkflowBuilder::previous_versions) —
+    /// the erased-`Workflow` variant for engine-facing construction.
+    pub fn previous_versions(mut self, v: Vec<Workflow>) -> Self {
+        self.previous_versions = v;
         self
     }
 
@@ -462,60 +524,132 @@ impl Workflow {
         self.handler = Arc::new(move |ctx| Box::pin(handler(ctx)));
         self
     }
+}
 
-    /// Declare a typed input (serde `Deserialize` type = schema). Missing or
-    /// mistyped fields fail the run on its first resume with a field-path
-    /// error — the Rust counterpart of zod's `inputSchema` `.safeParse`.
-    /// Returns a [`TypedWorkflowBuilder`] whose handler receives
-    /// [`TypedCtx<In>`] with `ctx.input` already deserialized.
-    pub fn input_schema<In>(self) -> TypedWorkflowBuilder<In, serde_json::Value>
+/// Runtime middleware (erased): a [`wrap`](Self::wrap) around the handler
+/// future chain plus a [`produce`](Self::produce) hook that builds the typed
+/// ctx extension (`ctx.ext`). Mirrors TanStack's `defineMiddleware`: `wrap`
+/// composes around `next`, and the produced context is what the handler reads
+/// off `ctx` (their `{ ...context }` accumulation, collapsed to a single
+/// extension value — see [`WorkflowBuilder::middleware`]).
+#[derive(Clone)]
+pub struct Middleware {
+    /// Builds the handler's `ctx.ext` from the erased drive ctx. Runs on every
+    /// drive before the handler; its JSON output is deserialized into the
+    /// builder's `Ext` type (the last middleware with a `produce` wins).
+    pub produce: Option<CtxProducer>,
+    /// Around-wrapper on the handler future: `next` is the rest of the pipeline
+    /// (inner middlewares, then the typed handler). The first-listed middleware
+    /// is outermost, like TanStack's `composeMiddlewares`.
+    pub wrap: Option<CtxWrapper>,
+}
+
+/// Erased ctx-extension producer: `&WorkflowCtx` → JSON ext value.
+pub type CtxProducer =
+    Arc<dyn Fn(&WorkflowCtx) -> anyhow::Result<serde_json::Value> + Send + Sync>;
+
+/// Erased around-wrapper: `(ctx, next)` → wrapped handler future.
+pub type CtxWrapper = Arc<
+    dyn Fn(
+            WorkflowCtx,
+            BoxFuture<'static, anyhow::Result<serde_json::Value>>,
+        ) -> BoxFuture<'static, anyhow::Result<serde_json::Value>>
+        + Send
+        + Sync,
+>;
+
+impl Middleware {
+    pub fn new() -> Self {
+        Self { produce: None, wrap: None }
+    }
+
+    /// Set the ctx-extension producer.
+    pub fn produce<F>(mut self, f: F) -> Self
     where
-        In: serde::de::DeserializeOwned + Send + Sync + 'static,
+        F: Fn(&WorkflowCtx) -> anyhow::Result<serde_json::Value> + Send + Sync + 'static,
     {
-        TypedWorkflowBuilder {
-            id: self.id,
-            version: self.version,
-            initialize: self.initialize,
-            state_validator: self.state_validator,
-            parse: Arc::new(|v| serde_json::from_value(v.clone()).map_err(anyhow::Error::from)),
+        self.produce = Some(Arc::new(f));
+        self
+    }
+
+    /// Set the around-wrapper.
+    pub fn wrap<F>(mut self, f: F) -> Self
+    where
+        F: Fn(
+                WorkflowCtx,
+                BoxFuture<'static, anyhow::Result<serde_json::Value>>,
+            ) -> BoxFuture<'static, anyhow::Result<serde_json::Value>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.wrap = Some(Arc::new(f));
+        self
+    }
+}
+
+impl Default for Middleware {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The declaration config consumed by [`create_workflow`]. Mirrors TanStack's
+/// `createWorkflow(options)`; only `id` is required (`initialize` defaults to
+/// `{}`). `input`/`state`/`output` re-type the config and install the matching
+/// serde shape-checks (zod `.safeParse` counterparts); `version` is the string
+/// this workflow's runs persist for version routing; `default_step_retry` is
+/// the step retry fallback; `description` is metadata.
+pub struct CreateWorkflowConfig<
+    TInput = (),
+    TOutput = (),
+    TState = serde_json::Value,
+> {
+    pub id: String,
+    pub description: Option<String>,
+    pub version: Option<String>,
+    pub initialize: InitializeFn,
+    pub state_validator: Option<StateValidatorFn>,
+    pub output_validator: Option<StateValidatorFn>,
+    pub default_step_retry: Option<RetryPolicy>,
+    pub handler: WorkflowHandler,
+    pub _input: PhantomData<TInput>,
+    pub _output: PhantomData<TOutput>,
+    pub _state: PhantomData<TState>,
+}
+
+impl CreateWorkflowConfig<(), (), serde_json::Value> {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            description: None,
+            version: None,
+            initialize: Arc::new(|_| Ok(serde_json::Value::Object(Default::default()))),
+            state_validator: None,
+            output_validator: None,
+            default_step_retry: None,
+            handler: Arc::new(|_ctx: WorkflowCtx| Box::pin(async { Ok(serde_json::Value::Null) })),
+            _input: PhantomData,
+            _output: PhantomData,
             _state: PhantomData,
         }
     }
 }
 
-/// Parses frozen run input into the workflow's typed input.
-type InputParser<In> = Arc<dyn Fn(&serde_json::Value) -> anyhow::Result<In> + Send + Sync>;
-
-/// Chainable builder returned by [`Workflow::input_schema`]. `In` is the typed
-/// run input (`ctx.input`), `St` the typed state (`ctx.state`) — both mirrored
-/// on the [`BaseCtx<In, St>`](BaseCtx) the handler receives. The handler's
-/// output type `Out` is inferred from the closure's return value — no output
-/// schema declaration needed, mirroring TanStack's handler return type
-/// inference (their `output` schema only *constrains*, it never declares).
-pub struct TypedWorkflowBuilder<In, St = serde_json::Value> {
-    id: String,
-    version: Option<String>,
-    initialize: InitializeFn,
-    state_validator: Option<StateValidatorFn>,
-    parse: InputParser<In>,
-    _state: PhantomData<St>,
-}
-
-impl<In, St> TypedWorkflowBuilder<In, St>
-where
-    In: serde::de::DeserializeOwned + Send + Sync + 'static,
-{
-    /// Replace the default serde parse with a custom one (e.g.
-    /// `serde_path_to_error` for friendlier field-path messages).
-    pub fn with_parser(
-        mut self,
-        parse: impl Fn(&serde_json::Value) -> anyhow::Result<In> + Send + Sync + 'static,
-    ) -> Self {
-        self.parse = Arc::new(parse);
+impl<TInput, TOutput, TState> CreateWorkflowConfig<TInput, TOutput, TState> {
+    pub fn version(mut self, version: impl Into<String>) -> Self {
+        self.version = Some(version.into());
         self
     }
 
-    /// Declare the initial per-invocation state (see [`Workflow::initialize`]).
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// `initialize({ input })` — rebuild the per-invocation state on every
+    /// start and resume (state is never persisted, see
+    /// [`Workflow::initialize`](Workflow::initialize)).
     pub fn initialize(
         mut self,
         f: impl Fn(&serde_json::Value) -> anyhow::Result<serde_json::Value> + Send + Sync + 'static,
@@ -524,97 +658,260 @@ where
         self
     }
 
-    /// Declare a typed state: re-types the builder so the handler's ctx is
-    /// `BaseCtx<In, NewSt>` and `ctx.state` is `NewSt`. The built state is
-    /// shape-checked against `NewSt` on every invocation (zod `.safeParse`
-    /// counterpart for `stateSchema`).
-    pub fn state_schema<NewSt>(self) -> TypedWorkflowBuilder<In, NewSt>
+    /// Fallback retry for steps that declare no [`StepOptions::retry`].
+    pub fn default_step_retry(mut self, retry: RetryPolicy) -> Self {
+        self.default_step_retry = Some(retry);
+        self
+    }
+
+    /// Declare the input schema as a serde type: re-types the config to
+    /// `CreateWorkflowConfig<In, _, _>` so `create_workflow` builds a
+    /// [`WorkflowBuilder<In, _, _>`](WorkflowBuilder). The handler's
+    /// `ctx.input` is `In`. Missing/mistyped input fields error the run
+    /// (zod `inputSchema` `.safeParse` counterpart).
+    pub fn input<NewIn>(self) -> CreateWorkflowConfig<NewIn, TOutput, TState>
+    where
+        NewIn: serde::de::DeserializeOwned + Send + Sync + 'static,
+    {
+        CreateWorkflowConfig {
+            id: self.id,
+            description: self.description,
+            version: self.version,
+            initialize: self.initialize,
+            state_validator: self.state_validator,
+            output_validator: self.output_validator,
+            default_step_retry: self.default_step_retry,
+            handler: self.handler,
+            _input: PhantomData,
+            _output: self._output,
+            _state: self._state,
+        }
+    }
+
+    /// Declare the state schema as a serde type: the state built by
+    /// [`initialize`](Self::initialize) is shape-checked against `NewSt` on
+    /// every invocation, and the handler's `ctx.state` is `NewSt`.
+    pub fn state<NewSt>(self) -> CreateWorkflowConfig<TInput, TOutput, NewSt>
     where
         NewSt: serde::de::DeserializeOwned + Send + Sync + 'static,
     {
-        TypedWorkflowBuilder {
+        CreateWorkflowConfig {
             id: self.id,
+            description: self.description,
             version: self.version,
             initialize: self.initialize,
             state_validator: Some(Arc::new(|v| {
                 serde_json::from_value::<NewSt>(v.clone())?;
                 Ok(())
             })),
-            parse: self.parse,
+            output_validator: self.output_validator,
+            default_step_retry: self.default_step_retry,
+            handler: self.handler,
+            _input: self._input,
+            _output: self._output,
             _state: PhantomData,
         }
     }
 
-    /// Finalize with a typed handler. `Out` is inferred from the return value;
-    /// the engine stores it serialized as JSON, so on resume the handler
-    /// re-runs from scratch with the re-parsed input and state (same as
-    /// TanStack).
-    pub fn handler<F, Fut, Out>(self, handler: F) -> TypedWorkflow<In, Out>
+    /// Declare the output schema as a serde type: re-types the config to
+    /// `CreateWorkflowConfig<_, NewOut, _>`; the handler's `Out` is validated
+    /// against `NewOut` (zod `.safeParse`) before the run finishes. Inferred
+    /// from the handler closure otherwise, exactly like TanStack — the schema
+    /// constrains but never declares.
+    pub fn output<NewOut>(self) -> CreateWorkflowConfig<TInput, NewOut, TState>
     where
-        Out: serde::Serialize + Send + Sync + 'static,
-        St: serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
-        F: Fn(BaseCtx<In, St>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = anyhow::Result<Out>> + Send + 'static,
+        NewOut: serde::de::DeserializeOwned + Send + Sync + 'static,
     {
-        let TypedWorkflowBuilder {
-            id,
-            version,
-            initialize,
-            state_validator,
-            parse,
-            _state,
-        } = self;
-        let parse = Arc::new(parse);
-        let handler = Arc::new(handler);
-        let engine_handler: WorkflowHandler = Arc::new(move |ctx: WorkflowCtx| {
-            let parse = Arc::clone(&parse);
-            let handler = Arc::clone(&handler);
-            Box::pin(async move {
-                let input = parse(&ctx.input)?;
-                let state: St = serde_json::from_value(ctx.state.clone())?;
-                let typed = BaseCtx {
-                    run_id: ctx.run_id,
-                    input,
-                    state,
-                    engine: ctx.engine.clone(),
-                };
-                let out = handler(typed).await?;
-                Ok(serde_json::to_value(out)?)
-            })
-        });
-        TypedWorkflow {
-            base: Workflow {
-                id,
-                version,
-                handler: engine_handler,
-                initialize,
-                state_validator,
-            },
-            _input: PhantomData,
+        CreateWorkflowConfig {
+            id: self.id,
+            description: self.description,
+            version: self.version,
+            initialize: self.initialize,
+            state_validator: self.state_validator,
+            output_validator: Some(Arc::new(|v| {
+                serde_json::from_value::<NewOut>(v.clone())?;
+                Ok(())
+            })),
+            default_step_retry: self.default_step_retry,
+            handler: self.handler,
+            _input: self._input,
             _output: PhantomData,
+            _state: self._state,
         }
     }
 }
 
-/// A workflow whose `In`/`Out` are statically known at the declaration site.
-/// `Deref<Target = Workflow>` lets it be handed to
+/// Build a typed workflow the TanStack way: declaration config → builder →
+/// `handler()`. `In`/`Out`/`St` come from the config's
+/// [`input`]/[`output`]/[`state`](CreateWorkflowConfig::state) re-types; the
+/// handler's output type is inferred from the closure return value.
+pub fn create_workflow<TInput, TOutput, TState>(
+    config: CreateWorkflowConfig<TInput, TOutput, TState>,
+) -> WorkflowBuilder<TInput, TOutput, TState, ()> {
+    WorkflowBuilder {
+        config,
+        middlewares: Vec::new(),
+        previous: Vec::new(),
+        _ext: PhantomData,
+    }
+}
+
+/// The typed builder — `TInput`/`TOutput`/`TState` mirror the workflow's schema
+/// at build time, `TCtxExt` is the ctx extension type declared by the last
+/// [`middleware`](Self::middleware) call (`()` when none).
+pub struct WorkflowBuilder<TInput, TOutput, TState, TCtxExt = ()> {
+    config: CreateWorkflowConfig<TInput, TOutput, TState>,
+    middlewares: Vec<Middleware>,
+    previous: Vec<Workflow>,
+    _ext: PhantomData<TCtxExt>,
+}
+
+impl<TInput, TOutput, TState, TCtxExt> WorkflowBuilder<TInput, TOutput, TState, TCtxExt> {
+    /// Attach a runtime middleware and re-key `TCtxExt` to `PExt` — the type of
+    /// `ctx.ext` the handler reads (`produce`'s JSON output is deserialized
+    /// into it; [`Default`] is used when the middleware has no `produce`).
+    /// TanStack's intersection of extension types collapses to this single
+    /// bundle; extra `wrap`s still compose in registration order.
+    pub fn middleware<PExt>(mut self, m: Middleware) -> WorkflowBuilder<TInput, TOutput, TState, PExt> {
+        self.middlewares.push(m);
+        WorkflowBuilder {
+            config: self.config,
+            middlewares: self.middlewares,
+            previous: self.previous,
+            _ext: PhantomData,
+        }
+    }
+
+    /// Older versions of the same workflow to route resumed runs to (see
+    /// [`select_workflow_version`](crate::engine::select_workflow_version)).
+    pub fn previous_versions(mut self, v: Vec<Workflow>) -> Self {
+        self.previous = v;
+        self
+    }
+
+    /// Finalize with the orchestrating closure. `AOut` is inferred from the
+    /// handler's return value; the engine stores it serialized as JSON, so on
+    /// resume the handler re-runs from scratch with re-parsed input/state and a
+    /// freshly `produce`d extension (same as TanStack).
+    pub fn handler<F, Fut, AOut>(self, handler: F) -> WorkflowDefinition<TInput, AOut, TState, TCtxExt>
+    where
+        TInput: serde::de::DeserializeOwned + Send + Sync + 'static,
+        TState: serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
+        TCtxExt: serde::de::DeserializeOwned + Default + Send + Sync + 'static,
+        AOut: serde::Serialize + Send + Sync + 'static,
+        F: Fn(BaseCtx<TInput, TState, TCtxExt>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = anyhow::Result<AOut>> + Send + 'static,
+    {
+        let CreateWorkflowConfig {
+            id,
+            description,
+            version,
+            initialize,
+            state_validator,
+            output_validator,
+            default_step_retry,
+            handler: _,
+            _input: _,
+            _output: _,
+            _state: _,
+        } = self.config;
+        let handler = Arc::new(handler);
+        let middlewares = self.middlewares.clone();
+        let engine_middlewares = self.middlewares.clone();
+        let workflow_middlewares = self.middlewares.clone();
+        let validator = output_validator.clone();
+        let engine_validator = validator.clone();
+        let mut engine_handler: WorkflowHandler = Arc::new(move |ctx: WorkflowCtx| {
+            let handler = Arc::clone(&handler);
+            let produce_mw = engine_middlewares.clone();
+            let output_validator = engine_validator.clone();
+            Box::pin(async move {
+                let input = serde_json::from_value(ctx.input.clone())?;
+                let state = serde_json::from_value(ctx.state.clone())?;
+                let ext: TCtxExt = produce_mw
+                    .iter()
+                    .filter_map(|m| m.produce.clone())
+                    .next_back()
+                    .map(|p| -> anyhow::Result<TCtxExt> {
+                        Ok(serde_json::from_value(p(&ctx)?)?)
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                let typed = BaseCtx {
+                    run_id: ctx.run_id,
+                    input,
+                    state,
+                    ext,
+                    engine: ctx.engine.clone(),
+                };
+                let out = handler(typed).await?;
+                let value = serde_json::to_value(out)?;
+                if let Some(validate) = &output_validator {
+                    validate(&value)?;
+                }
+                Ok(value)
+            })
+        });
+        // Fold wraps outermost-first, matching TanStack `composeMiddlewares`
+        // where the first-listed middleware is outermost.
+        for m in middlewares.iter().rev() {
+            if let Some(wrap) = &m.wrap {
+                let wrap = wrap.clone();
+                let inner = Arc::clone(&engine_handler);
+                engine_handler = Arc::new(move |ctx: WorkflowCtx| {
+                    let wrap = wrap.clone();
+                    let inner = inner.clone();
+                    Box::pin(async move {
+                        let next = inner(ctx.clone());
+                        wrap(ctx, next).await
+                    })
+                });
+            }
+        }
+        WorkflowDefinition {
+            base: Workflow {
+                id,
+                version,
+                description,
+                default_step_retry,
+                middlewares: workflow_middlewares,
+                previous_versions: self.previous,
+                handler: engine_handler,
+                initialize,
+                state_validator,
+                output_validator: validator,
+            },
+            _input: PhantomData,
+            _output: PhantomData,
+            _state: PhantomData,
+            _ext: PhantomData,
+        }
+    }
+}
+
+/// A workflow whose `In`/`Out`/`St`/`Ext` are statically known at the
+/// declaration site. `Deref<Target = Workflow>` lets it be handed to
 /// [`crate::engine::run_workflow`] / the registry directly; explicit erasure is
 /// [`into_workflow`](Self::into_workflow).
 #[derive(Clone)]
-pub struct TypedWorkflow<In, Out> {
+pub struct WorkflowDefinition<TInput, TOutput, TState = serde_json::Value, TCtxExt = ()> {
     base: Workflow,
-    _input: PhantomData<In>,
-    _output: PhantomData<Out>,
+    _input: PhantomData<TInput>,
+    _output: PhantomData<TOutput>,
+    _state: PhantomData<TState>,
+    _ext: PhantomData<TCtxExt>,
 }
 
-impl<In, Out> TypedWorkflow<In, Out> {
+impl<TInput, TOutput, TState, TCtxExt> WorkflowDefinition<TInput, TOutput, TState, TCtxExt> {
     /// Type-erase back to the engine's [`Workflow`] view.
     pub fn into_workflow(self) -> Workflow {
         self.base
     }
 }
 
-impl<In, Out> std::ops::Deref for TypedWorkflow<In, Out> {
+impl<TInput, TOutput, TState, TCtxExt> std::ops::Deref
+    for WorkflowDefinition<TInput, TOutput, TState, TCtxExt>
+{
     type Target = Workflow;
 
     fn deref(&self) -> &Workflow {
