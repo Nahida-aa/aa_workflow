@@ -65,6 +65,27 @@ mod tests {
     use std::time::Duration;
     use workflow_core::RunStatus;
 
+    /// 轮询直到 run 在 `step_id` 挂起。
+    async fn wait_paused<S: RunStore + ?Sized>(store: &Arc<S>, run_id: &str, step_id: &str) {
+        for _ in 0..2000 {
+            let evs = store.get_events(run_id).unwrap();
+            if evs.iter().any(|e| {
+                matches!(e, RunEvent::StepPaused { step_id: id, .. } if id == step_id)
+            }) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("run {run_id} never paused at {step_id}");
+    }
+
+    fn finished_count(events: &[RunEvent], step: &str) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, RunEvent::StepFinished { step_id, .. } if step_id == step))
+            .count()
+    }
+
     #[tokio::test]
     async fn file_store_survives_restart_and_resume() {
         let base = std::env::temp_dir().join(format!(
@@ -227,6 +248,67 @@ mod tests {
             .count();
         assert_eq!(pauses, 1, "整个生命周期只应有一个 StepPaused");
         assert_eq!(resumes, 1);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn invoice_double_sleep_survives_restart() {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tmp")
+            .join(format!("invoice_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        // 进程 A：跑到第一个 sleep 挂起后"崩溃"（abort，不写终态）。
+        let store: Arc<dyn RunStore> = Arc::new(FileRunStore::new(&base));
+        let wf = crate::workflows::invoice();
+        let store2 = store.clone();
+        let wf2 = wf.clone();
+        let t1 = tokio::spawn(async move {
+            drive(
+                &wf2,
+                store2,
+                serde_json::json!({ "orderId": "i:r", "t1": 400, "t2": 700 }),
+                DriveOpts {
+                    run_id: Some("invoice:r"),
+                    ..DriveOpts::default()
+                },
+            )
+            .await
+        });
+        wait_paused(&store, "invoice:r", "settle-due-1").await;
+        t1.abort();
+        let _ = t1.await;
+
+        // 进程 B：全新 FileRunStore 打开同一 base 续跑。sleep 的 deadline 从日志
+        // 恢复——不再重复 append `StepPaused`，两次定时器各自到期后收尾。
+        let store2: Arc<dyn RunStore> = Arc::new(FileRunStore::new(&base));
+        let out = drive(
+            &wf,
+            store2.clone(),
+            serde_json::json!({ "orderId": "i:r", "t1": 400, "t2": 700 }),
+            DriveOpts {
+                run_id: Some("invoice:r"),
+                ..DriveOpts::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        assert_eq!(out.output.unwrap()["settled"], true);
+
+        let events = store2.get_events("invoice:r").unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| {
+                    matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "settle-due-1")
+                })
+                .count(),
+            1,
+            "进程 B 不重复 append 第一个 sleep 的 StepPaused"
+        );
+        assert_eq!(finished_count(&events, "settle-invoice"), 1);
 
         let _ = std::fs::remove_dir_all(&base);
     }
