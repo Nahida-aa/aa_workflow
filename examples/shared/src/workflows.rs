@@ -1,5 +1,10 @@
 //! 示例 workflow 定义（handler 形态，代码即 DAG）。
 //!
+//! 输入用 `.with_input::<T>()` 声明（Rust 版 zod `inputSchema`：serde
+//! Deserialize 即运行时校验，缺字段/错类型在首次恢复时报 schema 错误）；
+//! handler 收到 [`TypedCtx<T>`]，`ctx.input()` 直接是 `&T`。输出类型从
+//! handler 返回值自动推断（对齐 TanStack 的返回值推断，无 output 声明）。
+//!
 //! - [`fulfillment_saga`]（id `fulfillment-saga`）— 并行（`tokio::try_join!`）+ retry
 //!   + 分支：演示 authoring 面；扣款等副作用**不注入**，走模块级 [`payment_gateway`]
 //!     服务（对齐官方 pocs：workflow 无依赖参数，effect 写死在 handler 内）。
@@ -16,8 +21,90 @@
 
 use std::time::Duration;
 use workflow_core::{
-    Backoff, RetryPolicy, StepCtx, StepOptions, Workflow, WorkflowCtx,
+    Backoff, RetryPolicy, StepCtx, StepOptions, TypedCtx, TypedWorkflow, Workflow, WorkflowCtx,
 };
+
+// ========================================================================
+// 输入类型 = workflow 的「schema」（Rust 版 zod `inputSchema`）：serde
+// Deserialize 即运行时校验，`.with_input::<In>()` 后 handler 拿到
+// `TypedCtx<In>`，`ctx.input()` 直接是 `&In`，没有 `.get(...)` 链。
+// ========================================================================
+
+/// 履约 saga 输入。
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FulfillmentSagaInput {
+    pub order_id: String,
+    #[serde(default)]
+    pub expedited: bool,
+}
+
+/// 邮件 digest 输入。
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmailDigestInput {
+    pub days: i64,
+}
+
+/// 履约流输入（对齐 wf-demo `FulfillmentInput`）。
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FulfillmentInput {
+    pub order_id: String,
+    pub ready_at: i64,
+}
+
+/// 审批流输入。
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalOrderInput {
+    pub order_id: String,
+    pub amount: i64,
+    #[serde(default = "default_currency")]
+    pub currency: String,
+}
+
+/// 发票输入。
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvoiceInput {
+    pub order_id: String,
+    #[serde(default = "default_t1")]
+    pub t1: u64,
+    #[serde(default = "default_t2")]
+    pub t2: u64,
+}
+
+/// 合规归档输入。
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComplianceInput {
+    pub subject_id: String,
+}
+
+/// 退款输入。
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefundInput {
+    pub order_id: String,
+    pub amount: i64,
+    #[serde(default = "default_currency")]
+    pub currency: String,
+    #[serde(default)]
+    pub refund_at: Option<i64>,
+}
+
+fn default_currency() -> String {
+    "USD".to_string()
+}
+
+fn default_t1() -> u64 {
+    1_000
+}
+
+fn default_t2() -> u64 {
+    3_000
+}
 
 /// 模拟"外部扣款"的模块级服务（对齐官方 pocs：workflow 不注入依赖，
 /// 副作用就写成模块作用域里的服务函数）。用可配置的全局状态模拟支付网关
@@ -72,21 +159,15 @@ pub mod payment_gateway {
 
 /// 履约 saga：`gen-pdf` 与 `charge` 并行（`try_join!`），扣款带重试
 /// （瞬时失败经 [`payment_gateway`] 模拟）；`input.expedited` 为真时
-/// 追加 `notify`（分支 = 普通 `if`）。
-pub fn fulfillment_saga() -> Workflow {
-    Workflow::new("fulfillment-saga").handler(|ctx: WorkflowCtx| {
-        async move {
-            let order_id = ctx
-                .input()
-                .get("orderId")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| "order-1".to_string());
-            let expedited = ctx
-                .input()
-                .get("expedited")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+/// 追加 `notify`（分支 = 普通 `if`）。输入 `orderId` 必填，缺失即
+/// run 首次恢复时报 schema 错误（相当于 zod `.safeParse` 失败）。
+pub fn fulfillment_saga() -> TypedWorkflow<FulfillmentSagaInput, serde_json::Value> {
+    Workflow::new("fulfillment-saga")
+        .with_input::<FulfillmentSagaInput>()
+        .handler(|ctx: TypedCtx<FulfillmentSagaInput>| async move {
+            let input = ctx.input();
+            let order_id = input.order_id.clone();
+            let expedited = input.expedited;
 
             let (pdf, charged) = tokio::try_join!(
                 {
@@ -135,20 +216,16 @@ pub fn fulfillment_saga() -> Workflow {
                 "pdf": pdf,
                 "charge": charged,
             }))
-        }
-    })
+        })
 }
 
 /// 邮件 digest：`scan-events` → `render` → `send` 三步链。
 /// 本身无并行/分支，专门用来演示 resume 与 `continue_from` 的检查点行为。
-pub fn email_digest() -> Workflow {
-    Workflow::new("email-digest").handler(move |ctx: WorkflowCtx| {
-        async move {
-            let days = ctx
-                .input()
-                .get("days")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(7) as i64;
+pub fn email_digest() -> TypedWorkflow<EmailDigestInput, serde_json::Value> {
+    Workflow::new("email-digest")
+        .with_input::<EmailDigestInput>()
+        .handler(move |ctx: TypedCtx<EmailDigestInput>| async move {
+            let days = ctx.input().days;
 
             let scanned = ctx
                 .step("scan-events", move |_sc: StepCtx| {
@@ -182,8 +259,7 @@ pub fn email_digest() -> Workflow {
                 .await?;
 
             Ok(serde_json::json!({ "days": days, "sent": sent }))
-        }
-    })
+        })
 }
 
 /// 人工审批流：`draft` → `review`（`ctx.approve` 挂起，等外部决定）→ `publish`。
@@ -227,18 +303,14 @@ fn now_ms() -> i64 {
 
 /// 履约流（对齐官方 `fulfillmentWorkflow` / wf-demo `fulfillment`）：
 /// `reserve-inventory` → 若 `readyAt` 在未来先 `sleep` 闸门 → 等
-/// `payment-received` 事件 → `ship-order`。事件等待用 `ctx.approve`
-/// 表达（reason 即事件名；投递方 `signal_run(run, key, payload)`）。
-pub fn fulfillment() -> Workflow {
-    Workflow::new("fulfillment").handler(|ctx: WorkflowCtx| {
-        async move {
+/// `payment-received` 事件 → `ship-order`。
+pub fn fulfillment() -> TypedWorkflow<FulfillmentInput, serde_json::Value> {
+    Workflow::new("fulfillment")
+        .with_input::<FulfillmentInput>()
+        .handler(|ctx: TypedCtx<FulfillmentInput>| async move {
             let input = ctx.input();
-            let order_id = input
-                .get("orderId")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| "order-1".to_string());
-            let ready_at = input.get("readyAt").and_then(|v| v.as_i64()).unwrap_or(0);
+            let order_id = input.order_id.clone();
+            let ready_at = input.ready_at;
 
             let order_id_reserve = order_id.clone();
             let order_id_ship = order_id.clone();
@@ -287,29 +359,21 @@ pub fn fulfillment() -> Workflow {
                 "payment": payment,
                 "shipment": shipment,
             }))
-        }
-    })
+        })
 }
 
 const APPROVAL_THRESHOLD: i64 = 1_000;
 
 /// 审批流（对齐 wf-demo `approval-order`）：`check-order` → 金额超过阈值才
 /// `approve`（拒绝走 `notify-rejected` 分支）→ `charge-payment`。
-pub fn approval_order() -> Workflow {
-    Workflow::new("approval-order").handler(|ctx: WorkflowCtx| {
-        async move {
+pub fn approval_order() -> TypedWorkflow<ApprovalOrderInput, serde_json::Value> {
+    Workflow::new("approval-order")
+        .with_input::<ApprovalOrderInput>()
+        .handler(|ctx: TypedCtx<ApprovalOrderInput>| async move {
             let input = ctx.input();
-            let order_id = input
-                .get("orderId")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| "order-1".to_string());
-            let amount = input.get("amount").and_then(|v| v.as_i64()).unwrap_or(0);
-            let currency = input
-                .get("currency")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| "USD".to_string());
+            let order_id = input.order_id.clone();
+            let amount = input.amount;
+            let currency = input.currency.clone();
 
             let order_id_check = order_id.clone();
             let currency_check = currency.clone();
@@ -368,23 +432,19 @@ pub fn approval_order() -> Workflow {
                 "amount": amount,
                 "currency": currency,
             }))
-        }
-    })
+        })
 }
 
 /// 发票（对齐 wf-demo `invoice`）：`prepare-invoice` → 连续两个 `sleep`
 /// （双定时器等待，引擎内自动唤醒）→ `settle-invoice`。
-pub fn invoice() -> Workflow {
-    Workflow::new("invoice").handler(|ctx: WorkflowCtx| {
-        async move {
+pub fn invoice() -> TypedWorkflow<InvoiceInput, serde_json::Value> {
+    Workflow::new("invoice")
+        .with_input::<InvoiceInput>()
+        .handler(|ctx: TypedCtx<InvoiceInput>| async move {
             let input = ctx.input();
-            let order_id = input
-                .get("orderId")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| "order-1".to_string());
-            let t1 = input.get("t1").and_then(|v| v.as_u64()).unwrap_or(1_000);
-            let t2 = input.get("t2").and_then(|v| v.as_u64()).unwrap_or(3_000);
+            let order_id = input.order_id.clone();
+            let t1 = input.t1;
+            let t2 = input.t2;
 
             let order_id_prepare = order_id.clone();
             let order_id_settle = order_id.clone();
@@ -413,21 +473,16 @@ pub fn invoice() -> Workflow {
                 "settled": true,
                 "settledAt": now_ms(),
             }))
-        }
-    })
+        })
 }
 
 /// 合规归档（对齐 wf-demo `compliance`）：连续两次事件等待
 /// （`legal-review-done` → `compliance-signed`）→ `archive-record`。
-pub fn compliance() -> Workflow {
-    Workflow::new("compliance").handler(|ctx: WorkflowCtx| {
-        async move {
-            let subject_id = ctx
-                .input()
-                .get("subjectId")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| "subj-1".to_string());
+pub fn compliance() -> TypedWorkflow<ComplianceInput, serde_json::Value> {
+    Workflow::new("compliance")
+        .with_input::<ComplianceInput>()
+        .handler(|ctx: TypedCtx<ComplianceInput>| async move {
+            let subject_id = ctx.input().subject_id.clone();
 
             ctx.approve("legal-review", "waiting for legal-review-done")
                 .await?;
@@ -452,28 +507,20 @@ pub fn compliance() -> Workflow {
                 "archived": true,
                 "record": record,
             }))
-        }
-    })
+        })
 }
 
 /// 退款（对齐 wf-demo `refund`）混合链：`chargeback-filed` 事件 → 定时闸门 → 审批
 /// （拒绝走 `declined`，无 disburse step）→ `disburse-refund`。
-pub fn refund() -> Workflow {
-    Workflow::new("refund").handler(|ctx: WorkflowCtx| {
-        async move {
+pub fn refund() -> TypedWorkflow<RefundInput, serde_json::Value> {
+    Workflow::new("refund")
+        .with_input::<RefundInput>()
+        .handler(|ctx: TypedCtx<RefundInput>| async move {
             let input = ctx.input();
-            let order_id = input
-                .get("orderId")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| "order-1".to_string());
-            let amount = input.get("amount").and_then(|v| v.as_i64()).unwrap_or(0);
-            let currency = input
-                .get("currency")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| "USD".to_string());
-            let refund_at = input.get("refundAt").and_then(|v| v.as_i64());
+            let order_id = input.order_id.clone();
+            let amount = input.amount;
+            let currency = input.currency.clone();
+            let refund_at = input.refund_at;
 
             ctx.approve("chargeback", "waiting for chargeback-filed")
                 .await?;
@@ -518,8 +565,7 @@ pub fn refund() -> Workflow {
                 "amount": amount,
                 "currency": currency,
             }))
-        }
-    })
+        })
 }
 
 #[cfg(test)]
@@ -1028,5 +1074,36 @@ mod tests {
             .filter(|e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "refund-wait"))
             .count();
         assert_eq!(timer_sleep, 1, "定时闸门睡过一次");
+    }
+
+    /// `.with_input` 保留双向静态类型：In 显式声明，Out 从 handler 返回类型
+    /// 自动推断（对齐 TanStack 的返回值推断，无需 output schema 声明）。
+    #[test]
+    fn typed_workflow_keeps_static_types() {
+        let _saga: TypedWorkflow<FulfillmentSagaInput, serde_json::Value> = fulfillment_saga();
+        let _wf: TypedWorkflow<FulfillmentInput, serde_json::Value> = fulfillment();
+    }
+
+    /// zod 语义：缺失必填字段 → 首次恢复即 schema 错误，run 直接 Errored。
+    #[tokio::test]
+    async fn typed_input_rejects_missing_field() {
+        let store = Arc::new(InMemoryStore::new());
+        let store2 = store.clone();
+        let wf = fulfillment().into_workflow();
+        let wf2 = wf.clone();
+        let out = run_workflow(
+            &wf2,
+            store2,
+            &RunOptions::new(serde_json::json!({ "orderId": "o-1" })).run_id("fulfill:bad"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Errored, "缺 readyAt 应 schema 报错");
+        let msg = out.error.unwrap();
+        assert!(
+            msg.contains("ready_at") || msg.contains("missing field"),
+            "错误应指向字段路径: {msg}"
+        );
     }
 }

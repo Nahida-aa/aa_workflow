@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -225,5 +226,169 @@ impl Workflow {
     {
         self.handler = Arc::new(move |ctx| Box::pin(handler(ctx)));
         self
+    }
+
+    /// Declare a typed input (serde `Deserialize` type = schema). Missing or
+    /// mistyped fields fail the run on its first resume with a field-path
+    /// error — the Rust counterpart of zod's `inputSchema` `.safeParse`.
+    /// Returns a [`TypedWorkflowBuilder`] whose handler receives
+    /// [`TypedCtx`] with `ctx.input()` already deserialized.
+    pub fn with_input<In>(self) -> TypedWorkflowBuilder<In>
+    where
+        In: serde::de::DeserializeOwned + Send + Sync + 'static,
+    {
+        TypedWorkflowBuilder {
+            id: self.id,
+            version: self.version,
+            parse: Arc::new(|v| serde_json::from_value(v.clone()).map_err(anyhow::Error::from)),
+        }
+    }
+}
+
+/// Parses frozen run input into the workflow's typed input.
+type InputParser<In> = Arc<dyn Fn(&serde_json::Value) -> anyhow::Result<In> + Send + Sync>;
+
+/// Typed view handed to a typed handler. Re-parses the frozen run input on
+/// every resume (deterministic: input JSON never mutates); the parsed value is
+/// cached in an `Arc` so the handler and closures it spawns share it.
+#[derive(Clone)]
+pub struct TypedCtx<In> {
+    inner: WorkflowCtx,
+    input: Arc<In>,
+}
+
+impl<In> TypedCtx<In> {
+    pub fn run_id(&self) -> &str {
+        self.inner.run_id()
+    }
+
+    /// The typed, validated run input.
+    pub fn input(&self) -> &In {
+        &self.input
+    }
+
+    pub async fn step<F, Fut>(
+        &self,
+        step_id: &str,
+        run: F,
+    ) -> anyhow::Result<serde_json::Value>
+    where
+        F: FnOnce(StepCtx) -> Fut + Clone + Send + 'static,
+        Fut: Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static,
+    {
+        self.inner.step(step_id, run).await
+    }
+
+    pub async fn step_with<F, Fut>(
+        &self,
+        step_id: &str,
+        opts: StepOptions,
+        run: F,
+    ) -> anyhow::Result<serde_json::Value>
+    where
+        F: FnOnce(StepCtx) -> Fut + Clone + Send + 'static,
+        Fut: Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static,
+    {
+        self.inner.step_with(step_id, opts, run).await
+    }
+
+    pub async fn approve(
+        &self,
+        key: impl Into<String>,
+        reason: impl AsRef<str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.approve(key, reason).await
+    }
+
+    pub async fn sleep(
+        &self,
+        key: impl Into<String>,
+        dur: std::time::Duration,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.sleep(key, dur).await
+    }
+}
+
+/// Chainable builder returned by [`Workflow::with_input`]. The handler's
+/// output type `Out` is inferred from the closure's return value — no output
+/// schema declaration needed, mirroring TanStack's handler return type
+/// inference (their `output` schema only *constrains*, it never declares).
+pub struct TypedWorkflowBuilder<In> {
+    id: String,
+    version: Option<String>,
+    parse: InputParser<In>,
+}
+
+impl<In: Send + Sync + 'static> TypedWorkflowBuilder<In> {
+    /// Replace the default serde parse with a custom one (e.g.
+    /// `serde_path_to_error` for friendlier field-path messages).
+    pub fn with_parser(
+        mut self,
+        parse: impl Fn(&serde_json::Value) -> anyhow::Result<In> + Send + Sync + 'static,
+    ) -> Self {
+        self.parse = Arc::new(parse);
+        self
+    }
+
+    /// Finalize with a typed handler. `Out` is inferred from the return value;
+    /// the engine stores it serialized as JSON, so on resume the handler
+    /// re-runs from scratch with the re-parsed input (same as TanStack).
+    pub fn handler<F, Fut, Out>(self, handler: F) -> TypedWorkflow<In, Out>
+    where
+        Out: serde::Serialize + Send + Sync + 'static,
+        F: Fn(TypedCtx<In>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = anyhow::Result<Out>> + Send + 'static,
+    {
+        let TypedWorkflowBuilder { id, version, parse } = self;
+        let parse = Arc::new(parse);
+        let handler = Arc::new(handler);
+        let engine_handler: WorkflowHandler = Arc::new(move |ctx: WorkflowCtx| {
+            let parse = Arc::clone(&parse);
+            let handler = Arc::clone(&handler);
+            Box::pin(async move {
+                let input = parse(ctx.input())?;
+                let out = handler(TypedCtx {
+                    inner: ctx,
+                    input: Arc::new(input),
+                })
+                .await?;
+                Ok(serde_json::to_value(out)?)
+            })
+        });
+        TypedWorkflow {
+            base: Workflow {
+                id,
+                version,
+                handler: engine_handler,
+            },
+            _input: PhantomData,
+            _output: PhantomData,
+        }
+    }
+}
+
+/// A workflow whose `In`/`Out` are statically known at the declaration site.
+/// `Deref<Target = Workflow>` lets it be handed to
+/// [`crate::engine::run_workflow`] / the registry directly; explicit erasure is
+/// [`into_workflow`](Self::into_workflow).
+#[derive(Clone)]
+pub struct TypedWorkflow<In, Out> {
+    base: Workflow,
+    _input: PhantomData<In>,
+    _output: PhantomData<Out>,
+}
+
+impl<In, Out> TypedWorkflow<In, Out> {
+    /// Type-erase back to the engine's [`Workflow`] view.
+    pub fn into_workflow(self) -> Workflow {
+        self.base
+    }
+}
+
+impl<In, Out> std::ops::Deref for TypedWorkflow<In, Out> {
+    type Target = Workflow;
+
+    fn deref(&self) -> &Workflow {
+        &self.base
     }
 }

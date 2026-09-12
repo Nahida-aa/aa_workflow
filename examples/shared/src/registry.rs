@@ -7,17 +7,17 @@ use crate::workflows::{
     invoice, refund,
 };
 
-/// 全部注册示例 workflow。
+/// 全部注册示例 workflow（类型擦除：进注册表的都是引擎 `Workflow`）。
 pub fn all() -> Vec<Workflow> {
     vec![
-        fulfillment(),
-        fulfillment_saga(),
+        fulfillment().into_workflow(),
+        fulfillment_saga().into_workflow(),
         approval_review(),
-        approval_order(),
-        email_digest(),
-        invoice(),
-        compliance(),
-        refund(),
+        approval_order().into_workflow(),
+        email_digest().into_workflow(),
+        invoice().into_workflow(),
+        compliance().into_workflow(),
+        refund().into_workflow(),
     ]
 }
 

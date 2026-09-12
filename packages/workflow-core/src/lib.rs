@@ -31,7 +31,9 @@ pub mod event;
 pub mod resource;
 pub mod store;
 
-pub use define::{Backoff, RetryPolicy, StepCtx, StepOptions, Workflow, WorkflowCtx};
+pub use define::{
+    Backoff, RetryPolicy, StepCtx, StepOptions, TypedCtx, TypedWorkflow, Workflow, WorkflowCtx,
+};
 pub use engine::{run_workflow, run_workflow_sync, signal_run, RunOptions, RunOutcome};
 pub use error::{StoreError, WorkflowError};
 pub use event::{fold_step_states, RunEvent, RunStatus, StepAttempt, StepState, StepStatus};
