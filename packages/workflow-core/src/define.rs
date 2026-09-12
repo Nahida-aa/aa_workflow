@@ -939,3 +939,122 @@ impl<TInput, TOutput, TState, TCtxExt> std::ops::Deref
         &self.base
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{RunOptions, run_workflow};
+    use crate::event::RunStatus;
+    use crate::store::InMemoryStore;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(serde::Deserialize, serde::Serialize, Default, Debug, PartialEq, Eq)]
+    struct UserExt {
+        user: String,
+    }
+
+    /// `middleware.produce` 的输出 deserialize 进 handler 的 `ctx.ext`
+    /// （`WorkflowBuilder::middleware::<PExt>` 决定 `Ext` 类型）；无 produce 时
+    /// 用 [`Default`]。对齐 TanStack `defineMiddleware` 的 context 注入。
+    #[tokio::test]
+    async fn middleware_produce_builds_typed_ext() {
+        let store = Arc::new(InMemoryStore::new());
+        let wf = create_workflow(CreateWorkflowConfig::new("mw-ext").input::<serde_json::Value>())
+            .middleware::<UserExt>(
+                Middleware::new()
+                    .produce(|_ctx| Ok(serde_json::json!({ "user": "alice", "ignored": true }))),
+            )
+            .handler(
+                |ctx: BaseCtx<serde_json::Value, serde_json::Value, UserExt>| async move {
+                    Ok(serde_json::json!({ "user": ctx.ext.user }))
+                },
+            );
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        assert_eq!(
+            out.output,
+            Some(serde_json::json!({ "user": "alice" })),
+            "middleware produce 注入 ctx.ext"
+        );
+
+        // 无 produce → Ext 取 Default()。
+        let store2 = Arc::new(InMemoryStore::new());
+        let wf2 = create_workflow(
+            CreateWorkflowConfig::new("mw-ext-default").input::<serde_json::Value>(),
+        )
+        .middleware::<UserExt>(Middleware::new())
+        .handler(
+            |ctx: BaseCtx<serde_json::Value, serde_json::Value, UserExt>| async move {
+                Ok(serde_json::json!({ "user": ctx.ext.user }))
+            },
+        );
+        let out2 = run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})), None)
+            .await
+            .unwrap();
+        assert_eq!(out2.output, Some(serde_json::json!({ "user": "" })));
+    }
+
+    /// `wrap` 按注册序最外层包裹（TanStack `composeMiddlewares` 语义：先注册的
+    /// 在最外）：before-in → before-out → handler → after-out → after-in。
+    #[tokio::test]
+    async fn middleware_wrap_composes_in_registration_order() {
+        fn make_wrap(
+            name: &'static str,
+            order: &Arc<Mutex<Vec<String>>>,
+        ) -> impl Fn(
+            WorkflowCtx,
+            BoxFuture<'static, anyhow::Result<serde_json::Value>>,
+        ) -> BoxFuture<'static, anyhow::Result<serde_json::Value>>
+        + Send
+        + Sync
+        + 'static {
+            let order = order.clone();
+            move |_ctx, next| {
+                let order = order.clone();
+                let name = name;
+                Box::pin(async move {
+                    order.lock().unwrap().push(format!("before-{name}"));
+                    let r = next.await;
+                    order.lock().unwrap().push(format!("after-{name}"));
+                    r
+                })
+            }
+        }
+
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let m_in = Middleware::new().wrap(make_wrap("in", &order));
+        let m_out = Middleware::new().wrap(make_wrap("out", &order));
+        let wf =
+            create_workflow(CreateWorkflowConfig::new("mw-order").input::<serde_json::Value>())
+                .middleware::<()>(m_in)
+                .middleware::<()>(m_out)
+                .handler(|ctx: BaseCtx<serde_json::Value>| async move {
+                    ctx.step("inner", |_sc: StepCtx| async move {
+                        Ok(serde_json::json!({ "ok": true }))
+                    })
+                    .await
+                });
+        let store = Arc::new(InMemoryStore::new());
+        let out = run_workflow(&wf, store, &RunOptions::new(serde_json::json!({})), None)
+            .await
+            .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec![
+                "before-in".to_string(),
+                "before-out".to_string(),
+                "after-out".to_string(),
+                "after-in".to_string(),
+            ],
+            "先注册的 middleware 在最外"
+        );
+    }
+}
