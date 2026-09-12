@@ -233,7 +233,7 @@ impl Workflow {
     /// error — the Rust counterpart of zod's `inputSchema` `.safeParse`.
     /// Returns a [`TypedWorkflowBuilder`] whose handler receives
     /// [`TypedCtx`] with `ctx.input()` already deserialized.
-    pub fn with_input<In>(self) -> TypedWorkflowBuilder<In>
+    pub fn input_schema<In>(self) -> TypedWorkflowBuilder<In>
     where
         In: serde::de::DeserializeOwned + Send + Sync + 'static,
     {
@@ -309,7 +309,7 @@ impl<In> TypedCtx<In> {
     }
 }
 
-/// Chainable builder returned by [`Workflow::with_input`]. The handler's
+/// Chainable builder returned by [`Workflow::input_schema`]. The handler's
 /// output type `Out` is inferred from the closure's return value — no output
 /// schema declaration needed, mirroring TanStack's handler return type
 /// inference (their `output` schema only *constrains*, it never declares).

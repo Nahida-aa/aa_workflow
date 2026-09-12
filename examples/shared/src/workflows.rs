@@ -1,6 +1,6 @@
 //! 示例 workflow 定义（handler 形态，代码即 DAG）。
 //!
-//! 输入用 `.with_input::<T>()` 声明（Rust 版 zod `inputSchema`：serde
+//! 输入用 `.input_schema::<T>()` 声明（Rust 版 zod `inputSchema`：serde
 //! Deserialize 即运行时校验，缺字段/错类型在首次恢复时报 schema 错误）；
 //! handler 收到 [`TypedCtx<T>`]，`ctx.input()` 直接是 `&T`。输出类型从
 //! handler 返回值自动推断（对齐 TanStack 的返回值推断，无 output 声明）。
@@ -26,7 +26,7 @@ use workflow_core::{
 
 // ========================================================================
 // 输入类型 = workflow 的「schema」（Rust 版 zod `inputSchema`）：serde
-// Deserialize 即运行时校验，`.with_input::<In>()` 后 handler 拿到
+// Deserialize 即运行时校验，`.input_schema::<In>()` 后 handler 拿到
 // `TypedCtx<In>`，`ctx.input()` 直接是 `&In`，没有 `.get(...)` 链。
 // ========================================================================
 
@@ -163,7 +163,7 @@ pub mod payment_gateway {
 /// run 首次恢复时报 schema 错误（相当于 zod `.safeParse` 失败）。
 pub fn fulfillment_saga() -> TypedWorkflow<FulfillmentSagaInput, serde_json::Value> {
     Workflow::new("fulfillment-saga")
-        .with_input::<FulfillmentSagaInput>()
+        .input_schema::<FulfillmentSagaInput>()
         .handler(|ctx: TypedCtx<FulfillmentSagaInput>| async move {
             let input = ctx.input();
             let order_id = input.order_id.clone();
@@ -223,7 +223,7 @@ pub fn fulfillment_saga() -> TypedWorkflow<FulfillmentSagaInput, serde_json::Val
 /// 本身无并行/分支，专门用来演示 resume 与 `continue_from` 的检查点行为。
 pub fn email_digest() -> TypedWorkflow<EmailDigestInput, serde_json::Value> {
     Workflow::new("email-digest")
-        .with_input::<EmailDigestInput>()
+        .input_schema::<EmailDigestInput>()
         .handler(move |ctx: TypedCtx<EmailDigestInput>| async move {
             let days = ctx.input().days;
 
@@ -306,7 +306,7 @@ fn now_ms() -> i64 {
 /// `payment-received` 事件 → `ship-order`。
 pub fn fulfillment() -> TypedWorkflow<FulfillmentInput, serde_json::Value> {
     Workflow::new("fulfillment")
-        .with_input::<FulfillmentInput>()
+        .input_schema::<FulfillmentInput>()
         .handler(|ctx: TypedCtx<FulfillmentInput>| async move {
             let input = ctx.input();
             let order_id = input.order_id.clone();
@@ -368,7 +368,7 @@ const APPROVAL_THRESHOLD: i64 = 1_000;
 /// `approve`（拒绝走 `notify-rejected` 分支）→ `charge-payment`。
 pub fn approval_order() -> TypedWorkflow<ApprovalOrderInput, serde_json::Value> {
     Workflow::new("approval-order")
-        .with_input::<ApprovalOrderInput>()
+        .input_schema::<ApprovalOrderInput>()
         .handler(|ctx: TypedCtx<ApprovalOrderInput>| async move {
             let input = ctx.input();
             let order_id = input.order_id.clone();
@@ -439,7 +439,7 @@ pub fn approval_order() -> TypedWorkflow<ApprovalOrderInput, serde_json::Value> 
 /// （双定时器等待，引擎内自动唤醒）→ `settle-invoice`。
 pub fn invoice() -> TypedWorkflow<InvoiceInput, serde_json::Value> {
     Workflow::new("invoice")
-        .with_input::<InvoiceInput>()
+        .input_schema::<InvoiceInput>()
         .handler(|ctx: TypedCtx<InvoiceInput>| async move {
             let input = ctx.input();
             let order_id = input.order_id.clone();
@@ -480,7 +480,7 @@ pub fn invoice() -> TypedWorkflow<InvoiceInput, serde_json::Value> {
 /// （`legal-review-done` → `compliance-signed`）→ `archive-record`。
 pub fn compliance() -> TypedWorkflow<ComplianceInput, serde_json::Value> {
     Workflow::new("compliance")
-        .with_input::<ComplianceInput>()
+        .input_schema::<ComplianceInput>()
         .handler(|ctx: TypedCtx<ComplianceInput>| async move {
             let subject_id = ctx.input().subject_id.clone();
 
@@ -514,7 +514,7 @@ pub fn compliance() -> TypedWorkflow<ComplianceInput, serde_json::Value> {
 /// （拒绝走 `declined`，无 disburse step）→ `disburse-refund`。
 pub fn refund() -> TypedWorkflow<RefundInput, serde_json::Value> {
     Workflow::new("refund")
-        .with_input::<RefundInput>()
+        .input_schema::<RefundInput>()
         .handler(|ctx: TypedCtx<RefundInput>| async move {
             let input = ctx.input();
             let order_id = input.order_id.clone();
@@ -1076,7 +1076,7 @@ mod tests {
         assert_eq!(timer_sleep, 1, "定时闸门睡过一次");
     }
 
-    /// `.with_input` 保留双向静态类型：In 显式声明，Out 从 handler 返回类型
+    /// `.input_schema` 保留双向静态类型：In 显式声明，Out 从 handler 返回类型
     /// 自动推断（对齐 TanStack 的返回值推断，无需 output schema 声明）。
     #[test]
     fn typed_workflow_keeps_static_types() {
