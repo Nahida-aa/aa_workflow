@@ -59,6 +59,11 @@ pub struct DrvInner {
     lives: Mutex<std::collections::HashMap<String, StepState>>,
     pub target_step: Option<String>,
     target_reached: AtomicBool,
+    /// Per-invocation positional counters for `ctx.now()` / `ctx.uuid()`
+    /// (rebuilt on every drive, mirroring TanStack's per-run `engine.counters`);
+    /// used to derive the checkpoint ids `__now-{n}` / `__uuid-{n}`.
+    now_counter: AtomicUsize,
+    uuid_counter: AtomicUsize,
     pub publisher: Option<Arc<dyn Fn(&RunEvent) + Send + Sync>>,
 }
 
@@ -291,6 +296,59 @@ where
 /// Polling (rather than a subscription) keeps pause/resume working against any
 /// [`RunStore`], including LocalDub's `FsRunStore` which has no `subscribe`.
 const RESUME_POLL_MS: Duration = Duration::from_millis(25);
+
+/// Deterministic wall-clock behind [`WorkflowCtx::now`](crate::define::WorkflowCtx::now)
+/// (TanStack `ctx.now`): the call's timestamp, recorded as a `NowRecorded`
+/// checkpoint. On replay the recorded value is served from the log — a run
+/// sees the **same** clock across resumes. The checkpoint id uses a
+/// per-invocation atomic counter (`__now-0`, `__now-1`, …) so concurrent
+/// calls stay unique; replay permutes them to the same ids and reads the cache.
+pub fn exec_now(inner: &Arc<DrvInner>) -> anyhow::Result<i64> {
+    let k = inner.now_counter.fetch_add(1, Ordering::SeqCst);
+    let step_id = format!("__now-{k}");
+    for ev in inner.store.get_events(&inner.run_id)? {
+        if let RunEvent::NowRecorded { step_id: id, value, .. } = &ev
+            && id == &step_id
+        {
+            return Ok(*value);
+        }
+    }
+    let value = now_ms();
+    let ev = RunEvent::NowRecorded {
+        ts: value,
+        run_id: inner.run_id.clone(),
+        step_id,
+        value,
+    };
+    inner.append(&ev)?;
+    inner.publish(&ev);
+    Ok(value)
+}
+
+/// Deterministic id behind [`WorkflowCtx::uuid`](crate::define::WorkflowCtx::uuid)
+/// (TanStack `ctx.uuid`): a generated UUIDv4, recorded as a `UuidRecorded`
+/// checkpoint. On replay the recorded id is served — stable across resumes.
+pub fn exec_uuid(inner: &Arc<DrvInner>) -> anyhow::Result<String> {
+    let k = inner.uuid_counter.fetch_add(1, Ordering::SeqCst);
+    let step_id = format!("__uuid-{k}");
+    for ev in inner.store.get_events(&inner.run_id)? {
+        if let RunEvent::UuidRecorded { step_id: id, value, .. } = &ev
+            && id == &step_id
+        {
+            return Ok(value.clone());
+        }
+    }
+    let value = uuid::Uuid::new_v4().to_string();
+    let ev = RunEvent::UuidRecorded {
+        ts: now_ms(),
+        run_id: inner.run_id.clone(),
+        step_id,
+        value: value.clone(),
+    };
+    inner.append(&ev)?;
+    inner.publish(&ev);
+    Ok(value)
+}
 
 /// Durable wait implemented by [`WorkflowCtx::approve`](crate::define::WorkflowCtx::approve)
 /// / [`WorkflowCtx::sleep`](crate::define::WorkflowCtx::sleep) /
@@ -1672,6 +1730,106 @@ mod tests {
         assert!(
             store.get_events("nowhere").unwrap().is_empty(),
             "失败时不 append StepResume"
+        );
+    }
+
+    #[tokio::test]
+    async fn now_and_uuid_deterministic_across_resume() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("det").handler(|ctx: WorkflowCtx| async move {
+            // 两个调用位点各自拿到稳定值；approve 强制产生一次 replay 边界。
+            let t1 = ctx.now()?;
+            let u1 = ctx.uuid()?;
+            ctx.approve("gate", "go").await?;
+            let t2 = ctx.now()?;
+            let u2 = ctx.uuid()?;
+            Ok(serde_json::json!({ "now": t1, "uuid": u1, "now2": t2, "uuid2": u2 }))
+        });
+        let store2 = store.clone();
+        let wf2 = wf.clone();
+        let t = tokio::spawn(async move {
+            run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id("det1"), None).await
+        });
+        wait_until(
+            &store,
+            "det1",
+            |e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "gate"),
+        )
+        .await;
+        signal_run(store.as_ref(), "det1", "gate", serde_json::json!(true)).unwrap();
+        let out = t.await.unwrap().unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        let o1 = out.output.clone().unwrap();
+
+        // 重跑（崩溃恢复模拟）：now/uuid 全部从日志缓存值取，输出逐字节一致。
+        let store3 = store.clone();
+        let wf3 = wf.clone();
+        let out2 = run_workflow(&wf3, store3, &RunOptions::new(serde_json::json!({})).run_id("det1"), None)
+            .await
+            .unwrap();
+        assert_eq!(out2.status, RunStatus::Finished);
+        assert_eq!(out2.output.clone().unwrap(), o1, "replay 后 now/uuid 与首跑一致");
+        assert_eq!(
+            count_events(&store, "det1", |e| matches!(e, RunEvent::NowRecorded { .. })),
+            2,
+            "每个调用位点只记录一次，replay 不重复 append"
+        );
+        assert_eq!(
+            count_events(&store, "det1", |e| matches!(e, RunEvent::UuidRecorded { .. })),
+            2
+        );
+        // 两对 now/uuid 都用独立的确定性 id（__now-0/__now-1、__uuid-0/__uuid-1）。
+        let ids: Vec<String> = store
+            .get_events("det1")
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::NowRecorded { step_id, .. } => Some(format!("now:{step_id}")),
+                RunEvent::UuidRecorded { step_id, .. } => Some(format!("uuid:{step_id}")),
+                _ => None,
+            })
+            .collect();
+        assert!(!ids.iter().any(|a| ids.iter().filter(|b| b == &a).count() > 1), "ids 唯一: {ids:?}");
+    }
+
+    #[tokio::test]
+    async fn concurrent_now_calls_stay_unique() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("conc").handler(|ctx: WorkflowCtx| {
+            async move {
+                let (a, b) = {
+                    let (a, b) = (ctx.clone(), ctx.clone());
+                    tokio::join!(
+                        async move { a.now() },
+                        async move { b.now() },
+                    )
+                };
+                Ok(serde_json::json!({ "a": a?, "b": b? }))
+            }
+        });
+        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
+            .await
+            .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        let v = out.output.unwrap();
+        assert!(v["a"].as_i64().is_some() && v["b"].as_i64().is_some(), "两个 now 都应成功");
+        assert_eq!(
+            count_events(&store, &out.run_id, |e| matches!(e, RunEvent::NowRecorded { .. })),
+            2,
+            "并发调用各自落一个 NowRecorded，无重复 id"
+        );
+
+        // 重跑：并发 again，replay 命中 __now-0/__now-1 缓存，事件数不变。
+        let store2 = store.clone();
+        let wf2 = wf.clone();
+        let out2 = run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id(&out.run_id), None)
+            .await
+            .unwrap();
+        assert_eq!(out2.status, RunStatus::Finished);
+        assert_eq!(out2.output.clone().unwrap(), v, "并发 replay 也一致");
+        assert_eq!(
+            count_events(&store, &out.run_id, |e| matches!(e, RunEvent::NowRecorded { .. })),
+            2
         );
     }
 }

@@ -105,6 +105,13 @@ pub enum RunEvent {
     /// the publisher, never the log — so it never becomes part of replay
     /// (mirrors TanStack's `CUSTOM` event).
     Custom { ts: i64, run_id: String, name: String, value: serde_json::Value },
+    /// Checkpoint (persisted): `ctx.now()` recorded a wall-clock timestamp.
+    /// On replay the cached value is served so a run sees the same clock
+    /// across resumes (TanStack `NOW_RECORDED`).
+    NowRecorded { ts: i64, run_id: String, step_id: String, value: i64 },
+    /// Checkpoint (persisted): `ctx.uuid()` recorded a generated id. On
+    /// replay the same id is served (TanStack `UUID_RECORDED`).
+    UuidRecorded { ts: i64, run_id: String, step_id: String, value: String },
 }
 
 impl RunEvent {
@@ -119,7 +126,9 @@ impl RunEvent {
             | RunEvent::StepFailed { step_id, .. }
             | RunEvent::StepPaused { step_id, .. }
             | RunEvent::StepResume { step_id, .. }
-            | RunEvent::StepProgress { step_id, .. } => Some(step_id),
+            | RunEvent::StepProgress { step_id, .. }
+            | RunEvent::NowRecorded { step_id, .. }
+            | RunEvent::UuidRecorded { step_id, .. } => Some(step_id),
         }
     }
 }

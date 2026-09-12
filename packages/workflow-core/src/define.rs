@@ -168,6 +168,20 @@ impl WorkflowCtx {
         });
     }
 
+    /// Deterministic wall-clock (TanStack `ctx.now`): records the call's
+    /// timestamp as a checkpoint; replay serves the recorded value, so a run
+    /// sees the same clock across resumes. Returns `Err` only on store failure.
+    pub fn now(&self) -> anyhow::Result<i64> {
+        crate::engine::exec_now(&self.inner)
+    }
+
+    /// Deterministic id (TanStack `ctx.uuid`): records a generated UUIDv4 as a
+    /// checkpoint; replay serves the recorded id, so the same value is seen
+    /// across resumes. Returns `Err` only on store failure.
+    pub fn uuid(&self) -> anyhow::Result<String> {
+        crate::engine::exec_uuid(&self.inner)
+    }
+
     /// [`step`](Self::step) with per-step options (retry policy, timeout,
     /// resource gate, `up_to_date` make-check).
     pub async fn step_with<F, Fut>(
@@ -460,6 +474,16 @@ impl<In> TypedCtx<In> {
     /// Emit an observability event (see [`WorkflowCtx::emit`]).
     pub fn emit(&self, name: impl AsRef<str>, value: serde_json::Value) {
         self.inner.emit(name, value)
+    }
+
+    /// Deterministic wall-clock (see [`WorkflowCtx::now`]).
+    pub fn now(&self) -> anyhow::Result<i64> {
+        self.inner.now()
+    }
+
+    /// Deterministic id (see [`WorkflowCtx::uuid`]).
+    pub fn uuid(&self) -> anyhow::Result<String> {
+        self.inner.uuid()
     }
 }
 

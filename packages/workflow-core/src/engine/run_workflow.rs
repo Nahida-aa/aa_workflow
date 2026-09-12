@@ -155,6 +155,8 @@ pub async fn run_workflow(
         target_step: opts.target_step.clone(),
         target_reached: AtomicBool::new(target_reached),
         publisher,
+        now_counter: AtomicUsize::new(0),
+        uuid_counter: AtomicUsize::new(0),
     });
     inner.publish(&RunEvent::RunStarted { ts, run_id: run_id.clone() });
 
