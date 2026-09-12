@@ -945,7 +945,7 @@ mod tests {
     use super::*;
     use crate::engine::{RunOptions, run_workflow};
     use crate::event::RunStatus;
-    use crate::store::InMemoryStore;
+    use crate::run_store::InMemoryStore;
     use std::sync::{Arc, Mutex};
 
     #[derive(serde::Deserialize, serde::Serialize, Default, Debug, PartialEq, Eq)]

@@ -33,7 +33,7 @@
 //! ## Persistence model
 //!
 //! The engine's source of truth is an **append-only event log** behind the
-//! [`store::RunStore`] trait (CAS append + optional subscribe for
+//! [`run_store::RunStore`] trait (CAS append + optional subscribe for
 //! fan-out). Per-step status is *derived* by replaying the log
 //! ([`event::fold_step_states`]); resume short-circuits succeeded steps so
 //! code is re-executed only for what still needs to run. `continue_from`
@@ -45,7 +45,7 @@ pub mod engine;
 pub mod error;
 pub mod event;
 pub mod resource;
-pub mod store;
+pub mod run_store;
 
 pub use define::{
     Backoff, BaseCtx, CreateWorkflowConfig, Middleware, RetryPolicy, StepCtx, StepOptions,
@@ -58,4 +58,4 @@ pub use engine::{
 pub use error::{StoreError, WorkflowError};
 pub use event::{RunEvent, RunStatus, StepAttempt, StepState, StepStatus, fold_step_states};
 pub use resource::{Gate, GateGuard, ResourceKey};
-pub use store::{InMemoryStore, PendingApproval, RunState, RunStore, WaitForState};
+pub use run_store::{InMemoryStore, PendingApproval, RunState, RunStore, WaitForState};

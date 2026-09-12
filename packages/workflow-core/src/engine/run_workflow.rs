@@ -16,7 +16,7 @@ use crate::engine::{
 use crate::error::WorkflowError;
 use crate::event::{RunEvent, RunStatus, StepStatus, fold_step_states};
 use crate::resource::Gate;
-use crate::store::{RunState, RunStore};
+use crate::run_store::{RunState, RunStore};
 
 /// Per-invocation options. `run_id`, `continue_from` and `target_step` are
 /// invocation options, NOT persisted — persistent state lives in the event
@@ -322,7 +322,7 @@ mod tests {
         BaseCtx, CreateWorkflowConfig, StepCtx, Workflow, WorkflowCtx, create_workflow,
     };
     use crate::engine::testkit::TestLog;
-    use crate::store::InMemoryStore;
+    use crate::run_store::InMemoryStore;
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};

@@ -237,7 +237,8 @@ packages/workflow-core/     引擎本体
   src/engine/mod.rs         EngineRuntime、exec_step / exec_pause、signal_*
   src/engine/run_workflow.rs  单次 drive 的顶层编排、RunOptions
   src/event.rs              RunEvent / RunStatus / fold_step_states
-  src/store.rs              RunStore trait + InMemoryStore
+  src/run_store/mod.rs      RunStore trait + RunState 信封
+  src/run_store/in_memory.rs  InMemoryStore
   src/resource.rs           容量-1 的资源门
 examples/shared/            host 无关示例层（10 个 workflow + FileRunStore + drive 薄壳）
 docs/tanstack-alignment.md  对齐决策记录（含推翻第一轮的论证）

@@ -6,7 +6,7 @@
 //! - `<base>/<run_id>/run.json` — [`RunState`] 信封（元数据面）
 //! - `<base>/<run_id>/events.jsonl` — append-only 事件日志（契约面，CAS append）
 //!
-//! 语义对齐 [`workflow_core::store::InMemoryStore`]（CAS 冲突报
+//! 语义对齐 [`workflow_core::run_store::InMemoryStore`]（CAS 冲突报
 //! [`StoreError::Conflict`]、`subscribe` 用 `std::sync::mpsc` 扇出），只是落盘。
 //! 与 LocalDub 的 `FsRunStore` 是同一思想的独立最小实现（彼方不回依赖这里，
 //! 语义上可以此为准）。

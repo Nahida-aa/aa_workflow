@@ -14,7 +14,7 @@ use crate::define::{StepCtx, StepOptions};
 use crate::error::{StoreError, WorkflowError};
 use crate::event::{RunEvent, RunStatus, StepAttempt, StepState, StepStatus};
 use crate::resource::Gate;
-use crate::store::RunStore;
+use crate::run_store::RunStore;
 
 mod run_workflow;
 pub use run_workflow::{
@@ -596,7 +596,7 @@ fn project_run_wait(store: &Arc<dyn RunStore>, run_id: &str, kind: WaitKind) {
                 signal_name,
                 deadline,
             } => {
-                st.waiting_for = Some(crate::store::WaitForState {
+                st.waiting_for = Some(crate::run_store::WaitForState {
                     step_id,
                     signal_name,
                     deadline,
@@ -609,7 +609,7 @@ fn project_run_wait(store: &Arc<dyn RunStore>, run_id: &str, kind: WaitKind) {
                 title,
                 description,
             } => {
-                st.pending_approval = Some(crate::store::PendingApproval {
+                st.pending_approval = Some(crate::run_store::PendingApproval {
                     step_id,
                     approval_id,
                     title,
@@ -729,11 +729,10 @@ pub(crate) mod testkit {
 mod tests {
     use super::*;
     use crate::define::{
-        Backoff, BaseCtx, BoxFuture, CreateWorkflowConfig, Middleware, RetryPolicy, Workflow,
-        WorkflowCtx, create_workflow,
+        Backoff, BaseCtx, CreateWorkflowConfig, RetryPolicy, Workflow, WorkflowCtx, create_workflow,
     };
     use crate::engine::testkit::{TestLog, idx};
-    use crate::store::{InMemoryStore, RunState};
+    use crate::run_store::{InMemoryStore, RunState};
     use std::sync::atomic::AtomicBool;
     use tokio::try_join;
 

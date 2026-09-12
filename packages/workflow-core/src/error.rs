@@ -1,6 +1,6 @@
 use std::fmt;
 
-/// Errors produced by a [`crate::store::RunStore`] implementation.
+/// Errors produced by a [`crate::run_store::RunStore`] implementation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
     /// `append_event` was called with a stale expected index (CAS violation).
