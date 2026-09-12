@@ -120,7 +120,9 @@ let outcome = run_workflow(
 
 ## 耐久原语
 
-`ctx` 上所有会落盘的东西。key **必填**（确定性 / 可重入所需，与 TanStack 的可选 `id` 不同）。
+`ctx` 上所有会产生 checkpoint 的原语。是否真的写到磁盘由 `RunStore` 实现决定
+（`InMemoryStore` 只进内存），引擎保证的只是「进事件日志、参与 replay」。
+key **必填**（确定性 / 可重入所需，与 TanStack 的可选 `id` 不同）。
 
 | 方法 | 语义 |
 | --- | --- |
@@ -164,7 +166,7 @@ step 结果。
 单一真相源是 **append-only 事件日志**，`serde(tag = "type")` 命名与 TS 侧同构
 （`{"type":"STEP_FINISHED","stepId":...}`）。
 
-- **checkpoint（落盘）**：`StepFinished` / `StepFailed` / `StepPaused` / `StepResume`
+- **checkpoint（进日志，参与 replay）**：`StepFinished` / `StepFailed` / `StepPaused` / `StepResume`
   / `RunFinished` / `RunErrored` / `NowRecorded` / `UuidRecorded`
 - **observability（只投 publisher）**：`RunStarted` / `StepStarted` / `StepProgress` / `Custom`
 
