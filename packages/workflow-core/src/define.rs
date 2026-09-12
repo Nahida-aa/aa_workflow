@@ -182,6 +182,20 @@ impl WorkflowCtx {
         crate::engine::exec_uuid(&self.inner)
     }
 
+    /// Whether this run was cancelled via [`cancel_run`](crate::engine::cancel_run).
+    /// Polled at step boundaries only — the engine cannot interrupt a step's
+    /// in-flight `await` (same granularity as JS `AbortSignal`: the closure
+    /// must check cooperatively).
+    pub fn is_cancelled(&self) -> bool {
+        self.inner
+            .store
+            .get_run_state(&self.inner.run_id)
+            .ok()
+            .flatten()
+            .map(|st| st.status == crate::event::RunStatus::Aborted)
+            .unwrap_or(false)
+    }
+
     /// [`step`](Self::step) with per-step options (retry policy, timeout,
     /// resource gate, `up_to_date` make-check).
     pub async fn step_with<F, Fut>(
@@ -484,6 +498,11 @@ impl<In> TypedCtx<In> {
     /// Deterministic id (see [`WorkflowCtx::uuid`]).
     pub fn uuid(&self) -> anyhow::Result<String> {
         self.inner.uuid()
+    }
+
+    /// Whether this run was cancelled (see [`WorkflowCtx::is_cancelled`]).
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.is_cancelled()
     }
 }
 

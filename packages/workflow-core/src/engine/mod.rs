@@ -39,6 +39,58 @@ impl std::fmt::Display for StepHalt {
 
 impl std::error::Error for StepHalt {}
 
+/// Internal sentinel: [`cancel_run`] set the run to `Aborted` while the
+/// handler was driving. Step closures are not interruptible mid-`await`,
+/// so the error surfaces at the next engine boundary (step entry / attempt
+/// boundary / pause loop tick). Becomes an `Aborted` run, never `Errored`.
+#[derive(Debug)]
+pub struct WorkflowCancelled;
+
+impl std::fmt::Display for WorkflowCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "workflow aborted")
+    }
+}
+
+impl std::error::Error for WorkflowCancelled {}
+
+/// True when `run_id`'s run state was set to `Aborted` by [`cancel_run`].
+/// Polled at step entry and inside the pause loop; store-agnostic (works for
+/// any [`RunStore`], including filesystem stores without a notification
+/// channel).
+fn is_cancelled(store: &Arc<dyn RunStore>, run_id: &str) -> bool {
+    store
+        .get_run_state(run_id)
+        .ok()
+        .flatten()
+        .map(|st| st.status == RunStatus::Aborted)
+        .unwrap_or(false)
+}
+
+/// Cancels a live or parked run: flips its state to terminal `Aborted`. The
+/// engine spots it on its next poll (≤ `RESUME_POLL_MS` when parked, at the
+/// next step/attempt boundary when running) and returns
+/// [`WorkflowCancelled`], so the drive ends `Aborted` rather than `Errored`.
+/// A second cancel on an already-terminal run is a no-op `Ok(())`.
+pub fn cancel_run(store: &dyn RunStore, run_id: &str) -> Result<(), WorkflowError> {
+    let Some(mut st) = store.get_run_state(run_id)? else {
+        return Err(WorkflowError::RunNotFound(run_id.to_string()));
+    };
+    if matches!(
+        st.status,
+        RunStatus::Finished | RunStatus::Errored | RunStatus::Aborted
+    ) {
+        return Ok(());
+    }
+    st.status = RunStatus::Aborted;
+    st.error = Some(WorkflowCancelled.to_string());
+    st.waiting_for = None;
+    st.pending_approval = None;
+    st.updated_at = now_ms();
+    store.set_run_state(run_id, &st)?;
+    Ok(())
+}
+
 /// Shared driver state handed to every step (and to the `<WorkflowCtx>`).
 /// This is the code-as-DAG substrate: the "graph" is just this state plus the
 /// handler's control flow, discovered as the handler runs.
@@ -141,6 +193,11 @@ where
     // target_step reached → halt the whole handler.
     if inner.halted() {
         return Err(StepHalt.into());
+    }
+
+    // Cancelled run → stop driving at this boundary.
+    if is_cancelled(&inner.store, &inner.run_id) {
+        return Err(WorkflowCancelled.into());
     }
 
     // Replay short-circuit: a succeeded checkpoint returns the cached result
@@ -257,6 +314,9 @@ where
                 });
                 let retrying = opts.retry.is_some() && attempt < max_attempts;
                 if retrying {
+                    if is_cancelled(&inner.store, &inner.run_id) {
+                        return Err(WorkflowCancelled.into());
+                    }
                     let delay = opts
                         .retry
                         .as_ref()
@@ -423,6 +483,9 @@ pub async fn exec_pause(
             clear_run_wait(&inner.store, &inner.run_id);
             return Ok(payload);
         }
+        if is_cancelled(&inner.store, &inner.run_id) {
+            return Err(WorkflowCancelled.into());
+        }
         let wait = match due_at {
             Some(due) => {
                 // `i64::saturating_sub` does NOT clamp negatives to 0 — the
@@ -478,6 +541,13 @@ enum WaitKind {
 /// 事件日志仍为准。
 fn project_run_wait(store: &Arc<dyn RunStore>, run_id: &str, kind: WaitKind) {
     if let Ok(Some(mut st)) = store.get_run_state(run_id) {
+        // 已终局（含被 cancel_run 置为 Aborted）——不覆盖成 Paused。
+        if matches!(
+            st.status,
+            RunStatus::Finished | RunStatus::Errored | RunStatus::Aborted
+        ) {
+            return;
+        }
         st.status = RunStatus::Paused;
         st.updated_at = now_ms();
         match kind {
@@ -1831,5 +1901,108 @@ mod tests {
             count_events(&store, &out.run_id, |e| matches!(e, RunEvent::NowRecorded { .. })),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn cancel_parked_approval_aborts() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("cancel").handler(|ctx: WorkflowCtx| async move {
+            let _ = ctx.approve("release", "Approve?").await?;
+            ctx.step("ship", move |_sc: StepCtx| async move {
+                Ok(serde_json::Value::Null)
+            })
+            .await?;
+            Ok(serde_json::Value::Null)
+        });
+        let store2 = store.clone();
+        let wf2 = wf.clone();
+        let task = tokio::spawn(async move {
+            run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id("ca1"), None).await
+        });
+        wait_until(
+            &store,
+            "ca1",
+            |e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "release"),
+        )
+        .await;
+        let st = store.get_run_state("ca1").unwrap().unwrap();
+        assert_eq!(st.status, RunStatus::Paused);
+
+        cancel_run(store.as_ref(), "ca1").unwrap();
+        let out = task.await.unwrap().unwrap();
+        assert_eq!(out.status, RunStatus::Aborted, "cancel 后 run 以 Aborted 终局");
+        assert!(out.error.as_deref().unwrap().contains("aborted"));
+        assert!(out.output.is_none());
+
+        let st = store.get_run_state("ca1").unwrap().unwrap();
+        assert_eq!(st.status, RunStatus::Aborted, "run.json 终态应为 Aborted");
+        assert!(st.waiting_for.is_none() && st.pending_approval.is_none());
+
+        // 日志没有 Finished 终态，也不应落在 running/paused（cancel 后不再驱动）
+        let evs = store.get_events("ca1").unwrap();
+        let terminal_finished = evs
+            .iter()
+            .any(|e| matches!(e, RunEvent::RunFinished { .. }));
+        assert!(!terminal_finished);
+        assert!(!evs.iter().any(|e| matches!(
+            e,
+            RunEvent::StepFinished { step_id, .. } if step_id == "ship"
+        )));
+    }
+
+    #[tokio::test]
+    async fn cancel_sleeping_run_aborts_and_is_recoverable() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("cancel-sleep").handler(|ctx: WorkflowCtx| async move {
+            ctx.sleep("hold", Duration::from_secs(1)).await?;
+            Ok(serde_json::json!({ "done": true }))
+        });
+        let store2 = store.clone();
+        let wf2 = wf.clone();
+        let task = tokio::spawn(async move {
+            run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})).run_id("ca2"), None).await
+        });
+        wait_until(
+            &store,
+            "ca2",
+            |e| matches!(e, RunEvent::StepPaused { step_id, .. } if step_id == "hold"),
+        )
+        .await;
+        cancel_run(store.as_ref(), "ca2").unwrap();
+        let out = task.await.unwrap().unwrap();
+        assert_eq!(out.status, RunStatus::Aborted);
+
+        // 重复 cancel：已终局 → no-op Ok
+        cancel_run(store.as_ref(), "ca2").unwrap();
+        // 未知 run → RunNotFound
+        let err = cancel_run(store.as_ref(), "missing").unwrap_err();
+        assert!(matches!(err, crate::error::WorkflowError::RunNotFound(_)));
+
+        // 取消的 run 可再次驱动：sleep 重新计时（1s）后自动放行 → Finished。
+        let store3 = store.clone();
+        let wf3 = wf.clone();
+        let out2 = run_workflow(
+            &wf3,
+            store3,
+            &RunOptions::new(serde_json::json!({})).run_id("ca2"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out2.status, RunStatus::Finished, "cancel 后重跑可恢复");
+        assert_eq!(out2.output, Some(serde_json::json!({ "done": true })));
+    }
+
+    #[tokio::test]
+    async fn ctx_reports_not_cancelled_in_normal_run() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("not-cancelled").handler(|ctx: WorkflowCtx| async move {
+            assert!(!ctx.is_cancelled());
+            Ok(serde_json::json!({ "ok": true }))
+        });
+        let out = run_workflow(&wf, store.clone(), &RunOptions::new(serde_json::json!({})), None)
+            .await
+            .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
     }
 }

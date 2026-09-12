@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Mutex;
 
 use crate::define::Workflow;
-use crate::engine::{now_ms, DrvInner, StepHalt};
+use crate::engine::{now_ms, DrvInner, StepHalt, WorkflowCancelled};
 use crate::error::WorkflowError;
 use crate::event::{RunEvent, RunStatus, StepStatus, fold_step_states};
 use crate::resource::Gate;
@@ -167,6 +167,9 @@ pub async fn run_workflow(
         Ok(output) => (RunStatus::Finished, Some(output), None),
         Err(e) if e.downcast_ref::<StepHalt>().is_some() => {
             (RunStatus::Finished, None, None)
+        }
+        Err(e) if e.downcast_ref::<WorkflowCancelled>().is_some() => {
+            (RunStatus::Aborted, None, Some(WorkflowCancelled.to_string()))
         }
         Err(e) => {
             let msg = e.to_string();
