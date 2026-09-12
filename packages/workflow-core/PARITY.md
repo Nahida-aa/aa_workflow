@@ -34,11 +34,11 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunOptions.runtime�
 
 | TanStack StepContext | Rust（StepCtx） | 状态 | 备注 |
 | -------------------- | --------------- | ---- | ---- |
-| `id: string` | 无（`step_id` 为闭包外层参数） | ◯ | Rust 侧重在 `step(id, f)` 的 id，闭包内不再暴露 |
-| `attempt: number` | ✖ | ✖ | 尚未暴露（engine 内部有 attempt 逻辑） |
+| `id: string` | `StepCtx.id: String` | ✅ | 确定性 step ID，跨 retry 与 replay 稳定；`up_to_date` 内部 probe 用 `attempt: 0` 构造 |
+| `attempt: number` | `StepCtx.attempt: usize` | ✅ | 1-based；`0` 仅见于 `up_to_date` make-check 的内部 probe |
 | `input: TInput` | `input()` | ✅ | TS StepContext 无此字段，Rust 额外提供 |
 | `runtime: StepRuntimeContext` | `deadline()/time_remaining()/should_yield()` | ◐ | 同 ctx 的 runtime 拍平 |
-| `signal: AbortSignal`（attempt 级，step timeout / run abort） | ✖ | ✖ | 未暴露；step 级协作检查待补（`is_cancelled` 目前只在 ctx 上） |
+| `signal: AbortSignal`（attempt 级，step timeout / run abort） | `StepCtx::is_cancelled()` | ◐ | 协作式轮询谓词（差异 #2）：Rust 无法中止 in-flight future，长 step 必须自定节奏自检 |
 | `progress(value)` | `progress(value: f64)` | ✅ | TS StepContext 无此字段？——见下注 |
 
 注：`progress` 在 TS 侧属于 `StepOptions.onProgress` 回调而非 StepContext；Rust
@@ -66,7 +66,8 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunOptions.runtime�
    取消由 `cancel_run` 将 run.json 置 `Aborted`，引擎在 step 入口 / attempt
    重试前 / pause 轮询 tick（≤25ms）轮询拾取 → run 以 `Aborted` + `RunErrored
    "workflow aborted"` 终局（对齐 TanStack code `'aborted'`）。
-3. **step 级 `attempt` / `signal`**：未暴露，`StepOptions`（max_attempts 等）已可用。
+3. **step 级 `attempt` / `signal`**：`StepCtx.attempt` 与 `StepCtx::is_cancelled()`
+   已暴露（见 StepContext 矩阵）；仍缺的是「可被中断的 await」——只能协作式自检。
 4. **`shouldYield` 逐调用 `minRemainingMs`**：未支持（仅 RunOptions 级）。
 5. **`now()/uuid()` 包 `Result`**：设计上仅 store 失败时 Err；正常路径与 TS 等价。
 6. **`approve.description`**：未实现（位置参数缺该项）。
@@ -125,12 +126,12 @@ L198）+ `types.ts`（`Ctx<TIn, TState, TExt>` L386）。
 
 ## 验证覆盖
 
-- `cargo test -p workflow-core`：38 个引擎级测试覆盖 Phase 1-5（named wait /
+- `cargo test -p workflow-core`：39 个引擎级测试覆盖 Phase 1-5（named wait /
   sleep_until 过去/定时 / emit 不进日志 / now·uuid 确定性 / cancel_run
   三态 + 重打可恢复 / runtime budget / yield park+replay / **middleware
   produce + wrap 注册序 / `defaultStepRetry` 兜底 + 覆盖 / select_workflow_version
   路由 / resume 按持久化版本路由**）。
-- `cargo test -p workflow-shared-examples`：27 个共享 workflow 的 e2e
+- `cargo test -p workflow-examples-shared`：28 个共享 workflow 的 e2e
   （含 `event_gate`：emit → wait_for_event → sleep_until 链路；含
   `typed_workflow_keeps_static_types` 确认 builder 泛型推断）。
 - clippy：基线 8 个 pre-existing warning，新代码零新增。

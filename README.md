@@ -1,7 +1,8 @@
 # aa-workflow
 
-Rust 版耐久执行（durable execution）引擎，API 与 store/event 契约对标
-[TanStack Workflow](https://tanstack.com/workflow)，但**不需要确定性执行约束，也不需要常驻 server**。
+Rust 版耐久执行（durable execution）引擎，对标
+[TanStack Workflow](https://tanstack.com/workflow) 的 **core engine** 层：
+headless replay 引擎 + `RunStore` 契约，无调度器、无 host adapter、无托管控制面。
 
 一句话内核：**代码即 DAG** —— 没有声明式图，编排就是普通 async 代码。
 
@@ -17,6 +18,9 @@ handler，引擎按 `step_id` 短路已成功的 checkpoint。
 
 > **状态**：实验阶段（edition 2024）。尚未接回 LocalDub，core 里只有 phase-0 的
 > `InMemoryStore`，没有可执行 binary —— 示例通过 `cargo test` 驱动。
+>
+> 对标范围是 TanStack 的 core engine，**不含**它的 `@tanstack/workflow-runtime`
+> 层（lease / sweep / timer 索引 / schedules）——见[已知边界](#已知边界)。
 
 ---
 
@@ -131,6 +135,30 @@ let outcome = run_workflow(
 非耐久：`is_cancelled()`、`deadline()`、`time_remaining()`、`should_yield()`、
 `StepCtx::progress(0.0..=1.0)`。
 
+## 确定性契约
+
+和 TanStack 一样，handler **必须**在每次 replay 时以相同顺序触达相同的原语。
+这不是可选项，而是 replay 模型的直接后果：
+
+```rust
+// 违反确定性：
+let t = SystemTime::now();        // 用 ctx.now()
+let id = Uuid::new_v4();          // 用 ctx.uuid()
+if fetch_flag().await? { ... }    // 把 fetch 包进 ctx.step()
+
+// 安全：
+let t = ctx.now()?;
+let id = ctx.uuid()?;
+let flag = ctx.step("flag", fetch_flag).await?;
+if flag { ... }
+```
+
+引擎**不检测也不强制**这一点（TanStack 同样只是把它写成 footgun）。写错了的表现是
+replay 漂移或 checkpoint 错配，不会报错。
+
+state 变更会在 replay 上重跑，之所以能确定性重放，是因为它只依赖 replay 出来的
+step 结果。
+
 ## 事件日志
 
 单一真相源是 **append-only 事件日志**，`serde(tag = "type")` 命名与 TS 侧同构
@@ -179,7 +207,15 @@ store 必须报 `StoreError::Io`，不许静默 no-op。
 显式 `needs` 图 + 调度器，已删除）。完整论证见 [`docs/tanstack-alignment.md`](docs/tanstack-alignment.md)，
 逐 API 对等矩阵见 [`packages/workflow-core/PARITY.md`](packages/workflow-core/PARITY.md)。
 
-主要分歧（都是刻意的）：
+**不是差异的地方**（容易误读）：
+
+- **确定性契约两边相同** —— TanStack 同样要求 handler 在 replay 上以相同顺序触达
+  相同原语（`docs/concepts/replay-and-resume.md:39`）。见上节。
+- **两边都不需要常驻 server** —— TanStack 的 core engine 刻意不做调度器 / host
+  adapter，部署靠 serverless cron handler 调 `runtime.sweep()`；需要常驻控制面的是
+  Temporal，不是 TanStack。
+
+真正的差异（都是刻意的）：
 
 - `state` 是 **per-drive 工作副本**，不是 TS 的 in-place 共享引用。`ctx.clone()`
   产生独立快照，并行 step 各自持快照互不可见，只在 durable 边界 flush 回镜像。
@@ -209,11 +245,23 @@ docs/tanstack-alignment.md  对齐决策记录（含推翻第一轮的论证）
 
 ## 已知边界
 
+对标范围止于 TanStack 的 core engine。**它对等的 `@tanstack/workflow-runtime`
+层我们还没有**，即以下能力全部缺失：
+
+- **多 worker 协调**：只有 CAS 原语，没有 lease / 心跳 / 抢占 / 陈旧 run 恢复。
+  两个 worker 同时 drive 同一 run_id 会同时重放（日志不会坏，但不保证只有一个人在跑）。
+- **sweep**：没有统一的后台单元做崩溃恢复扫描、到期定时器投递、调度桶启动。
+  sleep 目前靠引擎自己在挂起点轮询自投递。
+- **schedules / cron**：没有 schedule 定义与分桶。
+- **timer 索引**：`waiting_for.deadline` 有投影，但没有按时间索引的唤醒面，host
+  只能轮询。
+
+其他缺口：
+
 - **没有生产级 store**：core 只有 `InMemoryStore`；`FileRunStore` 的 `append_event`
   是全量读 + 全量重写（O(n²)），且 `Mutex` 只在单进程内有效。
-- **没有多 worker 协调层**：只有 CAS 原语，没有 lease / 心跳 / 抢占。两个 worker
-  同时 drive 同一 run_id 会同时重放（日志不会坏，但不保证只有一个人在跑）。
 - **性能是平方级**：25ms 轮询 × 每次全量反序列化日志 × 全量线性扫。长 run 需注意。
+- **确定性契约未强制**：引擎不检测 handler 的非确定性写法（TanStack 同样不检测）。
 - **无 observability 集成**：`publisher` 是裸 `Arc<dyn Fn(&RunEvent)>`，core 不依赖
   tracing，接入要自己搭桥。
 - `subscribe` 返回 `std::sync::mpsc::Receiver`（阻塞通道），async 上下文里要用
