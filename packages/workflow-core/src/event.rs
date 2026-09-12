@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
 
+use crate::error::RunError;
+
 /// Overall lifecycle status of a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -39,7 +41,9 @@ pub struct StepAttempt {
     pub started_at: i64,
     pub finished_at: i64,
     pub result: Option<serde_json::Value>,
-    pub error: Option<String>,
+    /// 结构化错误（对齐 TanStack `StepAttempt.error?: SerializedError`，
+    /// `types.ts:261`）。
+    pub error: Option<RunError>,
 }
 
 /// Append-only persisted events. Each event is immutable; the log is the

@@ -11,10 +11,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::define::{StepCtx, StepOptions};
+use crate::error::RunError;
 use crate::error::{StoreError, WorkflowError};
 use crate::event::{RunEvent, RunStatus, StepAttempt, StepState, StepStatus};
 use crate::resource::Gate;
-use crate::run_store::{RunError, RunStore};
+use crate::run_store::RunStore;
 
 mod run_workflow;
 pub use run_workflow::{
@@ -284,14 +285,16 @@ where
         };
         let started_at = now_ms();
         let run_fut = run.clone()(step_ctx);
-        let outcome = match opts.timeout {
+        // 保留 `anyhow::Error` 而非提前字符串化，这样 attempt 能记下结构化的
+        // `RunError`（attempts 会落进 STEP_FAILED，供重试与审计回看）。
+        let outcome: anyhow::Result<serde_json::Value> = match opts.timeout {
             Some(t) => match tokio::time::timeout(t, run_fut).await {
-                Ok(res) => res.map_err(|e| e.to_string()),
-                Err(_) => Err(format!(
+                Ok(res) => res,
+                Err(_) => Err(anyhow::anyhow!(
                     "step \"{step_id}\" timed out after {t:?}; underlying future continues on the runtime"
                 )),
             },
-            None => run_fut.await.map_err(|e| e.to_string()),
+            None => run_fut.await,
         };
         let finished_at = now_ms();
 
@@ -332,7 +335,7 @@ where
                     started_at,
                     finished_at,
                     result: None,
-                    error: Some(err.clone()),
+                    error: Some(RunError::from_anyhow(&err)),
                 });
                 let retrying = retry.is_some() && attempt < max_attempts;
                 if retrying {
@@ -351,7 +354,7 @@ where
                     ts: now_ms(),
                     run_id: inner.run_id.clone(),
                     step_id: step_id.to_string(),
-                    error: err.clone(),
+                    error: msg.clone(),
                     attempts,
                 };
                 inner.append(&ev)?;
@@ -360,7 +363,7 @@ where
                     StepState {
                         status: StepStatus::Failed,
                         result: None,
-                        error: Some(err),
+                        error: Some(msg.clone()),
                         started_at: Some(started_at),
                         finished_at: Some(finished_at),
                     },
@@ -1130,6 +1133,62 @@ mod tests {
             _ => None,
         });
         assert_eq!(fin.map(|a| a.len()), Some(2));
+    }
+
+    /// `StepAttempt.error` 是结构化的 `RunError`（对齐 TanStack
+    /// `StepAttempt.error?: SerializedError`），不是扁平字符串。
+    #[tokio::test]
+    async fn failed_attempts_record_structured_error() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("w").handler(move |ctx: WorkflowCtx| async move {
+            ctx.step_with(
+                "a",
+                StepOptions::new().retry(RetryPolicy::new(2, Backoff::Fixed { base_ms: 1 })),
+                move |_sc: StepCtx| async move { Err(anyhow::anyhow!("transient")) },
+            )
+            .await
+        });
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Errored);
+
+        let events = store.get_events(&out.run_id).unwrap();
+        let attempts = events
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::StepFailed { attempts, .. } => Some(attempts),
+                _ => None,
+            })
+            .expect("应有 StepFailed");
+        assert_eq!(attempts.len(), 2, "retry=2 → 两个 attempt");
+
+        for (i, a) in attempts.iter().enumerate() {
+            assert_eq!(a.attempt, i + 1);
+            assert_eq!(a.result, None);
+            let err = a
+                .error
+                .as_ref()
+                .unwrap_or_else(|| panic!("attempt {} 应记下结构化错误", a.attempt));
+            assert_eq!(err.message, "transient");
+            assert_eq!(err.name, "Error", "anyhow 类型擦除，拿不到类名");
+        }
+
+        // 结构化错误会随事件日志持久化，replay 能读回。
+        let back: Vec<RunEvent> = store.get_events(&out.run_id).unwrap();
+        let again = back.iter().find_map(|e| match e {
+            RunEvent::StepFailed { attempts, .. } => Some(attempts),
+            _ => None,
+        });
+        assert_eq!(
+            again.unwrap()[0].error.as_ref().map(|e| e.message.as_str()),
+            Some("transient")
+        );
     }
 
     #[tokio::test]

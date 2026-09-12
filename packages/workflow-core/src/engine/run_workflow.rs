@@ -13,10 +13,11 @@ use crate::define::Workflow;
 use crate::engine::{
     DEFAULT_MIN_YIELD_REMAINING_MS, EngineRuntime, StepHalt, WorkflowCancelled, now_ms,
 };
+use crate::error::RunError;
 use crate::error::WorkflowError;
 use crate::event::{RunEvent, RunStatus, StepStatus, fold_step_states};
 use crate::resource::Gate;
-use crate::run_store::{RunError, RunState, RunStore};
+use crate::run_store::{RunState, RunStore};
 
 /// Per-invocation options. `run_id`, `continue_from` and `target_step` are
 /// invocation options, NOT persisted — persistent state lives in the event

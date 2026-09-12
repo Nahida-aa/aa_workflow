@@ -55,9 +55,9 @@ pub use engine::{
     RunOptions, RunOutcome, cancel_run, run_workflow, run_workflow_sync, select_workflow_version,
     signal_event, signal_run,
 };
-pub use error::{StoreError, WorkflowError};
+pub use error::{RunError, StoreError, WorkflowError};
 pub use event::{RunEvent, RunStatus, StepAttempt, StepState, StepStatus, fold_step_states};
 pub use resource::{Gate, GateGuard, ResourceKey};
 pub use run_store::{
-    DeleteReason, InMemoryStore, PendingApproval, RunError, RunState, RunStore, WaitForState,
+    DeleteReason, InMemoryStore, PendingApproval, RunState, RunStore, WaitForState,
 };
