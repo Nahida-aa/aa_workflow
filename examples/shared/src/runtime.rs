@@ -61,7 +61,7 @@ pub async fn drive(
 mod tests {
     use super::*;
     use crate::file_run_store::FileRunStore;
-    use crate::workflows::{approval_review, email_digest};
+    use crate::workflows::email_digest;
     use std::time::Duration;
     use workflow_core::RunStatus;
 

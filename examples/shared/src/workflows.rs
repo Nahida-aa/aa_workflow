@@ -1,103 +1,132 @@
 //! 示例 workflow 定义（handler 形态，代码即 DAG）。
 //!
-//! - [`fulfillment_saga`] — 并行（`tokio::try_join!`）+ retry（脆弱的外部支付）+ 分支：
-//!   演示 authoring 面；外部依赖通过 [`Deps`] 注入，测试可控。
+//! - [`fulfillment_saga`] — 并行（`tokio::try_join!`）+ retry（脆弱外部支付）+ 分支：
+//!   演示 authoring 面；扣款等副作用**不注入**，走模块级 [`payment_gateway`] 服务
+//!   （对齐官方 pocs：workflow 无依赖参数，effect 写死在 handler 内）。
 //! - [`email_digest`] — 简单三步链：resume / `continue_from` 的行为载体。
 //! - [`approval_review`] — 人工审批：`ctx.approve` 持久化一个等待点，
 //!   外部用 [`workflow_core::signal_run`] 交付决定后继续（signals 语义载体）。
-
-use std::sync::Arc;
 
 use workflow_core::{
     Backoff, RetryPolicy, StepCtx, StepOptions, Workflow, WorkflowCtx,
 };
 
-/// 供 workflow 注入的外部依赖（host 无关层不该直接碰真实支付/邮件服务，
-/// 例子用可替换的钩子演示"durable 副作用只能走 `ctx.step`"）。
-#[derive(Clone)]
-pub struct Deps {
-    /// 模拟外部扣款调用；返回 `Err` 表示瞬时失败（由 retry 策略重试）。
-    pub charge: Arc<dyn Fn(&str) -> anyhow::Result<()> + Send + Sync>,
-}
+/// 模拟"外部扣款"的模块级服务（对齐官方 pocs：workflow 不注入依赖，
+/// 副作用就写成模块作用域里的服务函数）。用可配置的全局状态模拟支付网关
+/// 的瞬时故障，好让 retry / `continue_from` 测试可控。
+pub mod payment_gateway {
+    use std::sync::{LazyLock, Mutex};
 
-impl Default for Deps {
-    fn default() -> Self {
-        Self {
-            charge: Arc::new(|_order_id| Ok(())),
+    #[derive(Default)]
+    struct State {
+        attempts: usize,
+        fail_first: usize,
+        fail_always: bool,
+    }
+
+    static STATE: LazyLock<Mutex<State>> = LazyLock::new(Mutex::default);
+
+    /// 扣款一次：前 `fail_first` 次（或 `fail_always` 置位时一直）返回瞬时
+    /// 错误，由 workflow 步骤的 retry 策略吸收。
+    pub fn charge(order_id: &str) -> anyhow::Result<()> {
+        let mut st = STATE.lock().expect("payment gateway poisoned");
+        st.attempts += 1;
+        if st.fail_always || st.attempts <= st.fail_first {
+            return Err(anyhow::anyhow!(
+                "payment gateway down (attempt {})",
+                st.attempts
+            ));
         }
+        tracing::info!(target: "examples", "charged {order_id}");
+        Ok(())
+    }
+
+    /// 已尝试次数（含被 retry 吸收的失败）。
+    pub fn attempts() -> usize {
+        STATE.lock().expect("payment gateway poisoned").attempts
+    }
+
+    /// 让前 `n` 次扣款失败（测试用）。
+    pub fn set_fail_first(n: usize) {
+        STATE.lock().expect("payment gateway poisoned").fail_first = n;
+    }
+
+    /// 一直失败（测试用）。
+    pub fn set_fail_always(yes: bool) {
+        STATE.lock().expect("payment gateway poisoned").fail_always = yes;
+    }
+
+    /// 复位全局服务状态（测试用）。
+    pub fn reset() {
+        *STATE.lock().expect("payment gateway poisoned") = State::default();
     }
 }
 
-/// 履约 saga：`gen-pdf` 与 `charge` 并行（`try_join!`），扣款带重试；
-/// `input.expedited` 为真时追加 `notify`（分支 = 普通 `if`）。
-pub fn fulfillment_saga(deps: &Deps) -> Workflow {
-    let charge = deps.charge.clone();
-    Workflow::new("fulfillment").handler({
-        let charge = charge.clone();
-        move |ctx: WorkflowCtx| {
-            let charge = charge.clone();
-            async move {
-                let order_id = ctx
-                    .input()
-                    .get("orderId")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-                    .unwrap_or_else(|| "order-1".to_string());
-                let expedited = ctx
-                    .input()
-                    .get("expedited")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+/// 履约 saga：`gen-pdf` 与 `charge` 并行（`try_join!`），扣款带重试
+/// （瞬时失败经 [`payment_gateway`] 模拟）；`input.expedited` 为真时
+/// 追加 `notify`（分支 = 普通 `if`）。
+pub fn fulfillment_saga() -> Workflow {
+    Workflow::new("fulfillment").handler(|ctx: WorkflowCtx| {
+        async move {
+            let order_id = ctx
+                .input()
+                .get("orderId")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| "order-1".to_string());
+            let expedited = ctx
+                .input()
+                .get("expedited")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
-                let (pdf, charged) = tokio::try_join!(
-                    {
-                        let order_id = order_id.clone();
-                        ctx.step("gen-pdf", move |_sc: StepCtx| {
-                            let order_id = order_id.clone();
-                            async move {
-                                tracing::info!(target: "examples", "render pdf for {order_id}");
-                                Ok(serde_json::json!({ "pdf": format!("{order_id}.pdf") }))
-                            }
-                        })
-                    },
-                    {
-                        let order_id = order_id.clone();
-                        let charge = charge.clone();
-                        ctx.step_with(
-                            "charge",
-                            StepOptions::new().retry(RetryPolicy::new(
-                                3,
-                                Backoff::Fixed { base_ms: 1 },
-                            )),
-                            move |_sc: StepCtx| {
-                                let (order_id, charge) = (order_id.clone(), charge.clone());
-                                async move {
-                                    charge(&order_id)?;
-                                    Ok(serde_json::json!({ "charged": true, "orderId": order_id }))
-                                }
-                            },
-                        )
-                    },
-                )?;
-
-                if expedited {
+            let (pdf, charged) = tokio::try_join!(
+                {
                     let order_id = order_id.clone();
-                    ctx.step("notify", move |_sc: StepCtx| {
+                    ctx.step("gen-pdf", move |_sc: StepCtx| {
                         let order_id = order_id.clone();
                         async move {
-                            tracing::info!(target: "examples", "expedited notify for {order_id}");
-                            Ok(serde_json::json!({ "notified": true }))
+                            tracing::info!(target: "examples", "render pdf for {order_id}");
+                            Ok(serde_json::json!({ "pdf": format!("{order_id}.pdf") }))
                         }
                     })
-                    .await?;
-                }
+                },
+                {
+                    let order_id = order_id.clone();
+                    ctx.step_with(
+                        "charge",
+                        StepOptions::new().retry(RetryPolicy::new(
+                            3,
+                            Backoff::Fixed { base_ms: 1 },
+                        )),
+                        move |_sc: StepCtx| {
+                            let order_id = order_id.clone();
+                            async move {
+                                payment_gateway::charge(&order_id)?;
+                                Ok(serde_json::json!({ "charged": true, "orderId": order_id }))
+                            }
+                        },
+                    )
+                },
+            )?;
 
-                Ok(serde_json::json!({
-                    "orderId": order_id,
-                    "pdf": pdf,
-                    "charge": charged,
-                }))
+            if expedited {
+                let order_id = order_id.clone();
+                ctx.step("notify", move |_sc: StepCtx| {
+                    let order_id = order_id.clone();
+                    async move {
+                        tracing::info!(target: "examples", "expedited notify for {order_id}");
+                        Ok(serde_json::json!({ "notified": true }))
+                    }
+                })
+                .await?;
             }
+
+            Ok(serde_json::json!({
+                "orderId": order_id,
+                "pdf": pdf,
+                "charge": charged,
+            }))
         }
     })
 }
@@ -184,11 +213,15 @@ pub fn approval_review() -> Workflow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, LazyLock};
     use std::time::Duration;
     use workflow_core::{
         run_workflow, signal_run, InMemoryStore, RunEvent, RunOptions, RunStatus, RunStore,
     };
+
+    /// 序列化共享全局网关状态的测试（tokio 各 test 默认并行跑）。
+    static GATEWAY_TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(()));
 
     fn finished_count(events: &[RunEvent], step: &str) -> usize {
         events
@@ -209,20 +242,12 @@ mod tests {
 
     #[tokio::test]
     async fn fulfillment_parallel_retry_then_success() {
+        let _guard = GATEWAY_TEST_LOCK.lock().await;
+        payment_gateway::reset();
+        payment_gateway::set_fail_first(2);
+
         let store = Arc::new(InMemoryStore::new());
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let fail_two = {
-            let attempts = attempts.clone();
-            Arc::new(move |_: &str| {
-                let n = attempts.fetch_add(1, Ordering::SeqCst);
-                if n < 2 {
-                    Err(anyhow::anyhow!("network down (attempt {n})"))
-                } else {
-                    Ok(())
-                }
-            })
-        };
-        let wf = fulfillment_saga(&Deps { charge: fail_two });
+        let wf = fulfillment_saga();
 
         let out = run_workflow(
             &wf,
@@ -235,7 +260,7 @@ mod tests {
         assert_eq!(out.status, RunStatus::Finished);
 
         // charge 重试 3 次成功（前 2 次失败）
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(payment_gateway::attempts(), 3);
         let events = store.get_events(&out.run_id).unwrap();
         let charge_fin = events
             .iter()
@@ -255,22 +280,12 @@ mod tests {
 
     #[tokio::test]
     async fn fulfillment_failure_terminal_until_continue_from() {
+        let _guard = GATEWAY_TEST_LOCK.lock().await;
+        payment_gateway::reset();
+        payment_gateway::set_fail_always(true);
+
         let store = Arc::new(InMemoryStore::new());
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let fail = Arc::new(AtomicBool::new(true));
-        let charge = {
-            let attempts = attempts.clone();
-            let fail = fail.clone();
-            Arc::new(move |_: &str| {
-                attempts.fetch_add(1, Ordering::SeqCst);
-                if fail.load(Ordering::SeqCst) {
-                    Err(anyhow::anyhow!("payment gateway down"))
-                } else {
-                    Ok(())
-                }
-            })
-        };
-        let wf = fulfillment_saga(&Deps { charge });
+        let wf = fulfillment_saga();
 
         // run 1: charge 在 3 次重试后仍失败 → run Errored
         let out = run_workflow(
@@ -283,7 +298,7 @@ mod tests {
         .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
         assert!(out.error.as_deref().unwrap().contains("payment gateway down"));
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(payment_gateway::attempts(), 3);
         let run_id = out.run_id.clone();
         let events_1 = store.get_events(&run_id).unwrap();
         let pdf_ts_1 = sf_ts(&events_1, "gen-pdf");
@@ -298,10 +313,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(again.status, RunStatus::Errored);
-        assert_eq!(attempts.load(Ordering::SeqCst), 3, "plain resume 不重试已失败 step");
+        assert_eq!(payment_gateway::attempts(), 3, "plain resume 不重试已失败 step");
 
         // continue_from charge: 截断 charge 的 StepFailed + 后缀, 前缀短路、后缀重跑
-        fail.store(false, Ordering::SeqCst);
+        payment_gateway::set_fail_always(false);
         let resumed = run_workflow(
             &wf,
             store.clone(),
@@ -313,7 +328,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(resumed.status, RunStatus::Finished);
-        assert_eq!(attempts.load(Ordering::SeqCst), 4, "续跑只再跑一次 charge");
+        assert_eq!(payment_gateway::attempts(), 4, "续跑只再跑一次 charge");
 
         let events_2 = store.get_events(&resumed.run_id).unwrap();
         assert_eq!(finished_count(&events_2, "gen-pdf"), 1, "前缀 gen-pdf 不重跑");
