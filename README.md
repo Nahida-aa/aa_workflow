@@ -188,7 +188,7 @@ pub trait RunStore: Send + Sync {
     // 1. metadata
     fn get_run_state(&self, run_id: &str) -> Result<Option<RunState>, StoreError>;
     fn set_run_state(&self, run_id: &str, state: &RunState) -> Result<(), StoreError>;
-    fn delete_run(&self, run_id: &str) -> Result<(), StoreError>;
+    fn delete_run(&self, run_id: &str, reason: DeleteReason) -> Result<(), StoreError>;
     // 2. append-only log
     fn append_event(&self, run_id: &str, expected_next_index: usize,
                     event: &RunEvent) -> Result<(), StoreError>;   // MUST CAS
@@ -209,6 +209,13 @@ store 必须报 `StoreError::Io`，不许静默 no-op。
 `RunState` 的 `input` / `output` 默认擦除成 `Value`（store 是 `dyn`，装不下泛型），
 要具体类型就 `state.into_typed::<In, Out>()?` —— 对应 TanStack 的
 `RunState<TInput, TOutput>`，但他们是 cast（不校验），我们真的反序列化（会 `Err`）。
+
+`error` 是结构化的 `RunError { name, message }`。两处刻意不对等：`anyhow::Error`
+是类型擦除的，拿不到 JS `Error.name` 那样的类名，所以只有引擎自身的错误有名字，
+其余退化成 `"Error"`；也不带 `stack`（Rust 侧要么需要 nightly，要么跨 `await`
+拿到的全是运行时内部帧，没用）。
+`RunOutcome.error` 仍是扁平字符串——`RunOutcome` 本身没有 TanStack 对端，他们的
+`runWorkflow` 是 async generator，只吐事件。
 
 ## 与 TanStack 的关系
 

@@ -58,4 +58,6 @@ pub use engine::{
 pub use error::{StoreError, WorkflowError};
 pub use event::{RunEvent, RunStatus, StepAttempt, StepState, StepStatus, fold_step_states};
 pub use resource::{Gate, GateGuard, ResourceKey};
-pub use run_store::{InMemoryStore, PendingApproval, RunState, RunStore, WaitForState};
+pub use run_store::{
+    DeleteReason, InMemoryStore, PendingApproval, RunError, RunState, RunStore, WaitForState,
+};

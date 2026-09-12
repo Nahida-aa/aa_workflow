@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use workflow_core::{RunEvent, RunState, RunStore, StoreError};
+use workflow_core::{DeleteReason, RunEvent, RunState, RunStore, StoreError};
 
 fn map_io(e: std::io::Error) -> StoreError {
     StoreError::Io(e.to_string())
@@ -105,7 +105,7 @@ impl RunStore for FileRunStore {
         Self::atomic_write(&self.run_state_path(run_id), &raw)
     }
 
-    fn delete_run(&self, run_id: &str) -> Result<(), StoreError> {
+    fn delete_run(&self, run_id: &str, _reason: DeleteReason) -> Result<(), StoreError> {
         let _guard = self
             .lock
             .lock()

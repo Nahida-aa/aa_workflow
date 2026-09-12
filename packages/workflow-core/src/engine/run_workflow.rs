@@ -16,7 +16,7 @@ use crate::engine::{
 use crate::error::WorkflowError;
 use crate::event::{RunEvent, RunStatus, StepStatus, fold_step_states};
 use crate::resource::Gate;
-use crate::run_store::{RunState, RunStore};
+use crate::run_store::{RunError, RunState, RunStore};
 
 /// Per-invocation options. `run_id`, `continue_from` and `target_step` are
 /// invocation options, NOT persisted — persistent state lives in the event
@@ -233,25 +233,23 @@ pub async fn run_workflow(
     let ctx = crate::define::WorkflowCtx::untyped(inner.clone());
     let handler_result = (active.handler)(ctx).await;
 
+    // `error` 是结构化的（`RunState.error` 用它）；`RunOutcome.error` 对调用方
+    // 仍给扁平字符串，因为 `RunOutcome` 本身没有 TanStack 对端（他们的
+    // `runWorkflow` 是 async generator，只吐事件）。
     let (status, output, error) = match handler_result {
         Ok(output) => (RunStatus::Finished, Some(output), None),
         Err(e) if e.downcast_ref::<StepHalt>().is_some() => (RunStatus::Finished, None, None),
-        Err(e) if e.downcast_ref::<WorkflowCancelled>().is_some() => (
-            RunStatus::Aborted,
-            None,
-            Some(WorkflowCancelled.to_string()),
-        ),
-        Err(e) => {
-            let msg = e.to_string();
-            (RunStatus::Errored, None, Some(msg))
+        Err(e) if e.downcast_ref::<WorkflowCancelled>().is_some() => {
+            (RunStatus::Aborted, None, Some(RunError::cancelled()))
         }
+        Err(e) => (RunStatus::Errored, None, Some(RunError::from_anyhow(&e))),
     };
 
     let terminal = match &error {
         Some(e) => RunEvent::RunErrored {
             ts: now_ms(),
             run_id: run_id.clone(),
-            error: e.clone(),
+            error: e.message.clone(),
         },
         None => RunEvent::RunFinished {
             ts: now_ms(),
@@ -273,7 +271,7 @@ pub async fn run_workflow(
         run_id,
         status,
         output,
-        error,
+        error: error.map(|e| e.message),
     })
 }
 
@@ -290,7 +288,7 @@ fn init_failed(
 ) -> Result<RunOutcome, WorkflowError> {
     let msg = err.to_string();
     run_state.status = RunStatus::Errored;
-    run_state.error = Some(msg.clone());
+    run_state.error = Some(RunError::from_anyhow(err));
     run_state.updated_at = now_ms();
     store.set_run_state(run_id, &run_state)?;
     Ok(RunOutcome {

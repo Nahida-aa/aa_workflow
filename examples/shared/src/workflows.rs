@@ -1640,7 +1640,7 @@ mod tests {
         let st = store.get_run_state("event:gate").unwrap().unwrap();
         assert_eq!(st.status, RunStatus::Paused);
         let w = st.waiting_for.as_ref().unwrap();
-        assert_eq!(w.step_id, "price-wait");
+        assert_eq!(w.step_id.as_deref(), Some("price-wait"));
         assert_eq!(w.signal_name, "price-settled");
         assert!(st.pending_approval.is_none());
 

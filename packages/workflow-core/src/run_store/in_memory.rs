@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use crate::error::StoreError;
 use crate::event::RunEvent;
 
-use super::{RunState, RunStore};
+use super::{DeleteReason, RunState, RunStore};
 
 #[derive(Default)]
 struct Inner {
@@ -55,7 +55,7 @@ impl RunStore for InMemoryStore {
         Ok(())
     }
 
-    fn delete_run(&self, run_id: &str) -> Result<(), StoreError> {
+    fn delete_run(&self, run_id: &str, _reason: DeleteReason) -> Result<(), StoreError> {
         let mut inner = self
             .inner
             .lock()

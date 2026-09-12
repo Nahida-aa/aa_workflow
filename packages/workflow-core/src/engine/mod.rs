@@ -14,7 +14,7 @@ use crate::define::{StepCtx, StepOptions};
 use crate::error::{StoreError, WorkflowError};
 use crate::event::{RunEvent, RunStatus, StepAttempt, StepState, StepStatus};
 use crate::resource::Gate;
-use crate::run_store::RunStore;
+use crate::run_store::{RunError, RunStore};
 
 mod run_workflow;
 pub use run_workflow::{
@@ -85,7 +85,7 @@ pub fn cancel_run(store: &dyn RunStore, run_id: &str) -> Result<(), WorkflowErro
         return Ok(());
     }
     st.status = RunStatus::Aborted;
-    st.error = Some(WorkflowCancelled.to_string());
+    st.error = Some(RunError::cancelled());
     st.waiting_for = None;
     st.pending_approval = None;
     st.updated_at = now_ms();
@@ -597,7 +597,7 @@ fn project_run_wait(store: &Arc<dyn RunStore>, run_id: &str, kind: WaitKind) {
                 deadline,
             } => {
                 st.waiting_for = Some(crate::run_store::WaitForState {
-                    step_id,
+                    step_id: Some(step_id),
                     signal_name,
                     deadline,
                 });
@@ -610,7 +610,7 @@ fn project_run_wait(store: &Arc<dyn RunStore>, run_id: &str, kind: WaitKind) {
                 description,
             } => {
                 st.pending_approval = Some(crate::run_store::PendingApproval {
-                    step_id,
+                    step_id: Some(step_id),
                     approval_id,
                     title,
                     description,
@@ -1339,7 +1339,7 @@ mod tests {
             .pending_approval
             .as_ref()
             .expect("run.json 应投影 pending_approval");
-        assert_eq!(pa.step_id, "release");
+        assert_eq!(pa.step_id.as_deref(), Some("release"));
         assert_eq!(pa.title, "Approve the release?");
         assert!(st.waiting_for.is_none());
 
@@ -1513,7 +1513,8 @@ mod tests {
         let paused = paused.expect("sleep 中应投影 status=Paused + waiting_for");
         let wf2_state = paused.waiting_for.as_ref().unwrap();
         assert_eq!(
-            wf2_state.step_id, "cooldown",
+            wf2_state.step_id.as_deref(),
+            Some("cooldown"),
             "sleep 的 step_id 是 pause key"
         );
         assert_eq!(
@@ -1655,7 +1656,7 @@ mod tests {
             .as_ref()
             .expect("named wait 投影 waiting_for");
         assert_eq!(w.signal_name, "review-approved");
-        assert_eq!(w.step_id, "review");
+        assert_eq!(w.step_id.as_deref(), Some("review"));
         assert!(st.pending_approval.is_none(), "named event 不是 approval");
 
         signal_event(
@@ -1784,7 +1785,7 @@ mod tests {
         for _ in 0..2000 {
             if let Some(st) = store.get_run_state("stu1").unwrap()
                 && let Some(w) = &st.waiting_for
-                && w.step_id == "cooldown"
+                && w.step_id.as_deref() == Some("cooldown")
                 && w.signal_name == "__timer"
                 && w.deadline.is_some()
             {
