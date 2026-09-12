@@ -690,36 +690,29 @@ pub fn signal_event(
     }
 }
 
+/// 测试脚手架，供 engine 各子模块（`mod` / `run_workflow`）的测试共享。
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::define::{
-        Backoff, BaseCtx, BoxFuture, CreateWorkflowConfig, Middleware, RetryPolicy, Workflow,
-        WorkflowCtx, create_workflow,
-    };
-    use crate::store::{InMemoryStore, RunState};
-    use std::sync::atomic::AtomicBool;
-    use tokio::try_join;
-
+pub(crate) mod testkit {
+    /// 记录 step 的起止与并发峰值，用来断言执行次数与拓扑。
     #[derive(Default)]
-    struct TestLog {
-        started: Vec<String>,
-        finished: Vec<String>,
-        timeline: Vec<String>,
-        active: usize,
-        peaks: Vec<usize>,
-        runs: std::collections::HashMap<String, usize>,
+    pub struct TestLog {
+        pub started: Vec<String>,
+        pub finished: Vec<String>,
+        pub timeline: Vec<String>,
+        pub active: usize,
+        pub peaks: Vec<usize>,
+        pub runs: std::collections::HashMap<String, usize>,
     }
 
     impl TestLog {
-        fn note_start(&mut self, id: &str) {
+        pub fn note_start(&mut self, id: &str) {
             self.started.push(id.to_string());
             self.timeline.push(format!(">{id}"));
             self.active += 1;
             self.peaks.push(self.active);
             *self.runs.entry(id.to_string()).or_insert(0) += 1;
         }
-        fn note_finish(&mut self, id: &str) {
+        pub fn note_finish(&mut self, id: &str) {
             self.finished.push(id.to_string());
             self.timeline.push(format!("<{id}"));
             self.active -= 1;
@@ -727,9 +720,22 @@ mod tests {
         }
     }
 
-    fn idx(v: &[String], s: &str) -> usize {
+    pub fn idx(v: &[String], s: &str) -> usize {
         v.iter().position(|x| x == s).unwrap_or(usize::MAX)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::define::{
+        Backoff, BaseCtx, BoxFuture, CreateWorkflowConfig, Middleware, RetryPolicy, Workflow,
+        WorkflowCtx, create_workflow,
+    };
+    use crate::engine::testkit::{TestLog, idx};
+    use crate::store::{InMemoryStore, RunState};
+    use std::sync::atomic::AtomicBool;
+    use tokio::try_join;
 
     #[tokio::test]
     async fn serial_handler_runs_in_order() {
@@ -983,141 +989,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_is_terminal_until_continue_from() {
-        let store = Arc::new(InMemoryStore::new());
-        let log = Arc::new(Mutex::new(TestLog::default()));
-        let fail = Arc::new(AtomicBool::new(true));
-        let wf = Workflow::new("w").handler({
-            let log = log.clone();
-            let fail = fail.clone();
-            move |ctx: WorkflowCtx| {
-                let log = log.clone();
-                let fail = fail.clone();
-                async move {
-                    for id in ["a", "b"] {
-                        let (log, fail) = (log.clone(), fail.clone());
-                        let id = id.to_string();
-                        let id_c = id.clone();
-                        ctx.step(&id, move |_sc: StepCtx| {
-                            let (log, fail, id) = (log.clone(), fail.clone(), id_c.clone());
-                            async move {
-                                log.lock().unwrap().note_start(&id);
-                                let res = if id == "b" && fail.swap(false, Ordering::SeqCst) {
-                                    Err(anyhow::anyhow!("boom"))
-                                } else {
-                                    Ok(serde_json::Value::Null)
-                                };
-                                log.lock().unwrap().note_finish(&id);
-                                res
-                            }
-                        })
-                        .await?;
-                    }
-                    Ok(serde_json::Value::Null)
-                }
-            }
-        });
-
-        // first run: b fails, run errors
-        let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(out.status, RunStatus::Errored);
-        assert!(out.error.as_deref().unwrap().contains("boom"));
-        assert_eq!(log.lock().unwrap().runs["b"], 1);
-        let run_id = out.run_id.clone();
-
-        // plain resume: failed checkpoint rethrows → still errored, no rerun
-        let again = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id(run_id.clone()),
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(again.status, RunStatus::Errored);
-        assert_eq!(
-            log.lock().unwrap().runs["b"],
-            1,
-            "no re-execution on plain resume"
-        );
-
-        // continue_from "b": truncate b's checkpoint + suffix, replay reruns b
-        let resumed = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({}))
-                .run_id(run_id)
-                .continue_from("b"),
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(resumed.status, RunStatus::Finished);
-        let l = log.lock().unwrap();
-        assert_eq!(l.runs["a"], 1, "prefix before continue_from untouched");
-        assert_eq!(l.runs["b"], 2, "suffix reran via continue_from");
-    }
-
-    #[tokio::test]
-    async fn continue_from_resets_downstream() {
-        let store = Arc::new(InMemoryStore::new());
-        let log = Arc::new(Mutex::new(TestLog::default()));
-        let wf = Workflow::new("w").handler({
-            let log = log.clone();
-            move |ctx: WorkflowCtx| {
-                let log = log.clone();
-                async move {
-                    for id in ["a", "b", "c"] {
-                        let log = log.clone();
-                        let id = id.to_string();
-                        let id_c = id.clone();
-                        ctx.step(&id, move |_sc: StepCtx| {
-                            let (log, id) = (log.clone(), id_c.clone());
-                            async move {
-                                log.lock().unwrap().note_start(&id);
-                                log.lock().unwrap().note_finish(&id);
-                                Ok(serde_json::Value::Null)
-                            }
-                        })
-                        .await?;
-                    }
-                    Ok(serde_json::Value::Null)
-                }
-            }
-        });
-        let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
-        )
-        .await
-        .unwrap();
-        let second = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({}))
-                .run_id(out.run_id)
-                .continue_from("b"),
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(second.status, RunStatus::Finished);
-        let l = log.lock().unwrap();
-        assert_eq!(l.runs["a"], 1);
-        assert_eq!(l.runs["b"], 2);
-        assert_eq!(l.runs["c"], 2);
-    }
-
-    #[tokio::test]
     async fn stale_up_to_date_reruns() {
         let store = Arc::new(InMemoryStore::new());
         let log = Arc::new(Mutex::new(TestLog::default()));
@@ -1176,52 +1047,6 @@ mod tests {
         let l = log.lock().unwrap();
         assert_eq!(l.runs["a"], 2);
         assert_eq!(l.runs["b"], 1);
-    }
-
-    #[tokio::test]
-    async fn target_step_stops_downstream() {
-        let store = Arc::new(InMemoryStore::new());
-        let log = Arc::new(Mutex::new(TestLog::default()));
-        let wf = Workflow::new("w").handler({
-            let log = log.clone();
-            move |ctx: WorkflowCtx| {
-                let log = log.clone();
-                async move {
-                    for id in ["a", "b", "c"] {
-                        let log = log.clone();
-                        let id = id.to_string();
-                        let id_c = id.clone();
-                        ctx.step(&id, move |_sc: StepCtx| {
-                            let (log, id) = (log.clone(), id_c.clone());
-                            async move {
-                                log.lock().unwrap().note_start(&id);
-                                log.lock().unwrap().note_finish(&id);
-                                Ok(serde_json::Value::Null)
-                            }
-                        })
-                        .await?;
-                    }
-                    Ok(serde_json::Value::Null)
-                }
-            }
-        });
-        let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).target_step("b"),
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(out.status, RunStatus::Finished);
-        let l = log.lock().unwrap();
-        assert_eq!(l.runs["a"], 1);
-        assert_eq!(l.runs["b"], 1);
-        assert_eq!(
-            l.runs.get("c").copied().unwrap_or(0),
-            0,
-            "downstream never ran"
-        );
     }
 
     #[tokio::test]
@@ -1338,32 +1163,6 @@ mod tests {
             _ => None,
         });
         assert_eq!(failed.map(|a| a.len()), Some(2));
-    }
-
-    #[tokio::test]
-    async fn handler_output_is_run_output() {
-        let store = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("w").handler(|ctx: WorkflowCtx| async move {
-            let v = ctx
-                .step("a", move |_sc: StepCtx| async move {
-                    Ok(serde_json::json!({"x": 1}))
-                })
-                .await?;
-            Ok(serde_json::json!({ "out": v }))
-        });
-        let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(out.status, RunStatus::Finished);
-        assert_eq!(out.output, Some(serde_json::json!({ "out": { "x": 1 } })));
-        let st = store.get_run_state(&out.run_id).unwrap().unwrap();
-        assert_eq!(st.status, RunStatus::Finished);
-        assert_eq!(st.output, Some(serde_json::json!({ "out": { "x": 1 } })));
     }
 
     #[tokio::test]
@@ -2717,106 +2516,6 @@ mod tests {
                     RunEvent::StepFailed { attempts, .. } if attempts.len() == 1
                 )) == 1,
             "per-step retry 覆盖 workflow 兜底"
-        );
-    }
-
-    /// `select_workflow_version`（TanStack `selectWorkflowVersion`）：持久化的
-    /// `workflow_version` 在 `[current] + previous_versions` 中路由；未知/缺省
-    /// 回退当前版本。
-    #[test]
-    fn select_workflow_version_routes_and_falls_back() {
-        let v1 = Workflow::new("wf").version("v1");
-        let v2 = Workflow::new("wf")
-            .version("v2")
-            .previous_versions(vec![v1.clone()]);
-        assert_eq!(
-            select_workflow_version(&v2, Some("v1")).version.as_deref(),
-            Some("v1"),
-            "路由到 previous version"
-        );
-        assert_eq!(
-            select_workflow_version(&v2, Some("v2")).version.as_deref(),
-            Some("v2")
-        );
-        assert_eq!(
-            select_workflow_version(&v2, None).version.as_deref(),
-            Some("v2"),
-            "无持久化版本 → 当前"
-        );
-        assert_eq!(
-            select_workflow_version(&v2, Some("v9")).version.as_deref(),
-            Some("v2"),
-            "未知版本 → 当前"
-        );
-    }
-
-    /// resume 按持久化 `workflow_version` 路由到 previous version 的 handler；
-    /// 全新 run 用当前版本。
-    #[tokio::test]
-    async fn resume_routes_by_persisted_workflow_version() {
-        let store = Arc::new(InMemoryStore::new());
-        let v1 = create_workflow(
-            CreateWorkflowConfig::new("ver-wf")
-                .version("v1")
-                .input::<serde_json::Value>(),
-        )
-        .handler(|ctx: BaseCtx<serde_json::Value>| async move {
-            ctx.step("s", |_sc: StepCtx| async move {
-                Ok(serde_json::json!({ "ver": "v1" }))
-            })
-            .await
-        })
-        .into_workflow();
-
-        let out1 = run_workflow(
-            &v1,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("ver:r"),
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(out1.output, Some(serde_json::json!({ "ver": "v1" })));
-
-        let v2 = create_workflow(
-            CreateWorkflowConfig::new("ver-wf")
-                .version("v2")
-                .input::<serde_json::Value>(),
-        )
-        .previous_versions(vec![v1])
-        .handler(|ctx: BaseCtx<serde_json::Value>| async move {
-            ctx.step("s", |_sc: StepCtx| async move {
-                Ok(serde_json::json!({ "ver": "v2" }))
-            })
-            .await
-        });
-
-        let out2 = run_workflow(
-            &v2,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("ver:r"),
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            out2.output,
-            Some(serde_json::json!({ "ver": "v1" })),
-            "resume 路由到持久化的 previous version"
-        );
-
-        let out3 = run_workflow(
-            &v2,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("ver:r2"),
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            out3.output,
-            Some(serde_json::json!({ "ver": "v2" })),
-            "全新 run 用当前版本"
         );
     }
 }
