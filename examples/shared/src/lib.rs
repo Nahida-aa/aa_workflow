@@ -2,7 +2,7 @@
 //! `examples/deployment-pocs/shared` 的位置，但面向 Rust + 本地 host）。
 //!
 //! 三个可复用件：
-//! - [`store::FileRunStore`] — 一个独立的落盘 [`workflow_core::RunStore`] 实现（`run.json` 信封 +
+//! - [`file_run_store::FileRunStore`] — 一个独立的落盘 [`workflow_core::RunStore`] 实现（`run.json` 信封 +
 //!   append-only `events.jsonl`，CAS append + subscribe），证明 store 契约可插拔；
 //! - [`workflows`] — 示例 workflow 定义（handler 形态，代码即 DAG）：并行、retry、
 //!   分支；resume / `continue_from` 的载体；
@@ -18,10 +18,10 @@
 //! - 不做 serverless host 前端（Cloudflare / Netlify / Vercel 对 Rust 无意义）；
 //!   需求出现时的薄前端是本地 `cli` / 最小 HTTP server。
 
+pub mod file_run_store;
 pub mod runtime;
-pub mod store;
 pub mod workflows;
 
+pub use file_run_store::FileRunStore;
 pub use runtime::{drive, tracing_publisher};
-pub use store::FileRunStore;
 pub use workflows::{email_digest, fulfillment_saga, Deps};

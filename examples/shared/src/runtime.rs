@@ -59,7 +59,7 @@ pub async fn drive(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::FileRunStore;
+    use crate::file_run_store::FileRunStore;
     use crate::workflows::email_digest;
     use workflow_core::RunStatus;
 
