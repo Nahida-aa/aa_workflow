@@ -2,7 +2,7 @@
 name = "workflow-core"
 version = "0.2.0"
 edition = "2024"
-description = "Async code-as-DAG workflow engine (TanStack Workflow-inspired, no determinism / no server)"
+description = "headless durable execution"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

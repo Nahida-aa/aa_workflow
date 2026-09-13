@@ -85,7 +85,7 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunOptions.runtime�
    `{...ctx, ...m1Ext, ...m2Ext}`；Rust `ctx.ext: Ext` 为单一类型，
    最后一个 `.middleware::<PExt>()` 决定 `Ext`；多个 ext 的 host 负责在
    PExt 结构体内组合。差异见
-   `define.rs` `WorkflowBuilder::middleware`。
+   `define/define_workflow.rs` `WorkflowBuilder::middleware`。
 10. **schema 即 serde 类型**：TS 的 `inputSchema`/`stateSchema`/`outputSchema`
     是运行时 zod schema；Rust 用 serde `DeserializeOwned` 类型代替（`.input::<T>()` /
     `.state::<T>()` / `.output::<T>()`），解析失败 = 类型错误，语义与 zod

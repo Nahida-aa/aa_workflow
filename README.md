@@ -260,9 +260,11 @@ store 必须报 `StoreError::Io`，不许静默 no-op。
 
 ```
 packages/workflow-core/     引擎本体
-  src/define.rs             Workflow / WorkflowBuilder / BaseCtx / StepOptions
+  src/define/mod.rs         handler 运行时：BaseCtx / StepCtx / StepOptions / Workflow
+  src/define/define_workflow.rs  声明入口：create_workflow / WorkflowBuilder
   src/engine/mod.rs         EngineRuntime、exec_step / exec_pause、signal_*
   src/engine/run_workflow.rs  单次 drive 的顶层编排、RunOptions
+  src/error.rs              StoreError / WorkflowError / RunError / RunErrorCode
   src/event.rs              WorkflowEvent / RunStatus / fold_step_states
   src/run_store/mod.rs      RunStore trait + RunState 信封
   src/run_store/in_memory.rs  InMemoryStore
