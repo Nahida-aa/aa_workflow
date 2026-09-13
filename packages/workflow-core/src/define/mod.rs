@@ -2,10 +2,12 @@
 //!
 //! - 本文件：handler **运行时**能看到的东西 —— [`BaseCtx`]（`ctx`）、
 //!   [`StepCtx`]、[`StepOptions`] / [`RetryPolicy`] / [`Backoff`]，以及 workflow
-//!   本体 [`Workflow`] 与 [`Middleware`]。
+//!   本体 [`Workflow`]。
 //! - [`define_workflow`]：**声明**一个 workflow 的入口 ——
 //!   [`CreateWorkflowConfig`] / [`WorkflowBuilder`] / [`create_workflow`] /
 //!   [`WorkflowDefinition`]。
+//!
+//! [`Middleware`] 与其扩展类型在 [`crate::middleware`]（TS 侧同为独立目录）。
 
 use std::future::Future;
 use std::pin::Pin;
@@ -14,6 +16,7 @@ use std::time::Duration;
 
 use crate::engine::EngineRuntime;
 use crate::event::{StepState, WorkflowEvent};
+use crate::middleware::Middleware;
 
 mod define_workflow;
 pub use define_workflow::{
@@ -555,76 +558,6 @@ impl Workflow {
     {
         self.handler = Arc::new(move |ctx| Box::pin(handler(ctx)));
         self
-    }
-}
-
-/// Runtime middleware (erased): a [`wrap`](Self::wrap) around the handler
-/// future chain plus a [`produce`](Self::produce) hook that builds the typed
-/// ctx extension (`ctx.ext`). Mirrors TanStack's `defineMiddleware`: `wrap`
-/// composes around `next`, and the produced context is what the handler reads
-/// off `ctx` (their `{ ...context }` accumulation, collapsed to a single
-/// extension value — see [`WorkflowBuilder::middleware`]).
-#[derive(Clone)]
-pub struct Middleware {
-    /// Builds the handler's `ctx.ext` from the erased drive ctx. Runs on every
-    /// drive before the handler; its JSON output is deserialized into the
-    /// builder's `Ext` type (the last middleware with a `produce` wins).
-    pub produce: Option<CtxProducer>,
-    /// Around-wrapper on the handler future: `next` is the rest of the pipeline
-    /// (inner middlewares, then the typed handler). The first-listed middleware
-    /// is outermost, like TanStack's `composeMiddlewares`.
-    pub wrap: Option<CtxWrapper>,
-}
-
-/// Erased ctx-extension producer: `&WorkflowCtx` → JSON ext value.
-pub type CtxProducer = Arc<dyn Fn(&WorkflowCtx) -> anyhow::Result<serde_json::Value> + Send + Sync>;
-
-/// Erased around-wrapper: `(ctx, next)` → wrapped handler future.
-pub type CtxWrapper = Arc<
-    dyn Fn(
-            WorkflowCtx,
-            BoxFuture<'static, anyhow::Result<serde_json::Value>>,
-        ) -> BoxFuture<'static, anyhow::Result<serde_json::Value>>
-        + Send
-        + Sync,
->;
-
-impl Middleware {
-    pub fn new() -> Self {
-        Self {
-            produce: None,
-            wrap: None,
-        }
-    }
-
-    /// Set the ctx-extension producer.
-    pub fn produce<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&WorkflowCtx) -> anyhow::Result<serde_json::Value> + Send + Sync + 'static,
-    {
-        self.produce = Some(Arc::new(f));
-        self
-    }
-
-    /// Set the around-wrapper.
-    pub fn wrap<F>(mut self, f: F) -> Self
-    where
-        F: Fn(
-                WorkflowCtx,
-                BoxFuture<'static, anyhow::Result<serde_json::Value>>,
-            ) -> BoxFuture<'static, anyhow::Result<serde_json::Value>>
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.wrap = Some(Arc::new(f));
-        self
-    }
-}
-
-impl Default for Middleware {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

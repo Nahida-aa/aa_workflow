@@ -44,12 +44,13 @@ pub mod define;
 pub mod engine;
 pub mod error;
 pub mod event;
+pub mod middleware;
 pub mod resource;
 pub mod run_store;
 
 pub use define::{
-    Backoff, BaseCtx, CreateWorkflowConfig, Middleware, RetryPolicy, StepCtx, StepOptions,
-    Workflow, WorkflowBuilder, WorkflowCtx, WorkflowDefinition, create_workflow,
+    Backoff, BaseCtx, CreateWorkflowConfig, RetryPolicy, StepCtx, StepOptions, Workflow,
+    WorkflowBuilder, WorkflowCtx, WorkflowDefinition, create_workflow,
 };
 pub use engine::{
     RunOptions, RunOutcome, cancel_run, run_workflow, run_workflow_sync, select_workflow_version,
@@ -57,6 +58,7 @@ pub use engine::{
 };
 pub use error::{RunError, RunErrorCode, StoreError, WorkflowError};
 pub use event::{RunStatus, StepAttempt, StepState, StepStatus, WorkflowEvent, fold_step_states};
+pub use middleware::{CtxProducer, CtxWrapper, Middleware};
 pub use resource::{Gate, GateGuard, ResourceKey};
 pub use run_store::{
     DeleteReason, InMemoryStore, PendingApproval, RunState, RunStore, WaitForState,

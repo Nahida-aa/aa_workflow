@@ -12,9 +12,9 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use super::{
-    BaseCtx, InitializeFn, Middleware, RetryPolicy, StateValidatorFn, Workflow, WorkflowCtx,
-    WorkflowHandler,
+    BaseCtx, InitializeFn, RetryPolicy, StateValidatorFn, Workflow, WorkflowCtx, WorkflowHandler,
 };
+use crate::middleware::Middleware;
 
 /// The declaration config consumed by [`create_workflow`]. Mirrors TanStack's
 /// `createWorkflow(options)`; only `id` is required (`initialize` defaults to
