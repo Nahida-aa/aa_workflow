@@ -172,10 +172,11 @@ step 结果。
 {"type":"STEP_FINISHED","ts":1,"run_id":"r1","step_id":"a",...}
 ```
 
-字段名是 snake_case，不是 TS 的 camelCase（`stepId`）—— 刻意不对齐，各守语言
-惯例。落盘 JSON 逐字段与 TS 一致没有消费者（本地是 Rust 单语言），改了反而会
-让已有的 `events.jsonl` 失效。理由见
-[`docs/tanstack-alignment.md`](docs/tanstack-alignment.md)。
+字段名是 snake_case，不是 TS 的 camelCase（`stepId`）—— 各守语言惯例，不做
+逐字段对齐。注意**存成什么格式是 store 实现者的事**：上面的形状是 Rust 侧
+`serde` 的默认产出，`events.jsonl` 这个文件本身只是示例层 `FileRunStore` 的
+选择，core 不认识它。换 Postgres 或自己写的 store，事件长什么样由那个 store
+决定。理由见 [`docs/tanstack-alignment.md`](docs/tanstack-alignment.md)。
 
 - **checkpoint（进日志，参与 replay）**：`StepFinished` / `StepFailed` / `StepPaused` / `StepResume`
   / `RunFinished` / `RunErrored` / `NowRecorded` / `UuidRecorded`

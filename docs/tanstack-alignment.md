@@ -25,10 +25,12 @@
 | `step_id` | `stepId` |
 
 对齐后事件**类型名**与 TS 一致（`type` 标签 + `SCREAMING_SNAKE` 取值），所以
-grep 日志、对照 TS 源码读事件序列时是直接对应的。实际产出：
+grep 日志、对照 TS 源码读事件序列时是直接对应的。
+
+字段名各守语言惯例，不做逐字段对齐：
 
 ```jsonc
-// 我们（字段按 Rust 惯例 snake_case）
+// Rust 侧序列化（snake_case）
 {"type":"STEP_FINISHED","ts":1,"run_id":"r1","step_id":"a",
  "attempts":[{"attempt":1,"started_at":1,"finished_at":2}]}
 // TanStack（camelCase）
@@ -36,21 +38,26 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。实际产�
  "attempts":[{"attempt":1,"startedAt":1,"finishedAt":2}]}
 ```
 
-字段名的 snake vs camel **刻意不对齐**，各守语言惯例，概念等价即可。
-
-### 为什么不做「落盘 JSON 与 TS 逐字段一致」
+### 为什么「落盘 JSON 与 TS 逐字段一致」不是需求
 
 写第一版对齐文档时（118fcbe）顺手把「持久化事件 JSON 与 TS 侧日志同构」当成
-了一个需求，但它没有来源、也没有消费者：
+了一个需求。它错在**前提**：core 根本没有「落盘格式」这个东西。
 
-- 要让 TS 读到我们的 `events.jsonl`，得有 TS 与 Rust 进程共用同一个 store
-  文件——我们不做 host 前端、不做 devtools，没有这条路。
+- 存成什么文件名、什么布局、什么序列化格式，全是 **store 实现者**的事。
+  `events.jsonl` / `run.json` 是示例层 `FileRunStore`（`publish = false`）的
+  内部选择，core 里没有一行代码知道它们存在。换 Postgres、S3、或自己写的
+  store，事件长什么样由那个 store 决定。
+- 所以「跨语言读日志」要面对的是**某个 store 实现**的格式，不是本库的契约。
+  就算真有跨语言需求，对齐也是那个 store 作者的事，不是这里的 API 设计。
 - aa-workflow 是要**替代** TS 引擎承载 LocalDub（纯 Rust），不是与它互操作。
-- 跨语言迁移在途 run 不是我们的场景。
 
-结论：事件**类型名**对齐（有用，因为它是你 grep 和读代码时看的东西）；
-**字段名** casing 不对齐（改了是破坏性的 —— 已有的 run.json / events.jsonl
-全部失效 —— 而收益为零）。上面那个「同构」的说法是错的，已纠正。
+`RunStore` 契约真正覆盖的只有：方法签名与传参语义（`run_id`、
+`expected_next_index`）、事件 `type` 取值（`fold_step_states` 要按它派状态）、
+以及 `Conflict` / `Io` 的错误语义。**不覆盖**：字段名 casing、文件布局、
+序列化格式。
+
+结论：文档原先那句「同构」是错的，已纠正。事件类型名对齐保留（有用，是 grep
+日志和对照源码时看的东西）；其余不动。
 
 ### 执行模型（第二轮才采纳）：handler 代码重放
 
