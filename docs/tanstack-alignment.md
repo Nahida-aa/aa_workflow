@@ -24,8 +24,33 @@
 | `run_workflow` / `run_workflow_sync` | `runWorkflow` |
 | `step_id` | `stepId` |
 
-对齐后，持久化事件 JSON 与 TS 侧日志同构：`{"type":"STEP_FINISHED","stepId":...}`。
-大小写（snake vs camel）保留各语言惯例，概念等价即可。
+对齐后事件**类型名**与 TS 一致（`type` 标签 + `SCREAMING_SNAKE` 取值），所以
+grep 日志、对照 TS 源码读事件序列时是直接对应的。实际产出：
+
+```jsonc
+// 我们（字段按 Rust 惯例 snake_case）
+{"type":"STEP_FINISHED","ts":1,"run_id":"r1","step_id":"a",
+ "attempts":[{"attempt":1,"started_at":1,"finished_at":2}]}
+// TanStack（camelCase）
+{"type":"STEP_FINISHED","ts":1,"runId":"r1","stepId":"a",
+ "attempts":[{"attempt":1,"startedAt":1,"finishedAt":2}]}
+```
+
+字段名的 snake vs camel **刻意不对齐**，各守语言惯例，概念等价即可。
+
+### 为什么不做「落盘 JSON 与 TS 逐字段一致」
+
+写第一版对齐文档时（118fcbe）顺手把「持久化事件 JSON 与 TS 侧日志同构」当成
+了一个需求，但它没有来源、也没有消费者：
+
+- 要让 TS 读到我们的 `events.jsonl`，得有 TS 与 Rust 进程共用同一个 store
+  文件——我们不做 host 前端、不做 devtools，没有这条路。
+- aa-workflow 是要**替代** TS 引擎承载 LocalDub（纯 Rust），不是与它互操作。
+- 跨语言迁移在途 run 不是我们的场景。
+
+结论：事件**类型名**对齐（有用，因为它是你 grep 和读代码时看的东西）；
+**字段名** casing 不对齐（改了是破坏性的 —— 已有的 run.json / events.jsonl
+全部失效 —— 而收益为零）。上面那个「同构」的说法是错的，已纠正。
 
 ### 执行模型（第二轮才采纳）：handler 代码重放
 

@@ -165,8 +165,17 @@ step 结果。
 
 ## 事件日志
 
-单一真相源是 **append-only 事件日志**，`serde(tag = "type")` 命名与 TS 侧同构
-（`{"type":"STEP_FINISHED","stepId":...}`）。
+单一真相源是 **append-only 事件日志**。事件**类型名**与 TS 一致（`serde(tag =
+"type")` + `SCREAMING_SNAKE`）：
+
+```
+{"type":"STEP_FINISHED","ts":1,"run_id":"r1","step_id":"a",...}
+```
+
+字段名是 snake_case，不是 TS 的 camelCase（`stepId`）—— 刻意不对齐，各守语言
+惯例。落盘 JSON 逐字段与 TS 一致没有消费者（本地是 Rust 单语言），改了反而会
+让已有的 `events.jsonl` 失效。理由见
+[`docs/tanstack-alignment.md`](docs/tanstack-alignment.md)。
 
 - **checkpoint（进日志，参与 replay）**：`StepFinished` / `StepFailed` / `StepPaused` / `StepResume`
   / `RunFinished` / `RunErrored` / `NowRecorded` / `UuidRecorded`
