@@ -13,12 +13,55 @@ use workflow_core::{RunState, RunStatus, WorkflowEvent};
 pub type WorkflowId = String;
 pub type WorkflowVersion = String;
 pub type RunId = String;
+pub type ScheduleId = String;
+pub type ScheduleBucketId = String;
 
 /// lease 持有者标识（对齐 `types.ts:19`）。
 ///
 /// serverless 下每次调用都是新进程，用这个标识「谁在驱这个 run」——
 /// 例如 `http:start` / `cron:sweep` / `worker:3`。
 pub type LeaseOwner = String;
+
+/// runtime 的 run 状态 = core 的 [`RunStatus`] **加一个 `queued`**
+/// （对齐 `types.ts:26`：`WorkflowExecutionStatus = RunStatus | 'queued'`）。
+///
+/// `queued` 是 runtime 层特有的：「已登记、等待被认领执行」。core 不知道它——
+/// core 只在被 drive 时看 `Running`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkflowExecutionStatus {
+    Queued,
+    Running,
+    Paused,
+    Finished,
+    Errored,
+    Aborted,
+}
+
+impl From<RunStatus> for WorkflowExecutionStatus {
+    fn from(s: RunStatus) -> Self {
+        match s {
+            RunStatus::Running => Self::Running,
+            RunStatus::Paused => Self::Paused,
+            RunStatus::Finished => Self::Finished,
+            RunStatus::Errored => Self::Errored,
+            RunStatus::Aborted => Self::Aborted,
+        }
+    }
+}
+
+impl WorkflowExecutionStatus {
+    /// 终态（对齐上游 `isTerminal`：finished / errored / aborted）。
+    /// 终态 run 不可再被 claim。
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            WorkflowExecutionStatus::Finished
+                | WorkflowExecutionStatus::Errored
+                | WorkflowExecutionStatus::Aborted
+        )
+    }
+}
 
 // ============================================================
 // 事件存储（基础层的读路径形状）
@@ -74,12 +117,13 @@ pub struct AppendEventsResult {
 }
 
 // ============================================================
-// 执行记录（扩展层的查询形状）
+// 执行记录
 // ============================================================
 
-/// 一个 run 的执行记录（对齐 `types.ts` 的 `WorkflowExecution`）。
+/// 一个 run 的执行记录（对齐 `types.ts:33` 的 `WorkflowExecution`）。
 ///
-/// 比 core 的 [`RunState`] 多出 `lease`、`wake_at` 这些 runtime 关注的信息。
+/// 比 core 的 [`RunState`] 宽的地方：`status` 多 [`Queued`](WorkflowExecutionStatus::Queued)
+/// 态、`lease` / `wake_at` 是 runtime 关注的信息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowExecution {
@@ -87,18 +131,29 @@ pub struct WorkflowExecution {
     pub workflow_id: WorkflowId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workflow_version: Option<WorkflowVersion>,
-    pub status: RunStatus,
-    /// 当前 lease；无 lease 为 `None`。
+    pub status: WorkflowExecutionStatus,
+    pub input: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lease: Option<WorkflowLease>,
+    pub output: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<workflow_core::RunError>,
+    /// 挂起等待外部 signal 的投影。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting_for: Option<workflow_core::WaitForState>,
+    /// 挂起等待审批的投影。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_approval: Option<workflow_core::PendingApproval>,
     /// 下次该被唤醒的时间（timer 的投影），供 sweep 建时间索引。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wake_at: Option<i64>,
+    /// 当前 lease；无 lease 为 `None`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease: Option<WorkflowLease>,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
-/// 一次执行认领（对齐上游 `WorkflowLease`）。
+/// 一次执行认领（对齐 `types.ts:28` 的 `WorkflowLease`）。
 ///
 /// `heartbeat` 会续 `expires_at`——lease 不是一次 claim 就完事（上游
 /// `runtime-model.md:156`：runtime renews every third of `leaseMs`）。
@@ -117,7 +172,11 @@ pub struct RunSummary {
     pub workflow_id: WorkflowId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workflow_version: Option<WorkflowVersion>,
-    pub status: RunStatus,
+    pub status: WorkflowExecutionStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting_for: Option<workflow_core::WaitForState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_approval: Option<workflow_core::PendingApproval>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wake_at: Option<i64>,
     pub created_at: i64,
@@ -134,9 +193,8 @@ pub struct RunTimeline {
 
 /// 一次 run 的完整加载结果（对齐 `types.ts:59` 的 `LoadedExecution`）。
 ///
-/// 只有 `run` + `events` 两个字段——我最初多加了 `state: RunState`，但上游没有，
-/// 且 `state` 可以从 `events` 重放得出（core 的 `fold_step_states` 就是干这个
-/// 的），存两份会有漂移风险。
+/// 只有 `run` + `events` 两个字段——state 可从 `events` 重放得出
+/// （core 的 `fold_step_states`），存两份会有漂移风险。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoadedExecution {
@@ -146,11 +204,6 @@ pub struct LoadedExecution {
 
 // ============================================================
 // 三组扩展方法的参数与结果类型
-//
-// 对齐上游 types.ts。这里先立 run 生命周期 / lease / timer 三组——它们是
-// 「无进程常驻」形态的刚需（判据见 docs/runtime-design.md 的 D5）。
-// `schedule*` 三件套与 `list_runs` / `get_run_timeline` 暂不立：前者只在需要
-// cron 时才要，后者依赖尚未定义的查询语义。
 // ============================================================
 
 // ── run 生命周期 ────────────────────────────────────────────
@@ -179,8 +232,8 @@ pub enum CreateRunResult {
 /// 对齐 `types.ts:115`。
 ///
 /// 上游还带 `awaiting?`（`RunState['awaiting']`）。**我们没有**——`awaiting`
-/// 是上游为未来 fan-out 预留的数组投影，本仓刻意不做（见 README「已知事项」
-/// 与 D5）。这里只带我们真有的三个挂起投影。
+/// 是上游为未来 fan-out 预留的数组投影，本仓刻意不做。这里只带我们真有的
+/// 两个挂起投影。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MarkRunPausedArgs {
@@ -231,7 +284,7 @@ pub struct ClaimRunArgs {
 /// 认领的三态结果（对齐 `types.ts:98`）。
 ///
 /// `NotClaimable` 与 `NotFound` 分开是必要的：前者说明 run 存在但暂时不该被
-/// 驱（例如已被别的 worker 持有，或状态不允许），后者说明根本不存在。
+/// 驱（已被别的 worker 持有、或状态不允许），后者说明根本不存在。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ClaimRunResult {
@@ -314,4 +367,171 @@ pub struct TimerWakeup {
     pub workflow_version: Option<WorkflowVersion>,
     pub wake_at: i64,
     pub signal_id: String,
+}
+
+// ── 投递（signal / approval）───────────────────────────────
+
+/// 外部事件的投递（对齐 core `types.ts:492` 的 `SignalDelivery`）。
+///
+/// `signal_id` 是幂等令牌：同一 `signalId` 重复投递 = no-op 重试；不同
+/// `signalId` = 竞态丢失。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignalDelivery {
+    pub signal_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+    /// 等待中的信号名（与 `ctx.wait_for_event(name)` 传入的一致）。
+    pub name: String,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliverSignalArgs {
+    pub run_id: RunId,
+    pub delivery: SignalDelivery,
+    pub now: i64,
+}
+
+/// 审批决定（对齐 core `types.ts:312` 的 `ApprovalResult`）。
+///
+/// 上游定义在 core；我们的 core 没有审批投递入口，故放在 runtime。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalResult {
+    pub approved: bool,
+    pub approval_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliverApprovalArgs {
+    pub run_id: RunId,
+    pub approval: ApprovalResult,
+    pub now: i64,
+}
+
+/// 投递的四态结果（对齐上游 `DeliverSignalResult` / `DeliverApprovalResult`）。
+///
+/// `Duplicate` = 同一 `signalId` 的重复投递（幂等 no-op）；
+/// `NotWaiting` = run 存在但没在等这个信号 / 审批。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum DeliverSignalResult {
+    NotFound,
+    Duplicate { run: WorkflowExecution },
+    NotWaiting { run: WorkflowExecution },
+    Delivered { run: WorkflowExecution },
+}
+
+/// 见 [`DeliverSignalResult`]——两者四态相同。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum DeliverApprovalResult {
+    NotFound,
+    Duplicate { run: WorkflowExecution },
+    NotWaiting { run: WorkflowExecution },
+    Delivered { run: WorkflowExecution },
+}
+
+// ── 查询 ────────────────────────────────────────────────────
+
+/// 对齐 `types.ts:261`。`cursor` 是不透明分页游标（in-memory 实现用 offset）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListRunsArgs {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<WorkflowId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<WorkflowExecutionStatus>,
+    pub limit: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+// ── schedule ────────────────────────────────────────────────
+
+/// 重叠策略（对齐 `types.ts:185`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkflowOverlapPolicy {
+    Skip,
+    Allow,
+    BufferOne,
+    CancelPrevious,
+    TerminatePrevious,
+}
+
+/// schedule 规格（对齐 `types.ts:192`）：cron 表达式或固定间隔。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum WorkflowScheduleSpec {
+    Cron {
+        expression: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timezone: Option<String>,
+    },
+    Interval {
+        every_ms: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timezone: Option<String>,
+    },
+}
+
+/// 对齐 `types.ts:212`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpsertScheduleArgs {
+    pub schedule_id: ScheduleId,
+    pub workflow_id: WorkflowId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_version: Option<WorkflowVersion>,
+    pub schedule: WorkflowScheduleSpec,
+    pub overlap_policy: WorkflowOverlapPolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<serde_json::Value>,
+    /// 下次触发时间——由 host 计算（core 不管 cron 表达式解析）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_fire_at: Option<i64>,
+    pub enabled: bool,
+    pub now: i64,
+}
+
+/// 一个到期的 schedule 桶（对齐 `types.ts:231`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleBucket {
+    pub schedule_id: ScheduleId,
+    pub bucket_id: ScheduleBucketId,
+    pub workflow_id: WorkflowId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_version: Option<WorkflowVersion>,
+    /// 桶推导出的 runId：`{workflowId}:{scheduleId}:{bucketId}`。
+    pub run_id: RunId,
+    pub fire_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<serde_json::Value>,
+    pub overlap_policy: WorkflowOverlapPolicy,
+}
+
+/// 对齐 `types.ts:224`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaimDueScheduleBucketsArgs {
+    pub now: i64,
+    pub limit: usize,
+    pub lease_owner: LeaseOwner,
+    pub lease_ms: i64,
+}
+
+/// 对齐 `types.ts:241` 附近（`MarkScheduleBucketStartedArgs`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkScheduleBucketStartedArgs {
+    pub schedule_id: ScheduleId,
+    pub bucket_id: ScheduleBucketId,
+    pub run_id: RunId,
 }

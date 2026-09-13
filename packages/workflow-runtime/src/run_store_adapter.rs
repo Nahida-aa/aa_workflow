@@ -89,7 +89,7 @@ use std::sync::mpsc::Receiver;
 use workflow_core::{DeleteReason, RunState, RunStore, StoreError, WorkflowEvent};
 
 use crate::types::{
-    AppendEventsArgs, AppendEventsResult, LoadedExecution, ReadEventsArgs, RunId, SaveRunStateArgs,
+    AppendEventsArgs, AppendEventsResult, LoadedExecution, ReadEventsArgs, SaveRunStateArgs,
     StoredWorkflowEvent, WorkflowExecution,
 };
 
@@ -123,13 +123,13 @@ use crate::types::{
 /// 函数**（因为可以两套都直接实现），**不是实现工作量**。
 pub trait WorkflowRunStoreAdapterStore: Send + Sync {
     /// 读 run 元数据信封。`None` = 该 run 不存在。
-    fn load_run_state(&self, run_id: &RunId) -> anyhow::Result<Option<RunState>>;
+    fn load_run_state(&self, run_id: &str) -> anyhow::Result<Option<RunState>>;
 
     /// 写 run 元数据信封。
     fn save_run_state(&self, args: SaveRunStateArgs) -> anyhow::Result<()>;
 
     /// 删除一个 run（含其事件日志）。
-    fn delete_run(&self, run_id: &RunId, reason: DeleteReason) -> anyhow::Result<()>;
+    fn delete_run(&self, run_id: &str, reason: DeleteReason) -> anyhow::Result<()>;
 
     /// 在 `expected_next_index` 处**批量**追加事件，返回追加后的下一索引。
     ///
@@ -149,7 +149,7 @@ pub trait WorkflowRunStoreAdapterStore: Send + Sync {
     /// 与 core 的 `RunStore::subscribe` 同签名（对齐上游 `subscribeEvents?`）。
     fn subscribe_events(
         &self,
-        run_id: &RunId,
+        run_id: &str,
         from_index: u64,
         _on_event: Box<dyn Fn(&WorkflowEvent, u64) + Send + Sync>,
     ) -> Option<Box<dyn Fn() + Send + Sync>> {
@@ -238,13 +238,13 @@ pub trait WorkflowExecutionStore: WorkflowRunStoreAdapterStore {
     ) -> anyhow::Result<crate::types::CreateRunResult>;
 
     /// 读执行记录（含 lease / wake_at）。`None` = 该 run 不存在。
-    fn load_run(&self, run_id: &RunId) -> anyhow::Result<Option<WorkflowExecution>>;
+    fn load_run(&self, run_id: &str) -> anyhow::Result<Option<WorkflowExecution>>;
 
     /// 读执行记录 + 全部事件。`None` = 该 run 不存在。
     ///
     /// 注意返回的 [`LoadedExecution`] **不含 state**——state 由 core 从事件
     /// 重放得出（`fold_step_states`），存两份会有漂移。
-    fn load_execution(&self, run_id: &RunId) -> anyhow::Result<Option<LoadedExecution>>;
+    fn load_execution(&self, run_id: &str) -> anyhow::Result<Option<LoadedExecution>>;
 
     /// 把 run 标记为挂起，并写入挂起投影（供外部 worker 发现待唤醒点）。
     fn mark_run_paused(&self, args: crate::types::MarkRunPausedArgs) -> anyhow::Result<()>;
@@ -290,10 +290,64 @@ pub trait WorkflowExecutionStore: WorkflowRunStoreAdapterStore {
     fn schedule_timer(&self, args: crate::types::ScheduleTimerArgs) -> anyhow::Result<()>;
 
     /// 认领已到期的 timer（`wake_at <= now`），供 sweep 投递 `__timer` 信号。
+    ///
+    /// 认领**不移除** timer，而是给它挂 lease——重复 sweep 不会重复投递
+    /// （lease 未过期时 `claim` 跳过），timer 由投递成功后的 `deliver_signal`
+    /// 删除。
     fn claim_due_timers(
         &self,
         args: crate::types::ClaimDueTimersArgs,
     ) -> anyhow::Result<Vec<crate::types::TimerWakeup>>;
+
+    // ── 投递（signal / approval）────────────────────────────
+
+    /// 投递一个外部信号给正在等它的 run。
+    ///
+    /// 四态：`NotFound`（run 不存在）/ `Duplicate`（同 `signal_id` 的幂等
+    /// no-op）/ `NotWaiting`（run 没在等）/ `Delivered`（成功，run 回到
+    /// `Queued` 待认领）。
+    fn deliver_signal(
+        &self,
+        args: crate::types::DeliverSignalArgs,
+    ) -> anyhow::Result<crate::types::DeliverSignalResult>;
+
+    /// 投递一个审批决定。四态同 [`deliver_signal`](Self::deliver_signal)。
+    fn deliver_approval(
+        &self,
+        args: crate::types::DeliverApprovalArgs,
+    ) -> anyhow::Result<crate::types::DeliverApprovalResult>;
+
+    // ── schedule ────────────────────────────────────────────
+
+    /// 登记 / 更新一个 schedule（幂等，按 `schedule_id`）。
+    ///
+    /// `next_fire_at` 由 host 计算——core 不管 cron 表达式解析。
+    fn upsert_schedule(&self, args: crate::types::UpsertScheduleArgs) -> anyhow::Result<()>;
+
+    /// 认领到期的 schedule 桶，供 sweep 启动对应 run。
+    ///
+    /// 桶的 `run_id` 由 `{workflowId}:{scheduleId}:{bucketId}` 推导，天然幂等。
+    fn claim_due_schedule_buckets(
+        &self,
+        args: crate::types::ClaimDueScheduleBucketsArgs,
+    ) -> anyhow::Result<Vec<crate::types::ScheduleBucket>>;
+
+    /// 把桶标记为 `started`（对应 run 已真正启动）。
+    fn mark_schedule_bucket_started(
+        &self,
+        args: crate::types::MarkScheduleBucketStartedArgs,
+    ) -> anyhow::Result<()>;
+
+    // ── 查询 ────────────────────────────────────────────────
+
+    /// 列出 run（按 `updated_at` 倒序），`cursor` 不透明分页。
+    fn list_runs(
+        &self,
+        args: crate::types::ListRunsArgs,
+    ) -> anyhow::Result<Vec<crate::types::RunSummary>>;
+
+    /// 读一个 run 的时间线（执行记录 + 全部事件）。`None` = 不存在。
+    fn get_run_timeline(&self, run_id: &str) -> anyhow::Result<Option<crate::types::RunTimeline>>;
 }
 
 // ============================================================
@@ -427,7 +481,7 @@ fn to_store_error(e: anyhow::Error) -> StoreError {
 #[cfg(test)]
 mod adapter_tests {
     use super::*;
-    use crate::testkit::MemStore;
+    use crate::in_memory_store::InMemoryExecutionStore;
 
     fn state(run_id: &str) -> RunState {
         RunState {
@@ -452,8 +506,8 @@ mod adapter_tests {
         }
     }
 
-    fn adapted() -> (Arc<dyn RunStore>, Arc<MemStore>) {
-        let mem = Arc::new(MemStore::default());
+    fn adapted() -> (Arc<dyn RunStore>, Arc<InMemoryExecutionStore>) {
+        let mem = Arc::new(InMemoryExecutionStore::default());
         let exec: Arc<dyn WorkflowExecutionStore> = mem.clone();
         (create_run_store_adapter(exec), mem)
     }
@@ -530,7 +584,7 @@ mod adapter_tests {
 mod e2e_tests {
     //! 端到端验证适配器：用 `WorkflowExecutionStore` 实现驱动 core 的引擎。
     use super::*;
-    use crate::testkit::MemStore;
+    use crate::in_memory_store::InMemoryExecutionStore;
     use workflow_core::{
         BaseCtx, CreateWorkflowConfig, RunOptions, RunStatus, StepCtx, Workflow, create_workflow,
     };
@@ -551,7 +605,7 @@ mod e2e_tests {
                 })
                 .into_workflow();
 
-        let mem = Arc::new(MemStore::default());
+        let mem = Arc::new(InMemoryExecutionStore::default());
         let exec: Arc<dyn WorkflowExecutionStore> = mem.clone();
         let store = create_run_store_adapter(exec);
 

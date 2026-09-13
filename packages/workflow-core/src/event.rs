@@ -170,6 +170,51 @@ impl WorkflowEvent {
             | WorkflowEvent::UuidRecorded { step_id, .. } => Some(step_id),
         }
     }
+
+    /// 事件发生时间（每个变体都带 `ts`，对齐 TS 侧 `event.ts`）。
+    pub fn ts(&self) -> i64 {
+        match self {
+            WorkflowEvent::RunStarted { ts, .. }
+            | WorkflowEvent::RunFinished { ts, .. }
+            | WorkflowEvent::RunErrored { ts, .. }
+            | WorkflowEvent::StepStarted { ts, .. }
+            | WorkflowEvent::StepFinished { ts, .. }
+            | WorkflowEvent::StepFailed { ts, .. }
+            | WorkflowEvent::StepPaused { ts, .. }
+            | WorkflowEvent::StepResume { ts, .. }
+            | WorkflowEvent::StepProgress { ts, .. }
+            | WorkflowEvent::Custom { ts, .. }
+            | WorkflowEvent::NowRecorded { ts, .. }
+            | WorkflowEvent::UuidRecorded { ts, .. } => *ts,
+        }
+    }
+
+    /// serde tag 值（`"RUN_STARTED"` 等，对齐 TS 侧 `event.type`）。
+    ///
+    /// 供 [`crate::run_store` 之外的存储信封]冗余建索引用——例如 runtime 的
+    /// `StoredWorkflowEvent.event_type`。
+    pub fn type_name(&self) -> &'static str {
+        let name = match self {
+            WorkflowEvent::RunStarted { .. } => "RUN_STARTED",
+            WorkflowEvent::RunFinished { .. } => "RUN_FINISHED",
+            WorkflowEvent::RunErrored { .. } => "RUN_ERRORED",
+            WorkflowEvent::StepStarted { .. } => "STEP_STARTED",
+            WorkflowEvent::StepFinished { .. } => "STEP_FINISHED",
+            WorkflowEvent::StepFailed { .. } => "STEP_FAILED",
+            WorkflowEvent::StepPaused { .. } => "STEP_PAUSED",
+            WorkflowEvent::StepResume { .. } => "STEP_RESUME",
+            WorkflowEvent::StepProgress { .. } => "STEP_PROGRESS",
+            WorkflowEvent::Custom { .. } => "CUSTOM",
+            WorkflowEvent::NowRecorded { .. } => "NOW_RECORDED",
+            WorkflowEvent::UuidRecorded { .. } => "UUID_RECORDED",
+        };
+        debug_assert_eq!(
+            serde_json::to_value(self).unwrap()["type"],
+            serde_json::Value::String(name.to_string()),
+            "type_name 必须与 serde tag 保持一致"
+        );
+        name
+    }
 }
 
 /// Derived per-step state reconstructed from an event log.

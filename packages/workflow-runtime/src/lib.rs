@@ -39,11 +39,11 @@
 //! 后两个 trait 都在 [`run_store_adapter`] 里（与上游把两个 interface 放在同一个
 //! `types.ts` 一致），本模块只做声明与再导出。
 
+pub mod in_memory_store;
 pub mod run_store_adapter;
-#[cfg(test)]
-mod testkit;
 pub mod types;
 
+pub use in_memory_store::{InMemoryExecutionStore, in_memory_execution_store};
 pub use run_store_adapter::{
     WorkflowExecutionStore, WorkflowRunStoreAdapterStore, create_run_store_adapter,
 };
