@@ -40,13 +40,18 @@
 //! `types.ts` 一致），本模块只做声明与再导出。
 
 pub mod run_store_adapter;
+#[cfg(test)]
+mod testkit;
 pub mod types;
 
 pub use run_store_adapter::{
     WorkflowExecutionStore, WorkflowRunStoreAdapterStore, create_run_store_adapter,
 };
 pub use types::{
-    AppendEventsArgs, AppendEventsResult, LeaseOwner, LoadedExecution, ReadEventsArgs, RunId,
-    RunSummary, RunTimeline, SaveRunStateArgs, StoredWorkflowEvent, WorkflowExecution, WorkflowId,
+    AppendEventsArgs, AppendEventsResult, ClaimDueTimersArgs, ClaimRunArgs, ClaimRunResult,
+    ClaimStaleRunsArgs, CreateRunArgs, CreateRunResult, HeartbeatRunLeaseArgs, LeaseOwner,
+    LoadedExecution, MarkRunErroredArgs, MarkRunFinishedArgs, MarkRunPausedArgs, ReadEventsArgs,
+    ReleaseRunLeaseArgs, RunClaim, RunId, RunSummary, RunTimeline, SaveRunStateArgs,
+    ScheduleTimerArgs, StoredWorkflowEvent, TimerWakeup, WorkflowExecution, WorkflowId,
     WorkflowLease, WorkflowVersion,
 };

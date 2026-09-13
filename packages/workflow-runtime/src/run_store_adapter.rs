@@ -89,8 +89,8 @@ use std::sync::mpsc::Receiver;
 use workflow_core::{DeleteReason, RunState, RunStore, StoreError, WorkflowEvent};
 
 use crate::types::{
-    AppendEventsArgs, AppendEventsResult, ReadEventsArgs, RunId, SaveRunStateArgs,
-    StoredWorkflowEvent,
+    AppendEventsArgs, AppendEventsResult, LoadedExecution, ReadEventsArgs, RunId, SaveRunStateArgs,
+    StoredWorkflowEvent, WorkflowExecution,
 };
 
 /// 执行存储的基础契约。对齐上游 `WorkflowRunStoreAdapterStore`
@@ -189,45 +189,112 @@ pub trait WorkflowRunStoreAdapterStore: Send + Sync {
 /// 上游 core 侧叫 `RunStore`，runtime 侧另起了一套 `…AdapterStore` +
 /// `WorkflowExecutionStore`，中间还有一行 `export type WorkflowRunStoreAdapter
 /// = RunStore`。**那层重复是迁移的产物**（core 用旧形状、runtime 用新形状，
-/// `createRunStoreAdapter` 负责降格）。详见 [`WorkflowRunStoreAdapterStore`] 的文档与
-/// `docs/runtime-design.md` 的 D1。
+/// `createRunStoreAdapter` 负责降格）。详见 [`WorkflowRunStoreAdapterStore`] 的
+/// 文档与 `docs/runtime-design.md` 的 D1。
 ///
-/// 我们照上游立 [`WorkflowRunStoreAdapterStore`]，名字也**逐字沿用**——尽管它
-/// 读起来拗口（「Store 的 Adapter 的 Store」），且 `Adapter` 那半截在我们这里
-/// 没有对应物。理由是本项目一贯的选择：命名对齐上游（`RunStore` / `RunState` /
-/// `WorkflowEvent` / `WorkflowExecutionStore` 全是照搬）。名字难读是一次性成本，
-/// 对不上上游是持续成本——每次读上游代码都要在脑子里做映射。
+/// 我们照上游立 [`WorkflowRunStoreAdapterStore`]，名字逐字沿用——理由见那边
+/// 的文档。那个真别名不设（TS 的 `type` 别名在 Rust 无廉价对应，且它的唯一
+/// 用途是标注适配器输出类型）。
 ///
-/// 另：那个真别名（`WorkflowRunStoreAdapter = RunStore`）**不设**——它是 TS 的
-/// `type` 别名，Rust 里无廉价对应，且它的唯一用途是标注适配器输出类型。
+/// # 与 core 的桥
 ///
-/// ⚠️ **但「不需要适配器」不等于「适配是免费的」**：core 的 `run_workflow`
-/// 入参是 `Arc<dyn RunStore>`，而本 trait 的继承链是
-/// `WorkflowExecutionStore: WorkflowRunStoreAdapterStore`——**与 `RunStore` 无
-/// 关**。想让同一个类型既能被 runtime 驱动、又能喂给 core，必须**两套都实现**
-/// （`RunStore` 的 6 个方法 + 这里的 6 个 + 扩展方法）。
+/// `WorkflowExecutionStore` 的继承链**不经过 `RunStore`**，所以它本身没法喂给
+/// core 的 [`run_workflow`](workflow_core::run_workflow)（要 `Arc<dyn RunStore>`）。
+/// 桥是 [`create_run_store_adapter`]：**实现者只写一套方法**，转换由库做。
 ///
-/// 上游用 `createRunStoreAdapter` 做形状转换，我们省掉的是**那个转换函数**，
-/// 不是**实现工作量**。实测证据：`dyn WorkflowExecutionStore` 传给要
-/// `&dyn RunStore` 的函数会报 `E0308: mismatched types`。
+/// # 已定义的方法（三组）
 ///
-/// # 方法集（未实现，待 D2 / D4 敲定）
-///
-/// 上游的扩展方法分六组，实现前先按组确认范围：
+/// 按 D5 的形态判据，先立「无进程常驻」形态的刚需三组：
 ///
 /// | 组 | 方法 |
 /// | --- | --- |
-/// | run 生命周期 | createRun / loadRun / loadExecution / markRunPaused / markRunFinished / markRunErrored |
-/// | lease | claimRun / heartbeatRunLease / releaseRunLease / claimStaleRuns |
-/// | timer | scheduleTimer / claimDueTimers |
-/// | 投递 | deliverSignal / deliverApproval |
-/// | schedule | upsertSchedule / claimDueScheduleBuckets / markScheduleBucketStarted |
-/// | 查询 | listRuns / getRunTimeline |
+/// | run 生命周期 | [`create_run`](Self::create_run) / [`load_run`](Self::load_run) / [`load_execution`](Self::load_execution) / [`mark_run_paused`](Self::mark_run_paused) / [`mark_run_finished`](Self::mark_run_finished) / [`mark_run_errored`](Self::mark_run_errored) |
+/// | lease | [`claim_run`](Self::claim_run) / [`heartbeat_run_lease`](Self::heartbeat_run_lease) / [`release_run_lease`](Self::release_run_lease) / [`claim_stale_runs`](Self::claim_stale_runs) |
+/// | timer | [`schedule_timer`](Self::schedule_timer) / [`claim_due_timers`](Self::claim_due_timers) |
 ///
-/// 注意：**不要照抄全集**。哪些是当前形态真正需要的，由
-/// `docs/runtime-design.md` 的 D5 按形态判断——例如 `schedule*` 三件套只在
-/// 需要 cron 时才要。
-pub trait WorkflowExecutionStore: WorkflowRunStoreAdapterStore {}
+/// 上游还有 `schedule*` 三件套（需 cron 时）与 `list_runs` /
+/// `get_run_timeline`（查询面），**暂不立**——前者只在需要 cron 时才要，后者
+/// 依赖尚未定义的查询语义。
+///
+/// # 为什么需要比基础层更多
+///
+/// 基础层的 6 个方法只够**读写**：run 元数据信封 + append-only 事件日志。
+/// serverless / 多 worker 还需要（上游 `runtime-model.md:72`）：
+///
+/// - **原子认领与 lease** —— 每次调用都是新进程，必须防止两个 worker 同时
+///   驱同一个 run；且 lease 要**续租**（`heartbeat`），不是一次 claim 就完事
+/// - **timer 索引** —— 无进程常驻时，到期的 sleep 只能由外部 sweep 认领投递
+/// - **run 状态转移作为原子操作** —— 不是「改 `RunState` 再 save」
+/// - **schedule 定义与分桶**（暂不立）
+/// - **list / timeline** —— 无进程内状态可查，全部走 store（暂不立）
+pub trait WorkflowExecutionStore: WorkflowRunStoreAdapterStore {
+    // ── run 生命周期 ────────────────────────────────────────
+
+    /// 幂等创建一个 run。已存在则返回 `CreateRunResult::Existing` 而不报错
+    /// ——调用方据此避免重复启动同一个 run_id。
+    fn create_run(
+        &self,
+        args: crate::types::CreateRunArgs,
+    ) -> anyhow::Result<crate::types::CreateRunResult>;
+
+    /// 读执行记录（含 lease / wake_at）。`None` = 该 run 不存在。
+    fn load_run(&self, run_id: &RunId) -> anyhow::Result<Option<WorkflowExecution>>;
+
+    /// 读执行记录 + 全部事件。`None` = 该 run 不存在。
+    ///
+    /// 注意返回的 [`LoadedExecution`] **不含 state**——state 由 core 从事件
+    /// 重放得出（`fold_step_states`），存两份会有漂移。
+    fn load_execution(&self, run_id: &RunId) -> anyhow::Result<Option<LoadedExecution>>;
+
+    /// 把 run 标记为挂起，并写入挂起投影（供外部 worker 发现待唤醒点）。
+    fn mark_run_paused(&self, args: crate::types::MarkRunPausedArgs) -> anyhow::Result<()>;
+
+    /// 把 run 标记为完成，并写入输出。
+    fn mark_run_finished(&self, args: crate::types::MarkRunFinishedArgs) -> anyhow::Result<()>;
+
+    /// 把 run 标记为出错，并写入结构化错误与终局错误码。
+    ///
+    /// 是独立方法而非「改 `RunState` 再 `save_run_state`」——上游把状态转移也
+    /// 建模成了 store 的原子操作，实现者可在内部与 lease 释放等一并处理。
+    fn mark_run_errored(&self, args: crate::types::MarkRunErroredArgs) -> anyhow::Result<()>;
+
+    // ── lease ───────────────────────────────────────────────
+
+    /// 原子认领一个 run。
+    ///
+    /// 三态返回：已被别人持有 / 状态不允许 → `ClaimRunResult::NotClaimable`；
+    /// 不存在 → `ClaimRunResult::NotFound`。**单进程 store 可以让它总是成功**
+    /// （无并发场景），但接口必须存在——否则 serverless 形态无法接入。
+    fn claim_run(
+        &self,
+        args: crate::types::ClaimRunArgs,
+    ) -> anyhow::Result<crate::types::ClaimRunResult>;
+
+    /// 续租。runtime 会按 `lease_ms` 的 1/3 周期调用（上游
+    /// `runtime-model.md:156`），使持有者崩溃后 lease 能自然过期。
+    fn heartbeat_run_lease(&self, args: crate::types::HeartbeatRunLeaseArgs) -> anyhow::Result<()>;
+
+    /// 主动释放 lease（正常跑完或主动让出）。
+    fn release_run_lease(&self, args: crate::types::ReleaseRunLeaseArgs) -> anyhow::Result<()>;
+
+    /// 扫出 lease 已过期（持有者疑似崩溃）的 run 并认领，供 sweep 恢复。
+    fn claim_stale_runs(
+        &self,
+        args: crate::types::ClaimStaleRunsArgs,
+    ) -> anyhow::Result<Vec<crate::types::RunClaim>>;
+
+    // ── timer ───────────────────────────────────────────────
+
+    /// 登记一个 timer。`signal_id` 是幂等键：重复登记同一 `signal_id` 应无
+    /// 副作用。
+    fn schedule_timer(&self, args: crate::types::ScheduleTimerArgs) -> anyhow::Result<()>;
+
+    /// 认领已到期的 timer（`wake_at <= now`），供 sweep 投递 `__timer` 信号。
+    fn claim_due_timers(
+        &self,
+        args: crate::types::ClaimDueTimersArgs,
+    ) -> anyhow::Result<Vec<crate::types::TimerWakeup>>;
+}
 
 // ============================================================
 // 供 core 使用的降格适配器
@@ -360,75 +427,7 @@ fn to_store_error(e: anyhow::Error) -> StoreError {
 #[cfg(test)]
 mod adapter_tests {
     use super::*;
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-
-    /// 最小 `WorkflowExecutionStore` 实现：只为验证适配器。
-    #[derive(Default)]
-    struct MemStore {
-        runs: Mutex<HashMap<String, RunState>>,
-        logs: Mutex<HashMap<String, Vec<WorkflowEvent>>>,
-    }
-
-    impl WorkflowRunStoreAdapterStore for MemStore {
-        fn load_run_state(&self, run_id: &RunId) -> anyhow::Result<Option<RunState>> {
-            Ok(self.runs.lock().unwrap().get(run_id).cloned())
-        }
-
-        fn save_run_state(&self, args: SaveRunStateArgs) -> anyhow::Result<()> {
-            self.runs
-                .lock()
-                .unwrap()
-                .insert(args.state.run_id.clone(), args.state);
-            Ok(())
-        }
-
-        fn delete_run(&self, run_id: &RunId, _reason: DeleteReason) -> anyhow::Result<()> {
-            self.runs.lock().unwrap().remove(run_id);
-            self.logs.lock().unwrap().remove(run_id);
-            Ok(())
-        }
-
-        fn append_events(&self, args: AppendEventsArgs) -> anyhow::Result<AppendEventsResult> {
-            let mut logs = self.logs.lock().unwrap();
-            let log = logs.entry(args.run_id.clone()).or_default();
-            let actual = log.len() as u64;
-            if actual != args.expected_next_index {
-                // 关键：以 StoreError::Conflict 形式报错，供适配器的
-                // downcast 保留语义。
-                return Err(anyhow::Error::new(StoreError::Conflict {
-                    run_id: args.run_id,
-                    expected: args.expected_next_index as usize,
-                    actual: actual as usize,
-                }));
-            }
-            log.extend(args.events);
-            Ok(AppendEventsResult {
-                next_index: log.len() as u64,
-            })
-        }
-
-        fn read_events(&self, args: ReadEventsArgs) -> anyhow::Result<Vec<StoredWorkflowEvent>> {
-            let logs = self.logs.lock().unwrap();
-            let log = logs.get(&args.run_id).cloned().unwrap_or_default();
-            let from = args.from_index.unwrap_or(0) as usize;
-            Ok(log
-                .into_iter()
-                .enumerate()
-                .skip(from)
-                .map(|(i, event)| StoredWorkflowEvent {
-                    run_id: args.run_id.clone(),
-                    event_index: i as u64,
-                    event_type: "TEST".into(),
-                    step_id: None,
-                    event,
-                    created_at: 0,
-                })
-                .collect())
-        }
-    }
-
-    impl WorkflowExecutionStore for MemStore {}
+    use crate::testkit::MemStore;
 
     fn state(run_id: &str) -> RunState {
         RunState {
@@ -531,72 +530,10 @@ mod adapter_tests {
 mod e2e_tests {
     //! 端到端验证适配器：用 `WorkflowExecutionStore` 实现驱动 core 的引擎。
     use super::*;
-    use crate::types::{AppendEventsArgs, AppendEventsResult, ReadEventsArgs, SaveRunStateArgs};
-    use std::collections::HashMap;
-    use std::sync::Mutex;
+    use crate::testkit::MemStore;
     use workflow_core::{
         BaseCtx, CreateWorkflowConfig, RunOptions, RunStatus, StepCtx, Workflow, create_workflow,
     };
-
-    #[derive(Default)]
-    struct MemStore {
-        runs: Mutex<HashMap<String, RunState>>,
-        logs: Mutex<HashMap<String, Vec<WorkflowEvent>>>,
-    }
-
-    impl WorkflowRunStoreAdapterStore for MemStore {
-        fn load_run_state(&self, run_id: &RunId) -> anyhow::Result<Option<RunState>> {
-            Ok(self.runs.lock().unwrap().get(run_id).cloned())
-        }
-        fn save_run_state(&self, args: SaveRunStateArgs) -> anyhow::Result<()> {
-            self.runs
-                .lock()
-                .unwrap()
-                .insert(args.state.run_id.clone(), args.state);
-            Ok(())
-        }
-        fn delete_run(&self, run_id: &RunId, _reason: DeleteReason) -> anyhow::Result<()> {
-            self.runs.lock().unwrap().remove(run_id);
-            self.logs.lock().unwrap().remove(run_id);
-            Ok(())
-        }
-        fn append_events(&self, args: AppendEventsArgs) -> anyhow::Result<AppendEventsResult> {
-            let mut logs = self.logs.lock().unwrap();
-            let log = logs.entry(args.run_id.clone()).or_default();
-            let actual = log.len() as u64;
-            if actual != args.expected_next_index {
-                return Err(anyhow::Error::new(StoreError::Conflict {
-                    run_id: args.run_id,
-                    expected: args.expected_next_index as usize,
-                    actual: actual as usize,
-                }));
-            }
-            log.extend(args.events);
-            Ok(AppendEventsResult {
-                next_index: log.len() as u64,
-            })
-        }
-        fn read_events(&self, args: ReadEventsArgs) -> anyhow::Result<Vec<StoredWorkflowEvent>> {
-            let logs = self.logs.lock().unwrap();
-            let log = logs.get(&args.run_id).cloned().unwrap_or_default();
-            let from = args.from_index.unwrap_or(0) as usize;
-            Ok(log
-                .into_iter()
-                .enumerate()
-                .skip(from)
-                .map(|(i, event)| StoredWorkflowEvent {
-                    run_id: args.run_id.clone(),
-                    event_index: i as u64,
-                    event_type: "TEST".into(),
-                    step_id: None,
-                    event,
-                    created_at: 0,
-                })
-                .collect())
-        }
-    }
-
-    impl WorkflowExecutionStore for MemStore {}
 
     /// 用适配器把一个 `WorkflowExecutionStore` 实现接进 core，跑通一次真实
     /// workflow：**这是「不需要实现者手写两套方法」的实证。**
