@@ -41,11 +41,19 @@
 
 pub mod in_memory_store;
 pub mod run_store_adapter;
+pub mod runtime_driver;
 pub mod types;
 
 pub use in_memory_store::{InMemoryExecutionStore, in_memory_execution_store};
 pub use run_store_adapter::{
     WorkflowExecutionStore, WorkflowRunStoreAdapterStore, create_run_store_adapter,
+};
+pub use runtime_driver::{
+    DEFAULT_LEASE_MS, DEFAULT_MIN_YIELD_REMAINING_MS, DEFAULT_SWEEP_LIMIT, RunResult,
+    RunResultKind, SweepSummary, WorkflowRegistration, WorkflowRuntime, WorkflowRuntimeConfig,
+    WorkflowRuntimeDeliverApprovalArgs, WorkflowRuntimeDeliverSignalArgs,
+    WorkflowRuntimeStartRunArgs, WorkflowRuntimeSweepArgs, WorkflowRuntimeSweepResult,
+    define_workflow_runtime,
 };
 pub use types::{
     AppendEventsArgs, AppendEventsResult, ClaimDueTimersArgs, ClaimRunArgs, ClaimRunResult,

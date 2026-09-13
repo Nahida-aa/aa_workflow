@@ -397,7 +397,7 @@ pub struct DeliverSignalArgs {
 /// 审批决定（对齐 core `types.ts:312` 的 `ApprovalResult`）。
 ///
 /// 上游定义在 core；我们的 core 没有审批投递入口，故放在 runtime。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalResult {
     pub approved: bool,
