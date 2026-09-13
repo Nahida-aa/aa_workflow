@@ -202,6 +202,48 @@ pub fn run_store_adapter(store: Arc<dyn WorkflowExecutionStore>) -> Arc<dyn RunS
 **实证**：`e2e_tests::core_runs_against_adapted_store` 用一个只实现了
 `WorkflowExecutionStore` 的 store 真正跑通了一次 core 的 `run_workflow`。
 
+#### 附：为什么适配必须是具体类型（`RunStoreAdapter`）
+
+自然的想法是「给 `dyn WorkflowExecutionStore` 直接 `impl RunStore`，省掉那个
+struct」。**实测这条路走不通**（三个探针，均已清理）：
+
+```rust
+impl RunStore for dyn WorkflowExecutionStore { /* 6 个方法 */ }          // ✅ 编译通过
+fn coerce(x: Arc<dyn WorkflowExecutionStore>) -> Arc<dyn RunStore> { x } // ❌ E0308
+fn coerce_ref(x: &dyn WorkflowExecutionStore) -> &dyn RunStore { x }     // ❌ E0308
+RunStore::get_events(x, "r1")                                            // ✅ 编译通过
+```
+
+三点结论：
+
+1. `impl LocalTrait for dyn LocalTrait` **合法**（孤儿规则允许）——容易误判为
+   不合法；
+2. 但它**不产生 coercion**：trait 对象的类型转换只认 **supertrait 关系**
+   （`trait B: A` 时 `dyn B → dyn A`），手动 `impl` 不参与；
+3. 它唯一的作用是让方法能被 UFCS 显式调用，而 `run_workflow` 要的是
+   `Arc<dyn RunStore>` 这个**类型**——「能调方法」≠「能当参数传」。
+
+所以转换只能发生在 `Arc::new` 那一刻（把实现了 `RunStore` 的具体类型装进
+`dyn`），这正是 trait 对象转换的合法路径。
+
+#### 附：这一层不是 Rust 特有的开销
+
+曾误以为「Rust 因为显式写了适配器，开销比 TS 大」。**不成立**——上游同样手写
+转发（`createRunStoreAdapter` 里逐方法包装），两边结构完全对应：
+
+| 环节 | TS | Rust |
+| ---- | -- | ---- |
+| 转换函数作者 | 库 | 库 |
+| 实现者负担 | 一套方法 | 一套方法 |
+| 转换时刻 | 一次对象分配 | 一次 `Arc` 分配 |
+| 每调用跳转 | 2 层（core → adapter → store） | 2 层（同） |
+| 参数包装 | `{ events: [event] }` | `vec![event.clone()]` |
+
+**打平。** 真要论差异，TS 的结构化类型意味着「方法名写对就通过」，Rust 的
+`impl` 强制实现全部 6 个——那是编译期保证的收益，不是开销。
+
+（详细版本写在 `run_store_adapter.rs` 的模块文档里，与实现同处。）
+
 #### 命名：逐字沿用上游，尽管拗口
 
 `RunStore`（core，无前缀）vs `WorkflowRunStoreAdapterStore` /

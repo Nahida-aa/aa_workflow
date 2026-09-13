@@ -32,6 +32,55 @@
 //!    `event_index` 等于数组下标，但 Postgres store 要靠它分页与按位查询。
 //!    先立形状，实现可以晚。
 //!
+//! # 为什么适配必须是具体类型（`RunStoreAdapter`）
+//!
+//! 自然的想法是「给 `dyn WorkflowExecutionStore` 直接 `impl RunStore`，省掉
+//! 那个 struct」。**已实测，这条路走不通**：
+//!
+//! ```ignore
+//! impl RunStore for dyn WorkflowExecutionStore { /* 6 个方法 */ }   // ✅ 编译通过
+//!
+//! fn coerce(x: Arc<dyn WorkflowExecutionStore>) -> Arc<dyn RunStore> { x }  // ❌ E0308
+//! fn coerce_ref(x: &dyn WorkflowExecutionStore) -> &dyn RunStore { x }      // ❌ E0308
+//! RunStore::get_events(x, "r1")                                            // ✅ 编译通过
+//! ```
+//!
+//! 三点结论：
+//!
+//! 1. `impl LocalTrait for dyn LocalTrait` **合法**（孤儿规则允许），这点容易
+//!    误判为不合法；
+//! 2. 但它**不产生 coercion**——trait 对象的类型转换只认 **supertrait 关系**
+//!    （`trait B: A` 时 `dyn B → dyn A`），手动 `impl` 不参与；
+//! 3. 它唯一的作用是让方法能被 UFCS 显式调用（`RunStore::get_events(x, ..)`），
+//!    而 core 的 `run_workflow` 要的是 `Arc<dyn RunStore>` 这个**类型**——
+//!    「能调方法」不等于「能当参数传」。
+//!
+//! 所以必须有一个具体类型承载 `impl RunStore`，转换发生在 `Arc::new` 那一刻：
+//!
+//! ```ignore
+//! let store: Arc<dyn RunStore> = Arc::new(RunStoreAdapter { inner: exec });
+//! //                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+//! //                             把「实现了 RunStore 的具体类型」装进 dyn，
+//! //                             这是 trait 对象转换的合法路径
+//! ```
+//!
+//! # 与 TS 对比：这一层不是 Rust 特有的开销
+//!
+//! 上游同样必须手写转发（`createRunStoreAdapter` 里逐方法包装）。两边结构
+//! 完全对应：
+//!
+//! | 环节 | TS | Rust |
+//! | ---- | -- | ---- |
+//! | 转换函数作者 | 库 | 库 |
+//! | 实现者负担 | 一套方法 | 一套方法 |
+//! | 转换时刻 | 一次对象分配 | 一次 `Arc` 分配 |
+//! | 每调用跳转 | 2 层（core → adapter → store） | 2 层（同） |
+//! | 参数包装 | `{ events: [event] }` | `vec![event.clone()]` |
+//!
+//! **打平，不是 Rust 更贵。** 而且 TS 的结构化类型意味着「只要方法名写对就
+//! 通过」，Rust 的 `impl` 强制实现全部 6 个——真要论差异，那是编译期保证的
+//! 收益，不是开销。
+//!
 //! [`RunStore`]: workflow_core::RunStore
 
 use std::sync::Arc;
