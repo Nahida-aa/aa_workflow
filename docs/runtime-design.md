@@ -42,7 +42,7 @@ runtime 就是来补这块执行所有权层。上游 runtime 的职责（`runti
 
 ## 决策点
 
-### D1. `WorkflowExecutionStore` 是新 trait，还是扩 `RunStore`？—— **已定：`ExecutionStore: RunStore`，不设中间层、不写适配器**
+### D1. `WorkflowExecutionStore` 的父契约是什么？—— **已定：`ExecutionStore: RunStoreAdapterStore`，不写适配器**
 
 #### 上游的实际结构（三个名字，容易看错）
 
@@ -123,35 +123,43 @@ deliverApproval  claimStaleRuns  claimRun  claimDueTimers  claimDueScheduleBucke
 也就是说：那两处语义差别是 `ExecutionStore` 作为**独立存储契约**自己长出来的
 （游标分页、订阅索引），**不是 driver 逼出来的**。
 
-#### 我们的选择
+#### 我们的选择（**已修正**：② 要立）
 
 ```rust
-// workflow-runtime
-pub trait WorkflowExecutionStore: RunStore { /* 扩展方法 */ }
+// workflow-runtime/src/run_store_adapter.rs
+pub trait RunStoreAdapterStore: Send + Sync { /* 6 个方法，照 ② 逐字对齐 */ }
+
+// workflow-runtime/src/lib.rs
+pub trait WorkflowExecutionStore: RunStoreAdapterStore { /* 扩展方法，待定 */ }
 ```
 
-**不设 ② 的对应物，也不写适配器。** 理由：
+**立 ②，不立 ③（那个真别名），也不写适配器。** 三条理由：
 
-1. **② 存在的原因是 core 还在用旧形状**——那是上游**迁移期的成本**。我们不在
-   迁移中，把过渡态固化成常态没有收益。
-2. **那两处语义差别我们现在都不需要**：`eventIndex` = 数组位置（我们的 store
-   就是 append-only 数组）、`createdAt` = 事件自己的 `ts`、批量 = 引擎是单条
-   CAS append。
-3. **没有适配器可写**：适配器的唯一职责是「② → ①」降格。我们没有 ②，自然没有
-   这一步。core 的 `run_workflow` 直接吃 `RunStore`，而
-   `ExecutionStore: RunStore` 确保 runtime 的 store 也能喂进去——**supertrait
-   就已经免费做到了适配器做的事**。
+1. **② 是 `ExecutionStore` 的依赖**。`WorkflowExecutionStore extends
+   WorkflowRunStoreAdapterStore` 意味着扩展层的所有事件相关方法（
+   `get_run_timeline` 返回 `RunTimeline { run, events: StoredWorkflowEvent[] }`）
+   都建立在 ② 的形状上。**不先立 ②，`ExecutionStore` 的签名就没有落脚点**——
+   这是最初把 ② 当成「重复」时完全忽略的一点。
+2. **事件索引与游标是跨进程 / DB store 的基础**。`InMemoryStore` 里
+   `event_index` 等于数组下标，看不出价值；但 Postgres / D1 store 要靠它分页
+   与按位查询。先立形状，实现可以晚。
+3. **③ 与适配器确实不需要**。③ 是 TS 的 `type` 别名，Rust 里无廉价对应
+   （`trait_alias` 仍 unstable），且它的唯一用途是标注「适配器输出类型」；
+   适配器的职责是「② → ①」降格——而 supertrait 关系（
+   `WorkflowExecutionStore: RunStoreAdapterStore`）已经让实现者天然可被 core
+   使用，**在 Rust 里适配是免费的**。
 
 **这是 Rust 相对 TS 的净收益**：TS 里 `ExecutionStore` 不是 `RunStore` 的子类型
-（结构类型 + 多出来的索引语义），所以需要运行时适配器；Rust 的 supertrait 让它
-天然可替换，不需要适配器。
+（结构类型），所以需要运行时适配器；Rust 的 supertrait 让它天然可替换。
 
 #### 命名不对称，保留
 
-`RunStore`（无前缀）vs `WorkflowExecutionStore`（有前缀）略不对称。**保留**——
-它准确反映层级：前者是通用 run store 契约，后者是 workflow 专属扩展。
+`RunStore`（core，无前缀）vs `RunStoreAdapterStore` / `WorkflowExecutionStore`
+（runtime，有前缀）略不对称。**保留**——它准确反映层级：前者是引擎 replay 的
+最小契约，后两者是 runtime 的存储面。
 
-对应关系写进了 `RunStore` 的文档注释（`run_store/mod.rs`）。
+对应关系写进了 `RunStore` 的文档注释（`run_store/mod.rs`）与
+`RunStoreAdapterStore` 的模块文档（`run_store_adapter.rs`）。
 
 #### 风险：将来做 DB store 时要改 trait
 
@@ -193,8 +201,11 @@ pub trait WorkflowExecutionStore: RunStore { /* 扩展方法 */ }
 教训：**名字前缀相同、只差后缀时，必须逐字核对，不能按「看起来一样」处理**。
 比「没查就下结论」更危险的是「查了但配对错了」——它带着证据的外观。
 
-D1 的结论（不设 ②）**没变**，但理由从「② 是重复」换成了「② 是迁移产物，
-且它的新增语义我们不需要」。
+**第二次修正在此之上**：我随后用「driver 不用那两处新语义」论证「② 不需要」，
+**又一次错**——忽略了 `ExecutionStore extends ②` 这层依赖。driver 不用 ≠ 
+`ExecutionStore` 不需要：扩展层的查询方法返回的就是 `StoredWorkflowEvent`。
+
+**所以 D1 的最终结论是「立 ②，不立 ③」**，见上文「我们的选择（已修正）」。
 
 ### D2. lease 放 store 还是放 runtime？
 
