@@ -135,6 +135,28 @@ impl DeleteReason {
 ///
 /// The engine never mutates events; state is always derived by replaying the
 /// log (see [`crate::event::fold_step_states`]).
+///
+/// ## 与 TanStack 的对应
+///
+/// 上游有**两个**名字指这同一套东西：
+///
+/// | 上游 | 位置 | 说明 |
+/// | ---- | ---- | ---- |
+/// | `RunStore` | `workflow-core/src/types.ts:599` | core 的接口，引擎用 |
+/// | `WorkflowRunStoreAdapter = RunStore` | 同上 | 一行 `export type` 别名，供 adapter 引用 |
+/// | `WorkflowRunStoreAdapterStore` | `workflow-runtime/src/types.ts:290` | 独立 interface，`WorkflowExecutionStore` 继承它 |
+///
+/// 后两个在本 crate **刻意不设对应物**：
+///
+/// - `WorkflowRunStoreAdapter` 是 TS 的 `type` 别名，零成本。Rust 的 trait
+///   别名要 `#![feature(trait_alias)]`（unstable），用 `trait A: B {}` 则是新
+///   trait —— 每个实现者都得多写一行空 `impl`，为纯名字差异付实现成本。
+/// - `WorkflowRunStoreAdapterStore` 的方法与 `RunStore` **语义等价、仅命名不同**
+///   （`loadRunState`↔`get_run_state`、`appendEvents`↔`append_event` …）。那层
+///   重复在上游是历史产物，Rust 里没有廉价对应。
+///
+/// 所以 runtime 的扩展 trait 直接继承本 trait（见 `workflow-runtime` 的
+/// `WorkflowExecutionStore: RunStore`），**不设中间层**。
 pub trait RunStore: Send + Sync {
     fn get_run_state(&self, run_id: &str) -> Result<Option<RunState>, StoreError>;
     fn set_run_state(&self, run_id: &str, state: &RunState) -> Result<(), StoreError>;

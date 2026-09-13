@@ -1,8 +1,9 @@
 # workflow-runtime 设计意图
 
-> **状态**：D5 已调查完。**结论：runtime 层必需**——判据是通用形态（serverless /
-> 多 worker），而不是单个应用。LocalDub 现有的 queue 是「常驻进程」形态的专用
-> 解决，与通用层不是替代关系。详见 D5 及其两个附录。
+> **状态**：D1 已定（supertrait，不设中间层）。D2 / D4 有倾向待确认。
+> **结论：runtime 层必需**——判据是通用形态（serverless / 多 worker），而不是
+> 单个应用。LocalDub 现有的 queue 是「常驻进程」形态的专用解决，与通用层不是
+> 替代关系。详见 D5 及其两个附录。
 
 > 本文只写**意图与取舍**，不写 API 签名——签名会随设计变化，写在意图之前
 > 只会造成文档与实现不一致。
@@ -41,24 +42,86 @@ runtime 就是来补这块执行所有权层。上游 runtime 的职责（`runti
 
 ## 决策点
 
-### D1. `WorkflowExecutionStore` 是新 trait，还是扩 `RunStore`？
+### D1. `WorkflowExecutionStore` 是新 trait，还是扩 `RunStore`？—— **已定：supertrait，不设中间层**
 
-上游选择了**新 trait**，理由是 serverless / 多 worker 需要的「比 replay 更多」。
+#### 上游的实际结构
 
-| 选项 | 代价 | 倾向 |
+上游有**两个**名字指同一套东西，这点容易看漏：
+
+```ts
+// workflow-core/src/types.ts:599
+export interface RunStore { getRunState; setRunState; deleteRun; appendEvent; getEvents; subscribe? }
+
+// workflow-runtime/src/types.ts:290
+export interface WorkflowRunStoreAdapterStore { loadRunState; saveRunState; deleteRun; appendEvents; readEvents; subscribeEvents? }
+
+// workflow-runtime/src/types.ts:305
+export type WorkflowRunStoreAdapter = RunStore          // ← 一行别名，与上面那个 interface 无继承关系
+
+// workflow-runtime/src/types.ts:307
+export interface WorkflowExecutionStore extends WorkflowRunStoreAdapterStore { /* +19 个方法 */ }
+```
+
+两个 interface **语义等价、仅命名不同**：
+
+| core `RunStore` | runtime `WorkflowRunStoreAdapterStore` | 差异 |
 | --- | --- | --- |
-| **A. 新 trait `ExecutionStore`，`RunStore` 不动** | 需要两层抽象，runtime 依赖 `ExecutionStore`，`FileRunStore` 之类要同时实现（或加桥接） | ✅ |
-| B. 把 timers / leases 塞进 `RunStore` | **破坏性**：每个 store 实现都要改；且 core 的契约面被污染——core 只用得上 CAS + 元数据 | ❌ |
+| `getRunState(runId)` | `loadRunState(runId)` | 仅名字 |
+| `setRunState(runId, state)` | `saveRunState(args)` | 名字 + 参数打包 |
+| `deleteRun(runId, reason)` | `deleteRun(runId, reason)` | ✅ 相同 |
+| `appendEvent(runId, idx, event)` | `appendEvents(args)` | 名字 + 参数打包 |
+| `getEvents(runId)` | `readEvents(args)` | 名字 + 参数打包 |
+| `subscribe?(...)` | `subscribeEvents?` | 名字 |
 
-**倾向 A**。理由：核心是「core 不该知道自己不需要的东西」。core 只需要
-「append + 读 + 元数据」；timer 索引和 lease 是 runtime 的关注点。上游也是
-这个切分。
+（连我们已实现的 `DeleteReason` 参数都跟它一致——不是拍脑袋加的。）
 
-**待定**：`ExecutionStore` 是继承 `RunStore`（supertrait）还是组合？
-- supertrait：`trait ExecutionStore: RunStore`，实现者只需一个类型
-- 组合：`ExecutionStore` 内含 `RunStore` 的值
+#### 我们的选择
 
-倾向前者（Rust 里 `dyn` 组合会多一层间接），但要看 lease 的 API 形状再定。
+```rust
+// workflow-runtime
+pub trait WorkflowExecutionStore: RunStore { /* +19 个方法 */ }
+```
+
+**不设 `WorkflowRunStoreAdapterStore` 的对应物。** 理由：
+
+1. **那层重复是 TS 的产物**。`export type X = Y` 零成本，所以上游能一行抹平。
+   Rust 的 trait 别名要 `#![feature(trait_alias)]`（至今 unstable）；
+   用 `trait A: B {}` 则是新 trait——**每个实现者都得多写一行空 `impl`**，
+   为纯名字差异付实现成本，不划算。
+2. **`RunStore` 已经是我们的 core 契约面**，被测试与文档锚定
+   （`DeleteReason` / `into_typed` / `RunState.error` 都挂它上面）。改名成
+   runtime 的词汇会让 core 朝上层倾斜。
+3. **supertrait 在 Rust 里是直接的**：`RunStore` 就是那 6 项基础层，
+   `WorkflowExecutionStore` 直接 `: RunStore` 扩展，不需要中间层。
+
+#### 命名不对称，以及为何保留
+
+`RunStore`（无前缀）vs `WorkflowExecutionStore`（有前缀）在 Rust 里略不对称。
+**保留这个不对称**——它准确反映层级：`RunStore` 是通用 run store 契约，
+`WorkflowExecutionStore` 是 workflow 专属扩展。为了「看起来对称」去改
+`RunStore` 的名字，收益只是观感。
+
+**这个对应关系已写进 `RunStore` 的文档注释**（`run_store/mod.rs`），说明上游
+那两个名字、我们为何只有一个。
+
+#### 实现清单（上游 `ExecutionStore` 的 19 个方法，五组）
+
+| 组 | 方法 |
+| --- | --- |
+| run 生命周期 | `createRun` / `loadRun` / `loadExecution` / `markRunPaused` / `markRunFinished` / `markRunErrored` |
+| lease | `claimRun` / `heartbeatRunLease` / `releaseRunLease` / `claimStaleRuns` |
+| timer | `scheduleTimer` / `claimDueTimers` |
+| 投递 | `deliverSignal` / `deliverApproval` |
+| schedule | `upsertSchedule` / `claimDueScheduleBuckets` / `markScheduleBucketStarted` |
+| 查询 | `listRuns` / `getRunTimeline` |
+
+注意两点：
+
+- **`heartbeatRunLease` 的存在说明 lease 要续租**，不是一次 claim 就完事
+  （上游 `runtime-model.md:156`：runtime renews every third of `leaseMs`）。
+- **`markRunPaused` / `markRunFinished` / `markRunErrored` 是独立方法**，
+  不是「改 `RunState` 再 `save`」——上游把 run 状态转移也建模成了 store 的
+  原子操作。这意味着 `ExecutionStore` 比「`RunStore` 加几个查询」要重。
 
 ### D2. lease 放 store 还是放 runtime？
 
@@ -264,13 +327,11 @@ separate → separate_after → sf_ocr_pre → sf_ocr → sf_ocr_fix
 
 1. ~~查 D3 的影响面~~ —— **已实测**，见 D3 附。
 2. ~~查 D5~~ —— **已调查**，见 D5：runtime 层必需（判据是通用形态而非单个应用）。
-3. **拍板 D1 / D2 / D4**：它们都是「做 runtime」的必要决策，已不能回避。
-   - D1（新 trait vs 扩 `RunStore`）—— 倾向新 trait，**这是唯一会反向影响
-     core 的决策，优先定**
+3. **拍板 D2 / D4**（D1 已定）：
    - D2（lease 位置）—— 倾向 store，前提是不塞进 `RunStore`
    - D4（sweep 边界）—— 倾向保留 `max_*` / `maxDurationMs`
 4. **并行编排（D5 附二）可以独立推进**：它只依赖 core 的 `try_join!`，与
    runtime 层的决策无关。如果想让 LocalDub 先有收益，这条可以并行开工。
 
-**需要注意的次序**：D1 定了才好动 `workflow-runtime` 的代码，因为
-`ExecutionStore` 的形状决定了 runtime 的骨架。D2 / D4 是在此之上的细节。
+**次序**：D1 已定，`WorkflowExecutionStore: RunStore` 的骨架可以立起来了。
+D2 / D4 是在此之上的细节，可在实现 lease / sweep 时再敲定。
