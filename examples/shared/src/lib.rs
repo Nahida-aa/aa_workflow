@@ -1,5 +1,10 @@
-//! Host-agnostic example layer for `workflow-core`（对齐 TanStack
-//! `examples/deployment-pocs/shared` 的位置，但面向 Rust + 本地 host）。
+//! Host-agnostic example layer for `workflow-core`（**位置**对齐 TanStack
+//! `examples/deployment-pocs/shared`，但面向 Rust + 本地 host）。
+//!
+//! 注意只对齐位置，**不对齐代码写法**：上游那份 examples 用的是过时写法
+//! （`ctx.input as T` 手动断言、裸 `Date.now()`），而 guide 用的是受推断契约
+//! 保护的新写法（`input: z.object(...)` + `ctx.input.field`）。我们跟 guide
+//! 一致。差异细节见 `docs/tanstack-alignment.md` 的「参考上游时看哪边」。
 //!
 //! 三个可复用件：
 //! - [`file_run_store::FileRunStore`] — 一个独立的落盘 [`workflow_core::RunStore`] 实现（`run.json` 信封 +

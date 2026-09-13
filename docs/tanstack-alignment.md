@@ -186,3 +186,44 @@ cron landscape + future package shape`（05-21）写的是「未来的包形态�
 （另一个容易误解的点：本仓 `examples/` 在初始 commit 就有了，但那是 TanStack
 library template 的脚手架产物——React/Solid 样板应用，与 workflow 无关。
 真正装 workflow 内容的 examples 从 `5d05fa8` 才出现。）
+
+### 参考上游时看哪边：guide 是权威，examples 是过时样例
+
+`docs/guide/` 与 `examples/deployment-pocs/` 的代码示例**写法不一致**，而且
+新的那个是 guide。改动前务必以 guide 为准。
+
+时间线（关键：examples 写出来时，guide 用的那套写法已存在 8 天）：
+
+| 内容 | commit | 日期 |
+| ---- | ------ | ---- |
+| schema 机制（`z.object` / `StandardSchemaV1` / 推断契约） | `4f64b9c` | 05-20 |
+| `inference.test.ts` 锁死推断契约 | `6577262` | 05-20 |
+| `examples/deployment-pocs/` | `5d05fa8` | 05-28 |
+| `docs/guide/index.md` 最后更新 | `87340c8` | 07-20 |
+
+写法对照：
+
+| | examples（旧） | guide（新） |
+| ---- | -------------- | ----------- |
+| 输入 | `ctx.input as FulfillmentInput` 手动断言 | `input: z.object({...})` + `ctx.input.orderId` 直接属性访问 |
+| state / output | 不声明 | `state: z.object(...)` / `output: z.object(...)` |
+| 时钟 | 裸用 `Date.now()` | `const now = await ctx.now()` |
+| middleware | 无 | `.middleware([requireUser, traced])` |
+
+**examples 里那个 `Date.now()` 是确定性违规**（本仓 `primitives.md:111` 把它列为
+footgun），而同一个仓库的 `inference.test.ts` 头部注释正以「AI can write this
+with zero annotations」为卖点——examples 恰好是它反对的写法。
+
+权威性依据：`inference.test.ts` 用 `expectTypeOf` 把推断契约**锁在编译期**
+（注释原话：any future engine change breaks inference flow → these tests fail at
+compile time）。guide 的写法受这个契约保护，examples 的 `as` 断言是绕开契约。
+
+**对我们的影响**：guide 的 `input: z.object(...)` + `ctx.input.field` 对应我们
+已做的 `.input::<In>()` + `ctx.input`，方向一致。但 TS 有一套我们**没有**的能力——
+从 handler 返回值反推 output 类型（`WorkflowOutput<typeof order>`），以及「先用
+`as` 断言糊过去」的逃生舱。Rust 没有 `infer`，所以：
+
+- 类型标注必须手写（这就是 `RunState<In, Out>` + `into_typed` 存在的原因）；
+- 那个 `expectTypeOf` 契约我们无法照搬，只能用手写标注 + 测试代偿。
+
+结论：**位置参考 examples（示例层该放什么），代码写法参考 guide。**
