@@ -2577,4 +2577,84 @@ mod tests {
             0
         );
     }
+
+    /// handler 末尾（最后边界之后）的 state 变更默认没有 STATE_DELTA——
+    /// 它们不经过任何耐久原语。显式 \`ctx.flush()\` 补发。
+    #[tokio::test]
+    async fn tail_state_delta_needs_explicit_flush() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
+
+        // 不调 flush：末尾变更不上报。
+        let wf = Workflow::new("tail-no-flush")
+            .initialize(|_| Ok(serde_json::json!({ "n": 0 })))
+            .handler(|mut ctx: WorkflowCtx| async move {
+                ctx.step("a", move |_sc: StepCtx| async move {
+                    Ok(serde_json::Value::Null)
+                })
+                .await?;
+                ctx.state["n"] = serde_json::json!(1);
+                Ok(serde_json::Value::Null)
+            });
+        run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("tail:0"),
+            Some(Arc::new(move |e: &WorkflowEvent| {
+                sink.lock().unwrap().push(e.clone())
+            })),
+        )
+        .await
+        .unwrap();
+        let collected = events.lock().unwrap().clone();
+        let deltas: Vec<&WorkflowEvent> = collected
+            .iter()
+            .filter(|e| matches!(e, WorkflowEvent::StateDelta { .. }))
+            .collect();
+        assert!(deltas.is_empty(), "未 flush 的尾段变更不应有 STATE_DELTA");
+        events.lock().unwrap().clear();
+
+        // 调 ctx.flush()：补发。
+        let wf = Workflow::new("tail-flush")
+            .initialize(|_| Ok(serde_json::json!({ "n": 0 })))
+            .handler(|mut ctx: WorkflowCtx| async move {
+                ctx.step("a", move |_sc: StepCtx| async move {
+                    Ok(serde_json::Value::Null)
+                })
+                .await?;
+                ctx.state["n"] = serde_json::json!(1);
+                ctx.flush()?;
+                Ok(serde_json::Value::Null)
+            });
+        let sink = Arc::clone(&events);
+        run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("tail:1"),
+            Some(Arc::new(move |e: &WorkflowEvent| {
+                sink.lock().unwrap().push(e.clone())
+            })),
+        )
+        .await
+        .unwrap();
+        let deltas: Vec<WorkflowEvent> = events
+            .lock()
+            .unwrap()
+            .clone()
+            .into_iter()
+            .filter(|e| matches!(e, WorkflowEvent::StateDelta { .. }))
+            .collect();
+        assert_eq!(deltas.len(), 1, "显式 flush 应补发尾段 STATE_DELTA");
+        match &deltas[0] {
+            WorkflowEvent::StateDelta { delta, .. } => assert_eq!(
+                delta,
+                &vec![crate::state_diff::Operation::Replace {
+                    path: "/n".into(),
+                    value: serde_json::json!(1)
+                }]
+            ),
+            _ => unreachable!(),
+        }
+    }
 }

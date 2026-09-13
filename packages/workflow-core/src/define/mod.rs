@@ -167,6 +167,21 @@ impl<In, St, Ext> BaseCtx<In, St, Ext> {
     where
         St: serde::Serialize,
     {
+        self.flush()
+    }
+
+    /// 显式把当前 state 同步进引擎镜像并发射 `STATE_DELTA`。
+    ///
+    /// 供 **handler 末尾**（最后一个耐久边界之后、return 之前）的 state 变更
+    /// 使用：那些变更不经过任何耐久原语，不显式 flush 就没有 `STATE_DELTA`。
+    /// 上游不需要这个方法——它的 `engine.state` 是共享对象，引擎在 handler
+    /// 返回处直接 diff；我们的 state 是 owned 工作副本（PARITY #7，根源是
+    /// Rust 的 `Deref` 无法返回借用临时 `RwLock` guard，共享模型下字段读取
+    /// 无法编译），所以提供显式入口。
+    pub fn flush(&self) -> anyhow::Result<()>
+    where
+        St: serde::Serialize,
+    {
         let v = serde_json::to_value(&self.state)?;
         let delta = {
             let mut prev = self
