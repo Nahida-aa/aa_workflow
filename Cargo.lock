@@ -56,6 +56,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "guide"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tokio",
+ "workflow-core",
+ "workflow-runtime",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -60,6 +60,6 @@ pub use types::{
     ClaimStaleRunsArgs, CreateRunArgs, CreateRunResult, HeartbeatRunLeaseArgs, LeaseOwner,
     LoadedExecution, MarkRunErroredArgs, MarkRunFinishedArgs, MarkRunPausedArgs, ReadEventsArgs,
     ReleaseRunLeaseArgs, RunClaim, RunId, RunSummary, RunTimeline, SaveRunStateArgs,
-    ScheduleTimerArgs, StoredWorkflowEvent, TimerWakeup, WorkflowExecution, WorkflowId,
-    WorkflowLease, WorkflowVersion,
+    ScheduleTimerArgs, StoredWorkflowEvent, TimerWakeup, WorkflowExecution,
+    WorkflowExecutionStatus, WorkflowId, WorkflowLease, WorkflowVersion,
 };
