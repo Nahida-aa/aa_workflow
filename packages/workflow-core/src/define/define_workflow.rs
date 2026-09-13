@@ -76,7 +76,8 @@ impl<TInput, TOutput, TState> CreateWorkflowConfig<TInput, TOutput, TState> {
         self
     }
 
-    /// Fallback retry for steps that declare no [`StepOptions::retry`].
+    /// Fallback retry for steps that declare no retry of their own
+    /// (see [`StepOptions`](super::StepOptions)).
     pub fn default_step_retry(mut self, retry: RetryPolicy) -> Self {
         self.default_step_retry = Some(retry);
         self
@@ -161,7 +162,7 @@ impl<TInput, TOutput, TState> CreateWorkflowConfig<TInput, TOutput, TState> {
 
 /// Build a typed workflow the TanStack way: declaration config → builder →
 /// `handler()`. `In`/`Out`/`St` come from the config's
-/// [`input`]/[`output`]/[`state`](CreateWorkflowConfig::state) re-types; the
+/// [`input`](CreateWorkflowConfig::input)/[`output`](CreateWorkflowConfig::output)/[`state`](CreateWorkflowConfig::state) re-types; the
 /// handler's output type is inferred from the closure return value.
 pub fn create_workflow<TInput, TOutput, TState>(
     config: CreateWorkflowConfig<TInput, TOutput, TState>,

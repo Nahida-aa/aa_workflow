@@ -30,10 +30,40 @@ use workflow_core::RunStore;
 
 /// 运行时的执行存储契约。
 ///
-/// **继承 [`RunStore`]**，不设中间层。上游在 core 的 `RunStore` 与
-/// `WorkflowExecutionStore` 之间还有一个 `WorkflowRunStoreAdapterStore`，
-/// 那是 TS 的 `export type` 别名产物（`WorkflowRunStoreAdapter = RunStore`），
-/// 与我们无关——详见 `RunStore` 的文档注释。
+/// **继承 [`RunStore`]**，不设中间层、也不需要适配器。上游那两个额外名字
+/// （`WorkflowRunStoreAdapter` / `WorkflowRunStoreAdapterStore`）的来龙去脉
+/// 见下节。
+///
+/// # 与上游的关系（三个名字，容易看错）
+///
+/// 上游那边有**三个**相关的名字，其中两个只差一个 `Store` 后缀：
+///
+/// | 上游 | 是什么 | 我们的对应 |
+/// | ---- | ------ | ---------- |
+/// | `RunStore`（core） | 6 个方法，[`RunStore`] | ✅ 就是本 trait 的父 trait |
+/// | `WorkflowRunStoreAdapter = RunStore` | 一行 `export type` 真别名 | ❌ 不需要（其唯一用途是标注适配器输出类型） |
+/// | `WorkflowRunStoreAdapterStore` | 独立 interface，**不是** `RunStore` 的重复 | ❌ 不设，见下 |
+/// | `WorkflowExecutionStore extends …AdapterStore` | +19 个方法 | ✅ 本 trait |
+///
+/// `WorkflowRunStoreAdapterStore` 与 `RunStore` 在事件读写上有**真实差别**
+/// （批量 `appendEvents`、返回带 `eventIndex` / `createdAt` 的
+/// `StoredWorkflowEvent`），不是命名差异。它存在是因为**上游正处于迁移中**：
+/// core 还在用旧的 `RunStore`，而 runtime 已用新的——`createRunStoreAdapter`
+/// 就是把新的降格成旧的喂给 core 的过渡层。
+///
+/// 我们不设它的理由：
+///
+/// 1. 那是**迁移期的成本**，我们不在迁移中；
+/// 2. 那两处新语义（事件索引、批量 append）**driver 根本不用**——查
+///    `runtime-driver.ts`，它只调 lease / timer / schedule / run 生命周期
+///    那几组方法；新增语义只有 store 内部实现与 `subscribe` 回调用到；
+/// 3. **没有适配器可写**：适配器的唯一职责是「新 → 旧」降格，我们没有两代
+///    形状，supertrait 已经免费做到了它做的事（core 的 `run_workflow` 要
+///    `RunStore`，而本 trait 就是）。
+///
+/// 代价：将来做 Postgres / D1 这类后端时，事件索引与分页会变成刚需，那时要改
+/// 本 trait。接受——现在还没有第二个 store 实现，为假想的第三个实现设计形状是
+/// 过度设计。
 ///
 /// # 为什么比 `RunStore` 宽
 ///
@@ -49,7 +79,7 @@ use workflow_core::RunStore;
 ///
 /// # 方法集（未实现，待 D2 / D4 敲定）
 ///
-/// 上游的 19 个方法分五组，实现前先按组确认范围：
+/// 上游的扩展方法分六组，实现前先按组确认范围：
 ///
 /// | 组 | 方法 |
 /// | --- | --- |

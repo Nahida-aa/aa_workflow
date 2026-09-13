@@ -5,7 +5,7 @@
 //! - [`Middleware::produce`] —— 每 drive 产出一个 `ctx.ext`（typed ctx 扩展）；
 //! - [`Middleware::wrap`] —— 围绕 handler future 的洋葱式包裹，先注册的在最外层。
 //!
-//! 与 TanStack 的差异见 [`WorkflowBuilder::middleware`](crate::define::WorkflowBuilder::middleware)：
+//! 与 TanStack 的差异见 [`WorkflowBuilder::middleware`](crate::define::WorkflowBuilder::middleware)(crate::define::WorkflowBuilder::middleware)：
 //! 他们的多 middleware context 是类型交集，我们拍平成单一 `Ext` 字段。
 
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use crate::define::{BoxFuture, WorkflowCtx};
 /// ctx extension (`ctx.ext`). Mirrors TanStack's `defineMiddleware`: `wrap`
 /// composes around `next`, and the produced context is what the handler reads
 /// off `ctx` (their `{ ...context }` accumulation, collapsed to a single
-/// extension value — see [`WorkflowBuilder::middleware`]).
+/// extension value — see [`WorkflowBuilder::middleware`](crate::define::WorkflowBuilder::middleware)).
 #[derive(Clone)]
 pub struct Middleware {
     /// Builds the handler's `ctx.ext` from the erased drive ctx. Runs on every

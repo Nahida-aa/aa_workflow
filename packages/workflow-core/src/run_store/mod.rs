@@ -138,25 +138,30 @@ impl DeleteReason {
 ///
 /// ## 与 TanStack 的对应
 ///
-/// 上游有**两个**名字指这同一套东西：
+/// 上游有**三个**相关名字，其中两个只差一个 `Store` 后缀，容易看错：
 ///
-/// | 上游 | 位置 | 说明 |
-/// | ---- | ---- | ---- |
-/// | `RunStore` | `workflow-core/src/types.ts:599` | core 的接口，引擎用 |
-/// | `WorkflowRunStoreAdapter = RunStore` | 同上 | 一行 `export type` 别名，供 adapter 引用 |
-/// | `WorkflowRunStoreAdapterStore` | `workflow-runtime/src/types.ts:290` | 独立 interface，`WorkflowExecutionStore` 继承它 |
+/// | 上游 | 位置 | 是什么 |
+/// | ---- | ---- | ------ |
+/// | `RunStore` | `workflow-core/src/types.ts:599` | core 的接口，引擎用；**就是本 trait** |
+/// | `WorkflowRunStoreAdapter = RunStore` | 同上 `:305` 在 runtime 侧 | 一行 `export type` 真别名 |
+/// | `WorkflowRunStoreAdapterStore` | `workflow-runtime/src/types.ts:290` | **独立 interface，不是别名** |
+/// | `WorkflowExecutionStore extends …AdapterStore` | `:307` | runtime 的扩展契约 |
 ///
-/// 后两个在本 crate **刻意不设对应物**：
+/// 后两个本 crate 与 `workflow-runtime` 都**不设对应物**：
 ///
 /// - `WorkflowRunStoreAdapter` 是 TS 的 `type` 别名，零成本。Rust 的 trait
-///   别名要 `#![feature(trait_alias)]`（unstable），用 `trait A: B {}` 则是新
-///   trait —— 每个实现者都得多写一行空 `impl`，为纯名字差异付实现成本。
-/// - `WorkflowRunStoreAdapterStore` 的方法与 `RunStore` **语义等价、仅命名不同**
-///   （`loadRunState`↔`get_run_state`、`appendEvents`↔`append_event` …）。那层
-///   重复在上游是历史产物，Rust 里没有廉价对应。
+///   别名要 `#![feature(trait_alias)]`（仍 unstable），`trait A: B {}` 则是新
+///   trait——每个实现者都得多写空 `impl`。它的唯一用途是标注「适配器的输出
+///   类型」，而适配器本身我们也不需要（见下条）。
+/// - `WorkflowRunStoreAdapterStore` **不是 `RunStore` 的重复**：它在事件读写上
+///   有真实差别（批量 `appendEvents`、返回带 `eventIndex` / `createdAt` 的
+///   `StoredWorkflowEvent`）。它存在是因为**上游正在迁移中**——core 还在用旧的
+///   `RunStore`，runtime 已用新的，`createRunStoreAdapter` 负责把新的降格成
+///   旧的。我们不在迁移中，且那两处新语义 driver 根本不使用，故不引入。
 ///
-/// 所以 runtime 的扩展 trait 直接继承本 trait（见 `workflow-runtime` 的
-/// `WorkflowExecutionStore: RunStore`），**不设中间层**。
+/// 于是 runtime 的扩展 trait 直接继承本 trait（`WorkflowExecutionStore: RunStore`），
+/// **不设中间层，也不需要适配器**——supertrait 已经免费做到了适配器做的事。
+/// 完整论证见 `docs/runtime-design.md` 的 D1。
 pub trait RunStore: Send + Sync {
     fn get_run_state(&self, run_id: &str) -> Result<Option<RunState>, StoreError>;
     fn set_run_state(&self, run_id: &str, state: &RunState) -> Result<(), StoreError>;

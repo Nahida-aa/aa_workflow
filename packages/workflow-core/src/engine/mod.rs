@@ -2,7 +2,7 @@
 //! 结果缓存 / CAS 追加），`exec_step` 跑单个 durable step，
 //! `exec_pause` + `signal_run` 实现 durable 等待（approval / sleep）。
 //! 单次 invocation 的顶层编排（`run_workflow` / `run_workflow_sync` /
-//! `RunOptions` / `RunOutcome`）在 [`run_workflow`](run_workflow) 子模块。
+//! `RunOptions` / `RunOutcome`）在 `run_workflow` 子模块。
 
 use std::future::Future;
 use std::sync::Arc;

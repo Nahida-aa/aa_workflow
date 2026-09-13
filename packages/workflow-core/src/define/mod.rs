@@ -3,7 +3,7 @@
 //! - 本文件：handler **运行时**能看到的东西 —— [`BaseCtx`]（`ctx`）、
 //!   [`StepCtx`]、[`StepOptions`] / [`RetryPolicy`] / [`Backoff`]，以及 workflow
 //!   本体 [`Workflow`]。
-//! - [`define_workflow`]：**声明**一个 workflow 的入口 ——
+//! - `define_workflow` 子模块：**声明**一个 workflow 的入口 ——
 //!   [`CreateWorkflowConfig`] / [`WorkflowBuilder`] / [`create_workflow`] /
 //!   [`WorkflowDefinition`]。
 //!
@@ -322,7 +322,7 @@ impl<In, St, Ext> BaseCtx<In, St, Ext> {
     }
 
     /// Cooperative hand-back of the runtime budget (TanStack `yield`): durably
-    /// parks the run on a `"__timer"` wait until [`RunOptions::yield_resume_at`]
+    /// parks the run on a `"__timer"` wait until [`RunOptions`](crate::engine::RunOptions) 的 `yield_resume_at`
     /// (or now+1ms), so a host can re-invoke with a freshly extended deadline.
     /// Deterministic id `__yield-{n}` (per-invocation counter), replay-safe.
     pub async fn yield_(&self) -> anyhow::Result<serde_json::Value>

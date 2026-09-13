@@ -42,69 +42,127 @@ runtime 就是来补这块执行所有权层。上游 runtime 的职责（`runti
 
 ## 决策点
 
-### D1. `WorkflowExecutionStore` 是新 trait，还是扩 `RunStore`？—— **已定：supertrait，不设中间层**
+### D1. `WorkflowExecutionStore` 是新 trait，还是扩 `RunStore`？—— **已定：`ExecutionStore: RunStore`，不设中间层、不写适配器**
 
-#### 上游的实际结构
-
-上游有**两个**名字指同一套东西，这点容易看漏：
+#### 上游的实际结构（三个名字，容易看错）
 
 ```ts
 // workflow-core/src/types.ts:599
-export interface RunStore { getRunState; setRunState; deleteRun; appendEvent; getEvents; subscribe? }
+export interface RunStore {                       // ① core 的契约
+  getRunState; setRunState; deleteRun
+  appendEvent(runId, idx, event)                  //    单条
+  getEvents(runId) -> WorkflowEvent[]             //    裸数组
+  subscribe?
+}
 
 // workflow-runtime/src/types.ts:290
-export interface WorkflowRunStoreAdapterStore { loadRunState; saveRunState; deleteRun; appendEvents; readEvents; subscribeEvents? }
+export interface WorkflowRunStoreAdapterStore {   // ② runtime 的存储基础
+  loadRunState; saveRunState; deleteRun
+  appendEvents({ runId, expectedNextIndex, events }) -> { nextIndex }   // 批量
+  readEvents({ runId }) -> StoredWorkflowEvent[]                        // 带索引信封
+  subscribeEvents?
+}
 
 // workflow-runtime/src/types.ts:305
-export type WorkflowRunStoreAdapter = RunStore          // ← 一行别名，与上面那个 interface 无继承关系
+export type WorkflowRunStoreAdapter = RunStore    // ③ 别名，与 ② 无继承关系
 
 // workflow-runtime/src/types.ts:307
-export interface WorkflowExecutionStore extends WorkflowRunStoreAdapterStore { /* +19 个方法 */ }
+export interface WorkflowExecutionStore extends WorkflowRunStoreAdapterStore { /* +19 */ }
 ```
 
-两个 interface **语义等价、仅命名不同**：
+**①②不是同一个东西。** 差别在事件读写这一对：
 
-| core `RunStore` | runtime `WorkflowRunStoreAdapterStore` | 差异 |
+| ① core `RunStore` | ② `WorkflowRunStoreAdapterStore` | 实际差别 |
 | --- | --- | --- |
-| `getRunState(runId)` | `loadRunState(runId)` | 仅名字 |
-| `setRunState(runId, state)` | `saveRunState(args)` | 名字 + 参数打包 |
-| `deleteRun(runId, reason)` | `deleteRun(runId, reason)` | ✅ 相同 |
-| `appendEvent(runId, idx, event)` | `appendEvents(args)` | 名字 + 参数打包 |
-| `getEvents(runId)` | `readEvents(args)` | 名字 + 参数打包 |
-| `subscribe?(...)` | `subscribeEvents?` | 名字 |
+| `getRunState` | `loadRunState` | 仅命名 |
+| `setRunState` | `saveRunState(args)` | 命名 + 参数打包 |
+| `deleteRun(runId, reason)` | `deleteRun(runId, reason)` | ✅ 完全相同 |
+| `appendEvent`（单条） | `appendEvents`（**批量**，返回 `nextIndex`） | **语义差别** |
+| `getEvents` → `WorkflowEvent[]` | `readEvents` → `StoredWorkflowEvent[]`（**带 `eventIndex` / `createdAt` / `eventType` / `stepId`**） | **语义差别** |
+| `subscribe?` | `subscribeEvents?` | 同签名 |
 
-（连我们已实现的 `DeleteReason` 参数都跟它一致——不是拍脑袋加的。）
+`StoredWorkflowEvent`（`types.ts:50`）：
+
+```ts
+{ runId, eventIndex, eventType, stepId?, event, createdAt }
+```
+
+#### 那为什么会有两个？—— 迁移的桥
+
+关键证据是 `run-store-adapter.ts` 的 `createRunStoreAdapter`：
+
+```ts
+// runtime-driver.ts:723
+const runStore = createRunStoreAdapter(config.store, telemetry)
+```
+
+runtime 持有一个 `WorkflowExecutionStore`（新世界），却要把它**降格**成
+`RunStore`（旧世界）才能喂给 core 的 `runWorkflow`。适配器做的就是这件事：
+`loadRunState` ← `getRunState`、`appendEvents({events:[e]})` ← `appendEvent`、
+`readEvents(...).map(e => e.event)` ← `getEvents`（**丢弃索引信封**）。
+③ 那行别名的含义正是「适配器的**输出**必须是 `RunStore`」。
+
+**所以 ① 与 ② 是迁移前后两代形状在共存**，适配器是过渡层。
+
+#### 那两处「语义差别」谁真正需要？—— 没人
+
+这是决定我们要不要 ② 的关键。查 driver 的实际调用（`runtime-driver.ts`）：
+
+```
+releaseRunLease ×2  loadRunState ×2  deliverSignal ×2  createRun ×2
+scheduleTimer  markScheduleBucketStarted  loadRun  heartbeatRunLease
+deliverApproval  claimStaleRuns  claimRun  claimDueTimers  claimDueScheduleBuckets
+```
+
+**driver 完全不碰 `appendEvents` / `readEvents`**：
+
+- `eventIndex` 只有 store 内部实现与 `subscribe` 回调用它
+- 批量 append 的**唯一调用点**是适配器（塞单元素数组）
+- `createdAt` 只用于 store 内部排序 / 游标
+
+也就是说：那两处语义差别是 `ExecutionStore` 作为**独立存储契约**自己长出来的
+（游标分页、订阅索引），**不是 driver 逼出来的**。
 
 #### 我们的选择
 
 ```rust
 // workflow-runtime
-pub trait WorkflowExecutionStore: RunStore { /* +19 个方法 */ }
+pub trait WorkflowExecutionStore: RunStore { /* 扩展方法 */ }
 ```
 
-**不设 `WorkflowRunStoreAdapterStore` 的对应物。** 理由：
+**不设 ② 的对应物，也不写适配器。** 理由：
 
-1. **那层重复是 TS 的产物**。`export type X = Y` 零成本，所以上游能一行抹平。
-   Rust 的 trait 别名要 `#![feature(trait_alias)]`（至今 unstable）；
-   用 `trait A: B {}` 则是新 trait——**每个实现者都得多写一行空 `impl`**，
-   为纯名字差异付实现成本，不划算。
-2. **`RunStore` 已经是我们的 core 契约面**，被测试与文档锚定
-   （`DeleteReason` / `into_typed` / `RunState.error` 都挂它上面）。改名成
-   runtime 的词汇会让 core 朝上层倾斜。
-3. **supertrait 在 Rust 里是直接的**：`RunStore` 就是那 6 项基础层，
-   `WorkflowExecutionStore` 直接 `: RunStore` 扩展，不需要中间层。
+1. **② 存在的原因是 core 还在用旧形状**——那是上游**迁移期的成本**。我们不在
+   迁移中，把过渡态固化成常态没有收益。
+2. **那两处语义差别我们现在都不需要**：`eventIndex` = 数组位置（我们的 store
+   就是 append-only 数组）、`createdAt` = 事件自己的 `ts`、批量 = 引擎是单条
+   CAS append。
+3. **没有适配器可写**：适配器的唯一职责是「② → ①」降格。我们没有 ②，自然没有
+   这一步。core 的 `run_workflow` 直接吃 `RunStore`，而
+   `ExecutionStore: RunStore` 确保 runtime 的 store 也能喂进去——**supertrait
+   就已经免费做到了适配器做的事**。
 
-#### 命名不对称，以及为何保留
+**这是 Rust 相对 TS 的净收益**：TS 里 `ExecutionStore` 不是 `RunStore` 的子类型
+（结构类型 + 多出来的索引语义），所以需要运行时适配器；Rust 的 supertrait 让它
+天然可替换，不需要适配器。
 
-`RunStore`（无前缀）vs `WorkflowExecutionStore`（有前缀）在 Rust 里略不对称。
-**保留这个不对称**——它准确反映层级：`RunStore` 是通用 run store 契约，
-`WorkflowExecutionStore` 是 workflow 专属扩展。为了「看起来对称」去改
-`RunStore` 的名字，收益只是观感。
+#### 命名不对称，保留
 
-**这个对应关系已写进 `RunStore` 的文档注释**（`run_store/mod.rs`），说明上游
-那两个名字、我们为何只有一个。
+`RunStore`（无前缀）vs `WorkflowExecutionStore`（有前缀）略不对称。**保留**——
+它准确反映层级：前者是通用 run store 契约，后者是 workflow 专属扩展。
 
-#### 实现清单（上游 `ExecutionStore` 的 19 个方法，五组）
+对应关系写进了 `RunStore` 的文档注释（`run_store/mod.rs`）。
+
+#### 风险：将来做 DB store 时要改 trait
+
+索引与分页在「append-only 数组」下是免费的，但在 **Postgres / D1 这类后端**上
+会变成刚需（游标分页、按 index 查询）。
+
+**接受这个风险**，理由：现在还没有第二个 store 实现，为假想的第三个实现去设计
+索引形状是过度设计。等真做 DB store 时再加——那时改 trait **有具体依据**，
+是合理改动。
+
+#### 实现清单（上游 `ExecutionStore` 的扩展方法，五组）
 
 | 组 | 方法 |
 | --- | --- |
@@ -117,11 +175,26 @@ pub trait WorkflowExecutionStore: RunStore { /* +19 个方法 */ }
 
 注意两点：
 
-- **`heartbeatRunLease` 的存在说明 lease 要续租**，不是一次 claim 就完事
+- **`heartbeatRunLease` 说明 lease 要续租**，不是一次 claim 就完事
   （上游 `runtime-model.md:156`：runtime renews every third of `leaseMs`）。
-- **`markRunPaused` / `markRunFinished` / `markRunErrored` 是独立方法**，
-  不是「改 `RunState` 再 `save`」——上游把 run 状态转移也建模成了 store 的
-  原子操作。这意味着 `ExecutionStore` 比「`RunStore` 加几个查询」要重。
+- **`markRunPaused` / `markRunFinished` / `markRunErrored` 是独立方法**，不是
+  「改 `RunState` 再 save」——上游把 run 状态转移也建模成了 store 的原子操作。
+
+#### 附：本次判断失误的记录
+
+初版 D1 把 `WorkflowRunStoreAdapter`（③，真别名）与
+`WorkflowRunStoreAdapterStore`（②，独立 interface）**当成同一个东西**——两个
+名字只差一个 `Store` 后缀。据此推出「② 是 `RunStore` 的重复」，还做了一张
+「六项逐项对应」的表。
+
+那个表**有证据的外观但配对是错的**，所以「逐项对应」的结论也是假的。事实是
+② 在事件读写上有真实的语义差别（见上表）。
+
+教训：**名字前缀相同、只差后缀时，必须逐字核对，不能按「看起来一样」处理**。
+比「没查就下结论」更危险的是「查了但配对错了」——它带着证据的外观。
+
+D1 的结论（不设 ②）**没变**，但理由从「② 是重复」换成了「② 是迁移产物，
+且它的新增语义我们不需要」。
 
 ### D2. lease 放 store 还是放 runtime？
 
