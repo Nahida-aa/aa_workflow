@@ -774,12 +774,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
-        assert!(
-            out.error
-                .as_deref()
-                .unwrap()
-                .contains("payment gateway down")
-        );
+        assert!(out.error.unwrap().message.contains("payment gateway down"));
         assert_eq!(payment_gateway::attempts(), 3);
         let run_id = out.run_id.clone();
         let events_1 = store.get_events(&run_id).unwrap();
@@ -1265,7 +1260,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(out.status, RunStatus::Errored, "缺 readyAt 应 schema 报错");
-        let msg = out.error.unwrap();
+        let msg = out.error.unwrap().message;
         assert!(
             msg.contains("ready_at") || msg.contains("missing field"),
             "错误应指向字段路径: {msg}"
@@ -1294,7 +1289,7 @@ mod tests {
             RunStatus::Errored,
             "initialize 产物不符 state_schema 应报错"
         );
-        let err = out.error.unwrap();
+        let err = out.error.unwrap().message;
         assert!(
             err.contains("missing field") || err.contains("total") || err.contains("settle_events"),
             "错误应指向 state 形状: {err}"

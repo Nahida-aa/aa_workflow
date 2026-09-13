@@ -92,7 +92,12 @@ pub struct RunOutcome {
     pub run_id: String,
     pub status: RunStatus,
     pub output: Option<serde_json::Value>,
-    pub error: Option<String>,
+    /// 与 [`RunState::error`](crate::run_store::RunState) 是**同一个类型**——
+    /// 一次失败的 run 在「返回值」和「持久化信封」两处描述一致，不要只改一边。
+    ///
+    /// `RunError` 实现了 [`Display`](std::fmt::Display)（转发 `message`），
+    /// 所以 `warn!("{e}")` / `e.to_string()` 照常可用；想要错误名用 `.name`。
+    pub error: Option<RunError>,
 }
 
 /// Resolves which workflow definition drives a run, mirroring TanStack's
@@ -233,9 +238,8 @@ pub async fn run_workflow(
     let ctx = crate::define::WorkflowCtx::untyped(inner.clone());
     let handler_result = (active.handler)(ctx).await;
 
-    // `failure` 是结构化的（`RunState.error` 与 `RUN_ERRORED` 用它）；
-    // `RunOutcome.error` 对调用方仍给扁平字符串，因为 `RunOutcome` 本身没有
-    // TanStack 对端（他们的 `runWorkflow` 是 async generator，只吐事件）。
+    // `failure` 是结构化的（`RunState.error`、`RUN_ERRORED`、`RunOutcome.error`
+    // 三处同类型）。
     let (status, output, failure) = match handler_result {
         Ok(output) => (RunStatus::Finished, Some(output), None),
         Err(e) if e.downcast_ref::<StepHalt>().is_some() => (RunStatus::Finished, None, None),
@@ -278,7 +282,7 @@ pub async fn run_workflow(
         run_id,
         status,
         output,
-        error: failure.map(|(e, _)| e.message),
+        error: failure.map(|(e, _)| e),
     })
 }
 
@@ -299,7 +303,6 @@ fn init_failed(
     publisher: Option<&Arc<dyn Fn(&WorkflowEvent) + Send + Sync>>,
 ) -> Result<RunOutcome, WorkflowError> {
     let run_err = RunError::from_anyhow(err);
-    let msg = run_err.message.clone();
     run_state.status = RunStatus::Errored;
     run_state.error = Some(run_err.clone());
     run_state.updated_at = now_ms();
@@ -308,7 +311,7 @@ fn init_failed(
         publish(&WorkflowEvent::RunErrored {
             ts: now_ms(),
             run_id: run_id.to_string(),
-            error: run_err,
+            error: run_err.clone(),
             code: RunErrorCode::Validation,
         });
     }
@@ -316,7 +319,7 @@ fn init_failed(
         run_id: run_id.to_string(),
         status: RunStatus::Errored,
         output: None,
-        error: Some(msg),
+        error: Some(run_err),
     })
 }
 
@@ -402,7 +405,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
-        assert!(out.error.as_deref().unwrap().contains("cannot build state"));
+        assert!(out.error.unwrap().message.contains("cannot build state"));
         assert!(
             store.get_events("bad-init:r").unwrap().is_empty(),
             "init 失败不应留下任何事件"
@@ -436,9 +439,8 @@ mod tests {
         .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
         assert!(
-            out.error.as_deref().unwrap().contains("invalid type"),
-            "错误应来自 state 的 serde 形状校验，实际为 {:?}",
-            out.error
+            out.error.unwrap().message.contains("invalid type"),
+            "错误应来自 state 的 serde 形状校验"
         );
         assert!(
             store.get_events("bad-state:r").unwrap().is_empty(),
@@ -478,7 +480,7 @@ mod tests {
             .expect("终局事件应为 RunErrored");
         assert_eq!(code, RunErrorCode::Error);
         assert_eq!(code.as_str(), "error");
-        assert_eq!(err.message, "step `a` failed: boom");
+        assert_eq!(err.message, "boom");
     }
 
     #[tokio::test]
@@ -549,6 +551,70 @@ mod tests {
         assert_eq!(code, RunErrorCode::Validation);
         assert_eq!(code.as_str(), "validation_error");
         assert_eq!(err.message, "nope");
+    }
+
+    /// 一次失败的 run，在四处描述必须是**同一个** `RunError`：
+    /// `RunOutcome.error`（返回值）、`RunState.error`（信封）、
+    /// `RUN_ERRORED.error`（日志）、`StepAttempt.error`（step 级）。
+    /// 任何一处退回字符串都是退步，这个测试钉住它。
+    ///
+    /// 顺带验证 `RunError` 的 `Display` 转发 `message`——所以改成结构化之后
+    /// 调用方 `warn!("{e}")` 的写法不受影响。
+    #[tokio::test]
+    async fn one_failure_is_one_run_error_everywhere() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("one-error").handler(|ctx: WorkflowCtx| async move {
+            ctx.step(
+                "a",
+                |_sc: StepCtx| async move { anyhow::bail!("same failure") },
+            )
+            .await
+        });
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(json!({})).run_id("one:r"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let from_outcome = out.error.expect("RunOutcome.error");
+        let from_state = store
+            .get_run_state("one:r")
+            .unwrap()
+            .unwrap()
+            .error
+            .expect("RunState.error");
+
+        let events = store.get_events("one:r").unwrap();
+        let from_event = events
+            .iter()
+            .find_map(|e| match e {
+                WorkflowEvent::RunErrored { error, .. } => Some(error.clone()),
+                _ => None,
+            })
+            .expect("RUN_ERRORED.error");
+        let from_attempt = events
+            .iter()
+            .find_map(|e| match e {
+                WorkflowEvent::StepFailed { attempts, .. } => {
+                    attempts.first().and_then(|a| a.error.clone())
+                }
+                _ => None,
+            })
+            .expect("StepAttempt.error");
+
+        assert_eq!(
+            from_outcome, from_state,
+            "RunOutcome 与 RunState 应同类型同值"
+        );
+        assert_eq!(from_outcome, from_event, "与 RUN_ERRORED 应同类型同值");
+        assert_eq!(from_outcome, from_attempt, "与 StepAttempt 应同类型同值");
+        assert_eq!(from_outcome.message, "same failure");
+
+        // Display 转发 message —— 调用方 `format!("{e}")` 不受影响。
+        assert_eq!(from_outcome.to_string(), from_outcome.message);
     }
 
     #[test]
@@ -624,7 +690,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
-        assert!(out.error.as_deref().unwrap().contains("boom"));
+        assert!(out.error.unwrap().message.contains("boom"));
         assert_eq!(log.lock().unwrap().runs["b"], 1);
         let run_id = out.run_id.clone();
 

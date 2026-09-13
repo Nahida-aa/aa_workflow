@@ -352,7 +352,6 @@ where
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                     continue;
                 }
-                let msg = format!("step `{step_id}` failed: {err}");
                 let ev = WorkflowEvent::StepFailed {
                     ts: now_ms(),
                     run_id: inner.run_id.clone(),
@@ -366,13 +365,17 @@ where
                     StepState {
                         status: StepStatus::Failed,
                         result: None,
-                        error: Some(run_err),
+                        error: Some(run_err.clone()),
                         started_at: Some(started_at),
                         finished_at: Some(finished_at),
                     },
                 );
                 inner.publish(&ev);
-                return Err(anyhow::anyhow!(msg));
+                // 原样上抛，不加 `step `x` failed:` 前缀：step 身份已经在
+                // `step_id` 字段里（结构化），再包一层会让同一个错误的 message
+                // 在 step 层与 run 层变成两个值。TanStack 也是直接 rethrow
+                // （run-workflow.ts:822）。
+                return Err(err);
             }
         }
     }
@@ -1216,7 +1219,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
-        assert!(out.error.as_deref().unwrap().contains("boom"));
+        assert!(out.error.unwrap().message.contains("boom"));
         let events = store.get_events(&out.run_id).unwrap();
         let failed = events.iter().find_map(|e| match e {
             WorkflowEvent::StepFailed {
@@ -1252,7 +1255,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
-        assert!(out.error.as_deref().unwrap().contains("timed out"));
+        assert!(out.error.unwrap().message.contains("timed out"));
     }
 
     #[tokio::test]
@@ -2099,7 +2102,7 @@ mod tests {
             RunStatus::Aborted,
             "cancel 后 run 以 Aborted 终局"
         );
-        assert!(out.error.as_deref().unwrap().contains("aborted"));
+        assert_eq!(out.error.unwrap().name, "Aborted");
         assert!(out.output.is_none());
 
         let st = store.get_run_state("ca1").unwrap().unwrap();
