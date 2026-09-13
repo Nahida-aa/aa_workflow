@@ -125,3 +125,64 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
   "就地重跑失败段"罕有。
 - `continue_from` 的截断是"删"而非"追加遮盖"，呼应"新 run 惯例"，但本地
   pipeline（产物在磁盘）接受就地重跑作为一等 UX。
+
+## 上游的演化史：为什么 runtime 层是后来才有的
+
+对照我们在 [README 的已知边界](../README.md) 里承认的缺口（无 lease / 无 sweep /
+无 schedules / 无 timer 索引），值得看一眼上游是怎么长出这一层的——它解释了
+「core 稳定后再补 runtime」是个正常节奏，而不是我们落后了。
+
+调查方法：`git log --diff-filter=A -- packages/<name>/` 追每个包的诞生 commit。
+
+### 时间线（41 个 commit，2026-05-20 ~ 07-21）
+
+| 阶段 | 时间 | 内容 |
+| ---- | ---- | ---- |
+| A. 从 ai-orchestration 抽出 | 05-20 ~ 05-22 | `965a8a5` 抽出核心 → `4f64b9c` 闭包引擎重写 → `c98f260` 发 0.0.1 |
+| B. **runtime 诞生** | 05-24 ~ 05-28 | `f3f6381` 补发布面 → `5d05fa8` runtime + adapters + 全套 docs |
+| C. adapters 扩张 | 05-29 ~ 05-30 | Cloudflare/Railway adapter、store schema、schema primitives |
+| D. 收尾加固 | 07-20 ~ 07-21 | runtime deadline + observability、lease 恢复加固 |
+
+**最值得注意的是 `4f64b9c`**（05-20，带 `!` 的破坏性变更）：
+`rewrite engine around closure handler + ctx-as-arg + middleware`——
+「代码即 DAG」这套内核在**项目出生当天**就定下来了，不是后来演化出来的。
+我们 [第二轮采纳 handler 重放](#为什么第二轮把执行模型换成-handler-重放) 对齐的
+正是这一刻的设计。
+
+### runtime 是 `5d05fa8`（2026-05-28），距 core 0.0.1 六天
+
+它不是一个包单独出生，那一个 commit 同时加了：
+
+```
+packages/workflow-runtime/                    runtime 本体（lease / sweep / timer / schedule）
+packages/workflow-vercel/                     host adapter ×4
+packages/workflow-netlify/
+packages/workflow-cloudflare/                 （次日 ba9cc31）
+packages/workflow-railway/
+packages/workflow-store-drizzle-postgres/     store adapter
+docs/api/runtime.md + host-adapters.md        runtime 与 adapter 的 API 文档
+docs/guide/runtime-model.md + deployment.md   执行模型与部署指南
+examples/deployment-pocs/                     各平台部署示例
+```
+
+动机在 core 自己的文档里写着：core「intentionally not a scheduler, queue,
+database adapter, or deployment adapter」（`docs/guide/runtime-model.md:33`），
+把「谁来跑、什么时候跑、崩溃了谁接手」留空；runtime 就是来补执行所有权层的。
+
+**对我们的启示**：上游也是先让 core 稳定、再补这一层，间隔 6 天且是一次性大礼包。
+我们缺的那块在结构上是合理的阶段性缺位，不是设计缺陷——但补的时候应该照这个
+切分来（runtime 是独立包，不下沉进 core）。
+
+### 文档节奏与我们有别
+
+上游的 docs 常**先于**实现：`30e46ba docs(research): add SCHEDULING.md —
+cron landscape + future package shape`（05-21）写的是「未来的包形态」，
+7 天后 `5d05fa8` 才把 runtime 真做出来。先写清要什么，再动手。
+
+我们的 `docs/tanstack-alignment.md` 相反，是**事后**记录决策；README 更晚。
+这不是错，但补 runtime 层时值得借上游的节奏：先落一份「要什么」，
+再写代码。
+
+（另一个容易误解的点：本仓 `examples/` 在初始 commit 就有了，但那是 TanStack
+library template 的脚手架产物——React/Solid 样板应用，与 workflow 无关。
+真正装 workflow 内容的 examples 从 `5d05fa8` 才出现。）

@@ -289,6 +289,11 @@ docs/tanstack-alignment.md  对齐决策记录（含推翻第一轮的论证）
 - **timer 索引**：`waiting_for.deadline` 有投影，但没有按时间索引的唤醒面，host
   只能轮询。
 
+这一层在上游也是**后补的**：core 的 0.0.1 之后六天，才由 `5d05fa8` 一次性带出
+runtime + 各 host/store adapter。所以这是阶段性缺位而非设计缺陷；补的时候应照
+上游的切分保持独立包，不下沉进 core。演化史调查见
+[`docs/tanstack-alignment.md`](docs/tanstack-alignment.md)。
+
 其他缺口：
 
 - **没有生产级 store**：core 只有 `InMemoryStore`；`FileRunStore` 的 `append_event`
