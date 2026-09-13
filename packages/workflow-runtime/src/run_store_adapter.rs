@@ -10,12 +10,12 @@
 //!
 //! | core [`RunStore`] | 本 trait | 差别 |
 //! | ----------------- | -------- | ---- |
-//! | `get_run_state` | [`load_run_state`](RunStoreAdapterStore::load_run_state) | 仅命名 |
-//! | `set_run_state` | [`save_run_state`](RunStoreAdapterStore::save_run_state) | 命名 + 参数打包 |
-//! | `delete_run(id, reason)` | [`delete_run`](RunStoreAdapterStore::delete_run) | ✅ 相同 |
-//! | `append_event`（单条） | [`append_events`](RunStoreAdapterStore::append_events)（批量，返回 next_index） | **语义差别** |
-//! | `get_events` → 裸数组 | [`read_events`](RunStoreAdapterStore::read_events) → 带索引信封 | **语义差别**（含 `from_index` 游标） |
-//! | `subscribe` | [`subscribe_events`](RunStoreAdapterStore::subscribe_events) | 同签名 |
+//! | `get_run_state` | [`load_run_state`](WorkflowRunStoreAdapterStore::load_run_state) | 仅命名 |
+//! | `set_run_state` | [`save_run_state`](WorkflowRunStoreAdapterStore::save_run_state) | 命名 + 参数打包 |
+//! | `delete_run(id, reason)` | [`delete_run`](WorkflowRunStoreAdapterStore::delete_run) | ✅ 相同 |
+//! | `append_event`（单条） | [`append_events`](WorkflowRunStoreAdapterStore::append_events)（批量，返回 next_index） | **语义差别** |
+//! | `get_events` → 裸数组 | [`read_events`](WorkflowRunStoreAdapterStore::read_events) → 带索引信封 | **语义差别**（含 `from_index` 游标） |
+//! | `subscribe` | [`subscribe_events`](WorkflowRunStoreAdapterStore::subscribe_events) | 同签名 |
 //!
 //! 上游之所以在 core 之上另立这一层，是因为它**正处于迁移中**：core 还在用
 //! `RunStore`，runtime 已改用这一套，`run-store-adapter.ts` 的
@@ -44,11 +44,24 @@ use crate::types::{
 /// 执行存储的基础契约。对齐上游 `WorkflowRunStoreAdapterStore`
 /// （`workflow-runtime/src/types.ts:290`，六个方法）。
 ///
-/// 实现者实现本 trait + 扩展层的 `WorkflowExecutionStore` 即可被 runtime 驱动；
-/// 同时因为 `WorkflowExecutionStore` 继承它、而 core 的 `run_workflow` 只要求
+/// # 名字照搬上游，尽管拗口
+///
+/// 这个名字读起来是「Store 的 Adapter 的 Store」，且 `Adapter` 那半截在我们
+/// 这里**没有对应物**（我们没有适配器，见下）。之所以逐字沿用，是因为本项目
+/// 一贯的命名策略是对齐上游：名字难读是一次性成本，对不上上游是持续成本——
+/// 每次读上游代码都要在脑子里做映射。
+///
+/// 它的**定位**才是要紧的：这一层是「runtime 需要的存储基础面」，与 core 的
+/// [`RunStore`](workflow_core::RunStore) 形状相近但**不同**（见模块文档的对照
+/// 表），差别集中在事件读写（批量 + 索引信封 + 游标）。
+///
+/// # 实现者要做什么
+///
+/// 实现本 trait + 扩展层的 `WorkflowExecutionStore` 即可被 runtime 驱动；同时
+/// 因为 `WorkflowExecutionStore` 继承它、而 core 的 `run_workflow` 只要求
 /// `RunStore`，实现者若也实现 `RunStore` 就能两处通用——**适配在 Rust 里由
 /// supertrait 免费完成，不需要上游那个 `createRunStoreAdapter`**。
-pub trait RunStoreAdapterStore: Send + Sync {
+pub trait WorkflowRunStoreAdapterStore: Send + Sync {
     /// 读 run 元数据信封。`None` = 该 run 不存在。
     fn load_run_state(&self, run_id: &RunId) -> anyhow::Result<Option<RunState>>;
 
@@ -71,7 +84,7 @@ pub trait RunStoreAdapterStore: Send + Sync {
     fn read_events(&self, args: ReadEventsArgs) -> anyhow::Result<Vec<StoredWorkflowEvent>>;
 
     /// 订阅新事件的推送。返回取消订阅的句柄；不支持的实现返回 `None`，
-    /// 调用方退化为轮询 [`read_events`](RunStoreAdapterStore::read_events)。
+    /// 调用方退化为轮询 [`read_events`](WorkflowRunStoreAdapterStore::read_events)。
     ///
     /// 与 core 的 `RunStore::subscribe` 同签名（对齐上游 `subscribeEvents?`）。
     fn subscribe_events(

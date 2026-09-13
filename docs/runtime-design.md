@@ -42,7 +42,7 @@ runtime 就是来补这块执行所有权层。上游 runtime 的职责（`runti
 
 ## 决策点
 
-### D1. `WorkflowExecutionStore` 的父契约是什么？—— **已定：`ExecutionStore: RunStoreAdapterStore`，不写适配器**
+### D1. `WorkflowExecutionStore` 的父契约是什么？—— **已定：`ExecutionStore: WorkflowRunStoreAdapterStore`，不写适配器**
 
 #### 上游的实际结构（三个名字，容易看错）
 
@@ -127,10 +127,10 @@ deliverApproval  claimStaleRuns  claimRun  claimDueTimers  claimDueScheduleBucke
 
 ```rust
 // workflow-runtime/src/run_store_adapter.rs
-pub trait RunStoreAdapterStore: Send + Sync { /* 6 个方法，照 ② 逐字对齐 */ }
+pub trait WorkflowRunStoreAdapterStore: Send + Sync { /* 6 个方法，照 ② 逐字对齐 */ }
 
 // workflow-runtime/src/lib.rs
-pub trait WorkflowExecutionStore: RunStoreAdapterStore { /* 扩展方法，待定 */ }
+pub trait WorkflowExecutionStore: WorkflowRunStoreAdapterStore { /* 扩展方法，待定 */ }
 ```
 
 **立 ②，不立 ③（那个真别名），也不写适配器。** 三条理由：
@@ -146,20 +146,26 @@ pub trait WorkflowExecutionStore: RunStoreAdapterStore { /* 扩展方法，待�
 3. **③ 与适配器确实不需要**。③ 是 TS 的 `type` 别名，Rust 里无廉价对应
    （`trait_alias` 仍 unstable），且它的唯一用途是标注「适配器输出类型」；
    适配器的职责是「② → ①」降格——而 supertrait 关系（
-   `WorkflowExecutionStore: RunStoreAdapterStore`）已经让实现者天然可被 core
+   `WorkflowExecutionStore: WorkflowRunStoreAdapterStore`）已经让实现者天然可被 core
    使用，**在 Rust 里适配是免费的**。
 
 **这是 Rust 相对 TS 的净收益**：TS 里 `ExecutionStore` 不是 `RunStore` 的子类型
 （结构类型），所以需要运行时适配器；Rust 的 supertrait 让它天然可替换。
 
-#### 命名不对称，保留
+#### 命名：逐字沿用上游，尽管拗口
 
-`RunStore`（core，无前缀）vs `RunStoreAdapterStore` / `WorkflowExecutionStore`
-（runtime，有前缀）略不对称。**保留**——它准确反映层级：前者是引擎 replay 的
-最小契约，后两者是 runtime 的存储面。
+`RunStore`（core，无前缀）vs `WorkflowRunStoreAdapterStore` /
+`WorkflowExecutionStore`（runtime，有前缀）。
+
+`WorkflowRunStoreAdapterStore` 这个名字读起来是「Store 的 Adapter 的 Store」，
+而且 `Adapter` 那半截**在我们这里没有对应物**（我们没有适配器）。曾经考虑
+简化为 `RunStoreAdapterStore`，被否——本项目一贯的命名策略是对齐上游
+（`RunStore` / `RunState` / `WorkflowEvent` / `WorkflowExecutionStore` 全是
+照搬）。**名字难读是一次性成本，对不上上游是持续成本**——每次读上游代码都要
+在脑子里做映射。理由写进了 trait 自己的文档注释。
 
 对应关系写进了 `RunStore` 的文档注释（`run_store/mod.rs`）与
-`RunStoreAdapterStore` 的模块文档（`run_store_adapter.rs`）。
+`WorkflowRunStoreAdapterStore` 的模块文档（`run_store_adapter.rs`）。
 
 #### 风险：将来做 DB store 时要改 trait
 

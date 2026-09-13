@@ -23,23 +23,23 @@
 //!
 //! # 当前状态
 //!
-//! 基础契约（[`RunStoreAdapterStore`]）与类型已立，[`WorkflowExecutionStore`]
+//! 基础契约（[`WorkflowRunStoreAdapterStore`]）与类型已立，[`WorkflowExecutionStore`]
 //! 的扩展方法**尚未定义**——它们依赖 `docs/runtime-design.md` 的 D2（lease
 //! 位置）与 D4（sweep 边界）敲定。
 //!
 //! # 层次
 //!
 //! ```text
-//! workflow_core::RunStore                     引擎 replay 用（6 个方法）
+//! workflow_core::RunStore          引擎 replay 用（6 个方法）
 //!   ↕ 形状相近但不同（见 run_store_adapter 模块文档）
-//! RunStoreAdapterStore                        本 crate 的存储基础（6 个方法）
-//!   └── WorkflowExecutionStore                扩展：lease / timer / schedule / 查询
+//! WorkflowRunStoreAdapterStore     本 crate 的存储基础（6 个方法）
+//!   └── WorkflowExecutionStore     扩展：lease / timer / schedule / 查询
 //! ```
 
 pub mod run_store_adapter;
 pub mod types;
 
-pub use run_store_adapter::RunStoreAdapterStore;
+pub use run_store_adapter::WorkflowRunStoreAdapterStore;
 pub use types::{
     AppendEventsArgs, AppendEventsResult, LeaseOwner, LoadedExecution, ReadEventsArgs, RunId,
     RunSummary, RunTimeline, SaveRunStateArgs, StoredWorkflowEvent, WorkflowExecution, WorkflowId,
@@ -48,16 +48,16 @@ pub use types::{
 
 /// 运行时的执行存储契约。
 ///
-/// **继承 [`RunStoreAdapterStore`]**，与上游结构一致
+/// **继承 [`WorkflowRunStoreAdapterStore`]**，与上游结构一致
 /// （`WorkflowExecutionStore extends WorkflowRunStoreAdapterStore`）。
 ///
 /// # 层次关系
 ///
 /// ```text
-/// workflow_core::RunStore                 引擎 replay 用
+/// workflow_core::RunStore          引擎 replay 用
 ///   ↕ 形状相近但不同 —— 见 run_store_adapter 模块文档
-/// RunStoreAdapterStore                    本 crate 的存储基础（元数据 + 事件日志）
-///   └── WorkflowExecutionStore            本 trait：lease / timer / schedule / 查询
+/// WorkflowRunStoreAdapterStore     本 crate 的存储基础（元数据 + 事件日志）
+///   └── WorkflowExecutionStore     本 trait：lease / timer / schedule / 查询
 /// ```
 ///
 /// # 为什么需要比基础层更多
@@ -77,13 +77,19 @@ pub use types::{
 /// 上游 core 侧叫 `RunStore`，runtime 侧另起了一套 `…AdapterStore` +
 /// `WorkflowExecutionStore`，中间还有一行 `export type WorkflowRunStoreAdapter
 /// = RunStore`。**那层重复是迁移的产物**（core 用旧形状、runtime 用新形状，
-/// `createRunStoreAdapter` 负责降格）。详见 [`RunStoreAdapterStore`] 的文档与
+/// `createRunStoreAdapter` 负责降格）。详见 [`WorkflowRunStoreAdapterStore`] 的文档与
 /// `docs/runtime-design.md` 的 D1。
 ///
-/// 我们照上游立 [`RunStoreAdapterStore`]，但**不需要**那个真别名
-/// （`WorkflowRunStoreAdapter`）——它是 TS 的 `type` 别名，Rust 里无廉价对应，
-/// 且它的唯一用途是标注适配器输出类型，而我们不需要适配器：supertrait 关系
-/// 已经让本 trait 的实现天然可用于 core 的 `run_workflow`。
+/// 我们照上游立 [`WorkflowRunStoreAdapterStore`]，名字也**逐字沿用**——尽管它
+/// 读起来拗口（「Store 的 Adapter 的 Store」），且 `Adapter` 那半截在我们这里
+/// 没有对应物。理由是本项目一贯的选择：命名对齐上游（`RunStore` / `RunState` /
+/// `WorkflowEvent` / `WorkflowExecutionStore` 全是照搬）。名字难读是一次性成本，
+/// 对不上上游是持续成本——每次读上游代码都要在脑子里做映射。
+///
+/// 另：那个真别名（`WorkflowRunStoreAdapter = RunStore`）**不设**——它是 TS 的
+/// `type` 别名，Rust 里无廉价对应，且它的唯一用途是标注适配器输出类型，而我们
+/// 不需要适配器：supertrait 关系已经让本 trait 的实现天然可用于 core 的
+/// `run_workflow`。
 ///
 /// # 方法集（未实现，待 D2 / D4 敲定）
 ///
@@ -101,4 +107,4 @@ pub use types::{
 /// 注意：**不要照抄全集**。哪些是当前形态真正需要的，由
 /// `docs/runtime-design.md` 的 D5 按形态判断——例如 `schedule*` 三件套只在
 /// 需要 cron 时才要。
-pub trait WorkflowExecutionStore: RunStoreAdapterStore {}
+pub trait WorkflowExecutionStore: WorkflowRunStoreAdapterStore {}
