@@ -35,7 +35,11 @@ impl fmt::Display for StoreError {
 
 impl std::error::Error for StoreError {}
 
-/// 落盘的错误（对齐 TanStack `SerializedError`，`types.ts:16`）。
+/// 跨进程序列化的错误（对齐 TanStack `SerializedError`，`types.ts:16`）。
+///
+/// 「序列化」不等于「持久化」：它可能进 `RunState.error`，也可能只随事件投给
+/// publisher。存不存、存哪儿，是 [`RunStore`](crate::run_store::RunStore)
+/// 实现者的事。
 ///
 /// 两处刻意不对等：
 /// - **没有 `stack`**。JS 的 `Error.stack` 在 Rust 无对应物：`anyhow` 的

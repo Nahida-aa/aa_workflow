@@ -510,7 +510,7 @@ mod tests {
         assert_eq!(err.name, "Aborted");
     }
 
-    /// `initialize` 失败：publish `validation_error`，但**不落盘**（对齐
+    /// `initialize` 失败：publish `validation_error`，但**不进事件日志**（对齐
     /// TanStack 的 `emit` 而非 `emitAndAppend`）。
     #[tokio::test]
     async fn init_failure_publishes_validation_code_without_appending() {

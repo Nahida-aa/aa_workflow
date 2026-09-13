@@ -69,8 +69,11 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
 
 事件分两层：
 
-- **observability-only（不落盘，走 publisher）**：`RunStarted`、`StepStarted`、`StepProgress`；
-- **checkpoint（落盘，CAS append）**：`StepFinished`、`StepFailed`、`RunFinished`、`RunErrored`。
+- **observability-only（不进日志，走 publisher）**：`RunStarted`、`StepStarted`、`StepProgress`；
+- **checkpoint（进日志，CAS append）**：`StepFinished`、`StepFailed`、`RunFinished`、`RunErrored`。
+
+「进日志」不等于「持久化」：日志怎么存由 [`RunStore`](packages/workflow-core/src/run_store/mod.rs)
+实现决定，`InMemoryStore` 进程一退就没了。
 
 ## 为什么第二轮把执行模型换成 handler 重放
 

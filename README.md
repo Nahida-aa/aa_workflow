@@ -120,10 +120,11 @@ let outcome = run_workflow(
 
 ## 耐久原语
 
-`ctx` 上所有会产生 checkpoint 的原语。持久到哪儿由 `RunStore` 实现决定——内存、
-本地文件、SQL 数据库、云 KV 都可能（TanStack 侧就有 drizzle-postgres 与
-Cloudflare D1 的 store adapter），引擎不假定介质，也不假定一定有磁盘。它保证的
-只是「进事件日志、参与 replay」。
+`ctx` 上所有会产生 checkpoint 的原语。引擎只保证「进事件日志、参与 replay」；
+**日志存在哪、存不存住，由 `RunStore` 实现决定**——`InMemoryStore` 进程一退就
+没了，`FileRunStore` 存文件，将来可能是 SQL 库或云 KV。core 不假定介质，也不
+假定数据一定持久。
+
 key **必填**（确定性 / 可重入所需，与 TanStack 的可选 `id` 不同）。
 
 | 方法 | 语义 |
