@@ -133,7 +133,7 @@ pub trait WorkflowRunStoreAdapterStore: Send + Sync { /* 6 个方法，照 ② �
 pub trait WorkflowExecutionStore: WorkflowRunStoreAdapterStore { /* 扩展方法，待定 */ }
 ```
 
-**立 ②，不立 ③（那个真别名），也不写适配器。** 三条理由：
+**立 ②，不立 ③（那个真别名），也不写那个转换函数。** 三条理由：
 
 1. **② 是 `ExecutionStore` 的依赖**。`WorkflowExecutionStore extends
    WorkflowRunStoreAdapterStore` 意味着扩展层的所有事件相关方法（
@@ -143,14 +143,48 @@ pub trait WorkflowExecutionStore: WorkflowRunStoreAdapterStore { /* 扩展方法
 2. **事件索引与游标是跨进程 / DB store 的基础**。`InMemoryStore` 里
    `event_index` 等于数组下标，看不出价值；但 Postgres / D1 store 要靠它分页
    与按位查询。先立形状，实现可以晚。
-3. **③ 与适配器确实不需要**。③ 是 TS 的 `type` 别名，Rust 里无廉价对应
+3. **③ 与那个转换函数确实不需要**。③ 是 TS 的 `type` 别名，Rust 里无廉价对应
    （`trait_alias` 仍 unstable），且它的唯一用途是标注「适配器输出类型」；
-   适配器的职责是「② → ①」降格——而 supertrait 关系（
-   `WorkflowExecutionStore: WorkflowRunStoreAdapterStore`）已经让实现者天然可被 core
-   使用，**在 Rust 里适配是免费的**。
+   适配器的职责是「② → ①」降格——我们不做迁移，没有两代形状，所以不需要这个
+   转换函数。
 
-**这是 Rust 相对 TS 的净收益**：TS 里 `ExecutionStore` 不是 `RunStore` 的子类型
-（结构类型），所以需要运行时适配器；Rust 的 supertrait 让它天然可替换。
+（注：我曾用「driver 不用那两处新语义」论证 ② 不需要——**那个论据是错的**，
+它只回答了「driver 需不需要」，而问题是「`ExecutionStore` 需不需要」。见上面
+理由 1。）
+
+**但「不需要转换函数」不等于「适配是免费的」——这一点初版写错了。**
+
+实测（编译期验证）：把 `&dyn WorkflowExecutionStore` 传给要 `&dyn RunStore`
+的函数：
+
+```
+error[E0308]: mismatched types
+   expected trait `RunStore`, found trait `WorkflowExecutionStore`
+```
+
+原因：`WorkflowExecutionStore: WorkflowRunStoreAdapterStore` 这条继承链**与
+`RunStore` 毫无关系**。supertrait 只保证「`WorkflowRunStoreAdapterStore` 是
+父 trait」，不保证任何 `RunStore` 关系。
+
+**实际后果**：想让同一个类型既能被 runtime 驱动、又能喂给 core 的
+`run_workflow`（入参是 `Arc<dyn RunStore>`），必须**两套都实现**：
+
+- `RunStore` 的 6 个方法（`get_run_state` / `append_event` / …）
+- `WorkflowRunStoreAdapterStore` 的 6 个方法（`load_run_state` / `append_events` / …）
+- 加上扩展层
+
+两套是**平行的**，没有自动转换。我们省掉的是**上游那个转换函数**，
+**不是实现工作量**——上游的实现者只需写 ②，转换由库提供；我们的实现者要多写
+① 的 6 个方法。
+
+这是**用实现者的负担换掉一个转换函数**。是否划算取决于实现者数量：
+- 现在（0 个实现）无法判断；
+- 若将来实现者少（1–2 个），这笔交换是亏的——上游那种「写 ② + 库给转换」更省；
+- 若将来实现者多，或需要 `dyn RunStore` 与 `dyn ExecutionStore` 并存，
+  则两套实现更直接（无转换开销、无类型擦除）。
+
+**待定项**：这条要在实现第一个 store 时复核（D2 一并）。若发现必须写两遍
+6 个方法太笨重，可考虑改回「只实现 ② + 提供转换函数」的上游形态。
 
 #### 命名：逐字沿用上游，尽管拗口
 

@@ -157,10 +157,16 @@ impl DeleteReason {
 ///   有真实差别（批量 `appendEvents`、返回带 `eventIndex` / `createdAt` 的
 ///   `StoredWorkflowEvent`）。它存在是因为**上游正在迁移中**——core 还在用旧的
 ///   `RunStore`，runtime 已用新的，`createRunStoreAdapter` 负责把新的降格成
-///   旧的。我们不在迁移中，且那两处新语义 driver 根本不使用，故不引入。
+///   旧的。
 ///
-/// 于是 runtime 的扩展 trait 直接继承本 trait（`WorkflowExecutionStore: RunStore`），
-/// **不设中间层，也不需要适配器**——supertrait 已经免费做到了适配器做的事。
+/// 于是 runtime 的扩展 trait 继承的是 `WorkflowRunStoreAdapterStore`，
+/// **不经过本 trait**（`WorkflowExecutionStore: WorkflowRunStoreAdapterStore`）。
+/// 两者是**平行的两套方法**：`load_run_state` vs `get_run_state`、
+/// `append_events` vs `append_event`，没有自动转换关系。
+///
+/// ⚠️ **要喂给 core 的 `run_workflow`，实现者必须额外 `impl RunStore`**：
+/// 该函数的入参是 `Arc<dyn RunStore>`（具体 trait 对象），而 supertrait 只保证
+/// `WorkflowRunStoreAdapterStore` 的父关系，跟本 trait 无关。
 /// 完整论证见 `docs/runtime-design.md` 的 D1。
 pub trait RunStore: Send + Sync {
     fn get_run_state(&self, run_id: &str) -> Result<Option<RunState>, StoreError>;

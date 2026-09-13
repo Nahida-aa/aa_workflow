@@ -47,9 +47,9 @@ use crate::types::{
 /// # 名字照搬上游，尽管拗口
 ///
 /// 这个名字读起来是「Store 的 Adapter 的 Store」，且 `Adapter` 那半截在我们
-/// 这里**没有对应物**（我们没有适配器，见下）。之所以逐字沿用，是因为本项目
-/// 一贯的命名策略是对齐上游：名字难读是一次性成本，对不上上游是持续成本——
-/// 每次读上游代码都要在脑子里做映射。
+/// 这里**没有对应物**（我们不做迁移，不写那个转换函数，见下）。之所以逐字
+/// 沿用，是因为本项目一贯的命名策略是对齐上游：名字难读是一次性成本，对不上
+/// 上游是持续成本——每次读上游代码都要在脑子里做映射。
 ///
 /// 它的**定位**才是要紧的：这一层是「runtime 需要的存储基础面」，与 core 的
 /// [`RunStore`](workflow_core::RunStore) 形状相近但**不同**（见模块文档的对照
@@ -57,10 +57,18 @@ use crate::types::{
 ///
 /// # 实现者要做什么
 ///
-/// 实现本 trait + 扩展层的 `WorkflowExecutionStore` 即可被 runtime 驱动；同时
-/// 因为 `WorkflowExecutionStore` 继承它、而 core 的 `run_workflow` 只要求
-/// `RunStore`，实现者若也实现 `RunStore` 就能两处通用——**适配在 Rust 里由
-/// supertrait 免费完成，不需要上游那个 `createRunStoreAdapter`**。
+/// 实现本 trait + 扩展层的 `WorkflowExecutionStore` 即可被 runtime 驱动。
+///
+/// ⚠️ **若还想喂给 core 的 `run_workflow`，必须另外 `impl RunStore`**：那个
+/// 函数要 `Arc<dyn RunStore>`，而本 trait 的继承链
+/// （`WorkflowExecutionStore: WorkflowRunStoreAdapterStore`）**与 `RunStore`
+/// 无关**。两套是平行的方法（`load_run_state` vs `get_run_state`、
+/// `append_events` vs `append_event`），没有自动转换。实测：
+/// `dyn WorkflowExecutionStore` 传给要 `&dyn RunStore` 的函数报
+/// `E0308: mismatched types`。
+///
+/// 上游用 `createRunStoreAdapter` 在两者间做形状转换；我们省掉的是**那个转换
+/// 函数**（因为可以两套都直接实现），**不是实现工作量**。
 pub trait WorkflowRunStoreAdapterStore: Send + Sync {
     /// 读 run 元数据信封。`None` = 该 run 不存在。
     fn load_run_state(&self, run_id: &RunId) -> anyhow::Result<Option<RunState>>;
@@ -97,3 +105,74 @@ pub trait WorkflowRunStoreAdapterStore: Send + Sync {
         None
     }
 }
+
+/// 运行时的执行存储契约。
+///
+/// **继承 [`WorkflowRunStoreAdapterStore`]**，与上游结构一致
+/// （`WorkflowExecutionStore extends WorkflowRunStoreAdapterStore`）。
+///
+/// # 层次关系
+///
+/// ```text
+/// workflow_core::RunStore          引擎 replay 用
+///   ↕ 形状相近但不同 —— 见 run_store_adapter 模块文档
+/// WorkflowRunStoreAdapterStore     本 crate 的存储基础（元数据 + 事件日志）
+///   └── WorkflowExecutionStore     本 trait：lease / timer / schedule / 查询
+/// ```
+///
+/// # 为什么需要比基础层更多
+///
+/// 基础层的 6 个方法只够**读写**：run 元数据信封 + append-only 事件日志。
+/// serverless / 多 worker 还需要（上游 `runtime-model.md:72`）：
+///
+/// - **原子认领与 lease** —— 每次调用都是新进程，必须防止两个 worker 同时
+///   驱同一个 run；且 lease 要**续租**（`heartbeat`），不是一次 claim 就完事
+/// - **timer 索引** —— 无进程常驻时，到期的 sleep 只能由外部 sweep 认领投递
+/// - **run 状态转移作为原子操作** —— 不是「改 `RunState` 再 save」
+/// - **schedule 定义与分桶**
+/// - **list / timeline** —— 无进程内状态可查，全部走 store
+///
+/// # 关于上游那三个名字
+///
+/// 上游 core 侧叫 `RunStore`，runtime 侧另起了一套 `…AdapterStore` +
+/// `WorkflowExecutionStore`，中间还有一行 `export type WorkflowRunStoreAdapter
+/// = RunStore`。**那层重复是迁移的产物**（core 用旧形状、runtime 用新形状，
+/// `createRunStoreAdapter` 负责降格）。详见 [`WorkflowRunStoreAdapterStore`] 的文档与
+/// `docs/runtime-design.md` 的 D1。
+///
+/// 我们照上游立 [`WorkflowRunStoreAdapterStore`]，名字也**逐字沿用**——尽管它
+/// 读起来拗口（「Store 的 Adapter 的 Store」），且 `Adapter` 那半截在我们这里
+/// 没有对应物。理由是本项目一贯的选择：命名对齐上游（`RunStore` / `RunState` /
+/// `WorkflowEvent` / `WorkflowExecutionStore` 全是照搬）。名字难读是一次性成本，
+/// 对不上上游是持续成本——每次读上游代码都要在脑子里做映射。
+///
+/// 另：那个真别名（`WorkflowRunStoreAdapter = RunStore`）**不设**——它是 TS 的
+/// `type` 别名，Rust 里无廉价对应，且它的唯一用途是标注适配器输出类型。
+///
+/// ⚠️ **但「不需要适配器」不等于「适配是免费的」**：core 的 `run_workflow`
+/// 入参是 `Arc<dyn RunStore>`，而本 trait 的继承链是
+/// `WorkflowExecutionStore: WorkflowRunStoreAdapterStore`——**与 `RunStore` 无
+/// 关**。想让同一个类型既能被 runtime 驱动、又能喂给 core，必须**两套都实现**
+/// （`RunStore` 的 6 个方法 + 这里的 6 个 + 扩展方法）。
+///
+/// 上游用 `createRunStoreAdapter` 做形状转换，我们省掉的是**那个转换函数**，
+/// 不是**实现工作量**。实测证据：`dyn WorkflowExecutionStore` 传给要
+/// `&dyn RunStore` 的函数会报 `E0308: mismatched types`。
+///
+/// # 方法集（未实现，待 D2 / D4 敲定）
+///
+/// 上游的扩展方法分六组，实现前先按组确认范围：
+///
+/// | 组 | 方法 |
+/// | --- | --- |
+/// | run 生命周期 | createRun / loadRun / loadExecution / markRunPaused / markRunFinished / markRunErrored |
+/// | lease | claimRun / heartbeatRunLease / releaseRunLease / claimStaleRuns |
+/// | timer | scheduleTimer / claimDueTimers |
+/// | 投递 | deliverSignal / deliverApproval |
+/// | schedule | upsertSchedule / claimDueScheduleBuckets / markScheduleBucketStarted |
+/// | 查询 | listRuns / getRunTimeline |
+///
+/// 注意：**不要照抄全集**。哪些是当前形态真正需要的，由
+/// `docs/runtime-design.md` 的 D5 按形态判断——例如 `schedule*` 三件套只在
+/// 需要 cron 时才要。
+pub trait WorkflowExecutionStore: WorkflowRunStoreAdapterStore {}
