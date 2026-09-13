@@ -173,18 +173,34 @@ error[E0308]: mismatched types
 - `WorkflowRunStoreAdapterStore` 的 6 个方法（`load_run_state` / `append_events` / …）
 - 加上扩展层
 
-两套是**平行的**，没有自动转换。我们省掉的是**上游那个转换函数**，
-**不是实现工作量**——上游的实现者只需写 ②，转换由库提供；我们的实现者要多写
-① 的 6 个方法。
+两套是**平行的**，没有自动转换。
 
-这是**用实现者的负担换掉一个转换函数**。是否划算取决于实现者数量：
-- 现在（0 个实现）无法判断；
-- 若将来实现者少（1–2 个），这笔交换是亏的——上游那种「写 ② + 库给转换」更省；
-- 若将来实现者多，或需要 `dyn RunStore` 与 `dyn ExecutionStore` 并存，
-  则两套实现更直接（无转换开销、无类型擦除）。
+**修正：我们提供转换函数（与上游一致）。** 让每个实现者手写两遍 6 个方法纯属
+重复，且有漂移风险（改了一套忘另一套 → runtime 与 core 看到的状态不一致）。
+所以本 crate 提供：
 
-**待定项**：这条要在实现第一个 store 时复核（D2 一并）。若发现必须写两遍
-6 个方法太笨重，可考虑改回「只实现 ② + 提供转换函数」的上游形态。
+```rust
+pub fn run_store_adapter(store: Arc<dyn WorkflowExecutionStore>) -> Arc<dyn RunStore>;
+```
+
+- **实现者只写一套**（`WorkflowRunStoreAdapterStore` 的 6 个 + 扩展层）
+- core 的 `run_workflow` 要 `Arc<dyn RunStore>`，适配器转给它
+- **无损**：适配器丢弃的只有 `from_index` 游标与索引信封，而 `RunStore` 本就
+  没有这两样（读的是裸事件数组）——是投影到更小的面，不是信息损失
+
+两个实现细节值得记：
+
+- **CAS 冲突必须原样透出**：适配器把 `anyhow::Error` downcast 回
+  `StoreError::Conflict`，否则 core 的 rebase-retry 循环会把它当普通 IO 错误
+  处理（已由 `cas_conflict_survives_adaptation` 测试钉住）。
+- **两个方法如实报不支持**：`truncate_runs`（`continue_from` 用）与 `subscribe`
+  在基础层没有对应物——上游的 `createRunStoreAdapter` 同样没实现 `truncateRuns`。
+  适配器选择**报错**而非静默 no-op。
+
+代价：每次调用多一次 `dyn` 间接 + 参数转换。本地低频率调用可忽略。
+
+**实证**：`e2e_tests::core_runs_against_adapted_store` 用一个只实现了
+`WorkflowExecutionStore` 的 store 真正跑通了一次 core 的 `run_workflow`。
 
 #### 命名：逐字沿用上游，尽管拗口
 
