@@ -1,7 +1,11 @@
 # workflow-runtime 设计意图
 
-> **状态**：草案，未拍板。本文只写**意图与取舍**，不写 API 签名——签名会随
-> 设计变化，写在意图之前只会造成文档与实现不一致。
+> **状态**：D5 已调查完，结论**否定了原定的方向**——LocalDub 已自有 queue
+> （等价于上游 runtime），真正缺的是**并行编排表达力**（即 core 的能力）。
+> 详见 D5 附。**在拍板 D5 前不要动手写 runtime。**
+
+> 本文只写**意图与取舍**，不写 API 签名——签名会随设计变化，写在意图之前
+> 只会造成文档与实现不一致。
 
 ## 为什么要先写这份文档
 
@@ -135,24 +139,72 @@ workflow」是成立的，切到 A 之后就需要外部驱动器。如果 Local
 run state / timers / signal 与 approval 投递 / schedules / 原子 claim 与 lease /
 陈旧 run 恢复 / list 与 timeline。
 
-**我们唯一已知的消费场景是 LocalDub pipeline。** 需要先问它要什么，而不是
-照抄全集。
+**结论：LocalDub 已经自己长出了一套等价物，不应重复建设。**
 
-粗略归类：
+调查对象：`packages/server/src/feat/workflows/queue/`（642 行）。
 
-| 能力 | LocalDub 需要吗？ | 判断依据 |
+| 上游 runtime 能力 | LocalDub 已有 | 实现 |
 | --- | --- | --- |
-| timers 投递 | **很可能需要** | pipeline 里有 sleep / 定时闸门 |
-| 陈旧 run 恢复 | **很可能需要** | 「机器重启后接着跑」是 LocalDub 的核心诉求 |
-| 幂等创建 | 可能需要 | 防止同一 pipeline 起两个 run |
-| **lease / 原子 claim** | **待定** | 如果只有一个进程在跑，lease 是纯开销 |
-| schedules / cron | **待定** | pipeline 是被触发的还是自定时的？ |
-| list / timeline | 待定 | 取决于有没有 UI |
+| sweep（有界后台单元） | ✅ 等价 | `run_worker()` 常驻循环（`queue/mod.rs:328`），一次一个 |
+| append-only event log | ✅ | `events.ndjson`，crash 兜底靠重放 `[consumed_offset, EOF)` |
+| run state | ✅ | `checkpoint.json`，原子重写，正常路径零重放 |
+| **lease** | ✅（**进程内**） | `INFLIGHT: Mutex<HashSet<String>>`（`workflows/mod.rs:29`）防同一任务并发续跑 |
+| execution store | ✅ | `data/queue/` |
+| run status | ✅ | Queued / Running / Done / Failed |
+| `startRun` | ✅ | `enqueue` + `wait_next()` 唤醒 worker |
+| schedules / cron | ❌ 不需要 | 任务由 CLI/桌面显式 `enqueue`，非自定时 |
+| timers 投递 | ❌ 不需要 | 见下 |
 
-**如果 lease 和 schedules 都不需要**，runtime 的工作量比上游小一个数量级——
-可能只有一个 `sweep`（扫陈旧 run + 投递到期 timer）+ `start_run`。
+**timer 那条尤其关键**：`execute_entry(&input)` 在 `spawn_blocking` 里跑**同步**
+pipeline，整条一次跑完。所以「挂起 → 返回 → 以后再来」的 `ctx.sleep` 模式对它
+不适用——它根本不需要跨进程投递 timer。
 
-**这条不查清就动手，风险最大**——要么白做一半，要么做小了将来重做。
+**对 D2（lease）的直接影响**：LocalDub **明确选择了不做跨进程 lease**（用进程内
+`HashSet`），因为它假设 worker 是单进程常驻的。我们若做 lease，是在解决一个它
+没打算解决的问题。
+
+**对 D4（sweep 边界）的直接影响**：LocalDub 的 `run_worker` 是**常驻循环**而非
+有界单元，`maxDurationMs` 对它没有意义。
+
+### D5 附：LocalDub 真正缺的是什么
+
+不是 runtime，是**同一进程内的并行编排**。
+
+`get_steps`（`steps/utils/steps.rs:134`）返回一个**扁平串行列表**，
+`DUB_SF_OCR_STEPS`：
+
+```
+separate → separate_after → sf_ocr_pre → sf_ocr → sf_ocr_fix
+  → translate → split_audio → tts → mix_audio → mix_video
+```
+
+其中 `separate` / `separate_after`（语音分离）与 `sf_ocr_pre` / `sf_ocr`
+（关键帧 OCR）**没有数据依赖**，可以并行——这正是用户指出的点。而
+`asr_ocr` 序列里 `separate*` 与 `asr` / `asr_ocr*` 同理。
+
+**这说明我们真正需要的可能是 workflow-core 而非 workflow-runtime**：
+
+- core 的 `tokio::try_join!` 正好表达这种并行（`fulfillment-saga` 示例就是）
+- core 的 `continue_from` 对应 LocalDub 已有的 `continue_workflow`
+- core 的 append-only 日志 + CAS 对应 LocalDub 的 `events.ndjson` + checkpoint
+
+**而 runtime 那层（lease / sweep / schedules）LocalDub 已经有了自己的实现**，
+且是针对「单机串行常驻 worker」这个形态优化过的——换成我们的通用实现未必更好。
+
+**待你拍板**：
+
+- **选项 A**：只把 core 接进 LocalDub，用 `try_join!` 解决并行；runtime 暂不做。
+  代价：核心能力（重放短路、continue_from）与 LocalDub 现有队列有重叠，要决定
+  谁让位。
+- **选项 B**：做 runtime，但**只做 core 缺的那部分**——即不碰 LocalDub 已有的
+  队列/持久化，只补「并行编排」的表达能力（其实就是 core）。
+- **选项 C**：照上游做完整 runtime，然后**替换** LocalDub 的队列实现。
+  代价最大，且要用通用实现换掉一个已经贴合场景的实现。
+
+**倾向 A 或 B**（两者接近），**明确不倾向 C**。理由：LocalDub 的队列是
+「单机串行常驻 worker」这个具体形态的最优解，通用 runtime 在这个场景下是过度
+设计——上游做 runtime 是因为 serverless 需要「无进程常驻」，而 LocalDub 恰恰
+是常驻进程。
 
 ### D6. core 的 25ms 轮询要不要顺带修？
 
@@ -181,17 +233,9 @@ run state / timers / signal 与 approval 投递 / schedules / 原子 claim 与 l
 
 ## 下一步（按顺序）
 
-1. ~~查 D3 的影响面~~ —— **已实测**，见 D3 附：7 个测试依赖自动 resume，都在
-   `task.await` 层面，切换是行为变更但非破坏性；且有「core 保留自投递 +
-   runtime 作可选外部驱动器」的折中方案，零测试改动。
-2. **查 D5（唯一未查的）**：看 LocalDub 的 pipeline 实际需要什么。
-   具体要回答：
-   - 有没有多个 worker 会同时 drive 同一个 run？（决定 lease 要不要）
-   - pipeline 是被外部触发的，还是自定时的？（决定 schedules 要不要）
-   - 有没有 UI 要列 run？（决定 list / timeline 要不要）
-   这一步的产出决定 runtime 的规模——**如果 lease 和 schedules 都不要，
-   工作量比上游小一个数量级**。
-3. **据 2 的结果拍板 D1 / D2 / D4**，然后才写代码。
-
-第 2 步是**只读调查**，不是实现。它需要看 LocalDub 侧的调用方：
-`packages/cli/run-task.ts`（派发器）与 `packages/core/cmd/tasks/task.ts`。
+1. ~~查 D3 的影响面~~ —— **已实测**，见 D3 附。
+2. ~~查 D5（LocalDub 需要什么）~~ —— **已调查，结论推翻了原定方向**，见 D5 附：
+   LocalDub 已有等价 runtime（`server/src/feat/workflows/queue/`），真正缺的是
+   并行编排表达力（core 的能力）。
+3. **待你拍板 D5 的 A / B / C**（倾向 A 或 B），再决定 D1 / D2 / D4 是否还需要。
+   ——**如果选 A，D1/D2/D4 全部作废**，因为它们都是「做 runtime」才需要回答的问题。
