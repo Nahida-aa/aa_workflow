@@ -19,9 +19,11 @@ use crate::event::{StepState, WorkflowEvent};
 use crate::middleware::Middleware;
 
 mod define_workflow;
+mod state_handle;
 pub use define_workflow::{
     CreateWorkflowConfig, WorkflowBuilder, WorkflowDefinition, create_workflow,
 };
+pub use state_handle::StateHandle;
 
 /// Boxed async step-returning future. Steps are spawned inside the engine's
 /// driver; the async world is the default (mirrors `Promise.all` in JS).
@@ -115,8 +117,9 @@ pub struct BaseCtx<TInput = serde_json::Value, TState = serde_json::Value, TExt 
     pub run_id: String,
     /// `input: TInput` — frozen run input (typed or `Value`)
     pub input: TInput,
-    /// `state: TState` — working state copy, flushed at durable boundaries
-    pub state: TState,
+    /// `state: TState` — 共享可变的 typed state（对齐 TS 的
+    /// `ctx.state === engine.state`）；见 `state_handle` 模块文档。
+    pub state: StateHandle<TState>,
     /// `TExtensions` — ctx extension bundle, the `{...context}` accumulated by
     /// middleware. `()` (the default) when no middleware declares one. Built by
     /// the middleware's `produce` and re-deserialized on every drive, so it is
@@ -140,11 +143,13 @@ impl BaseCtx<serde_json::Value, serde_json::Value, ()> {
     /// Engine-facing drive-start construction: freeze the run input and
     /// snapshot the current state image.
     pub(crate) fn untyped(engine: Arc<EngineRuntime>) -> Self {
-        let state = engine
-            .state
-            .read()
-            .expect("workflow state lock poisoned")
-            .clone();
+        let mirror = engine.state_mirror.clone();
+        let state_value = mirror.lock().expect("state mirror lock poisoned").clone();
+        let state = StateHandle::new(
+            state_value,
+            Arc::clone(&mirror),
+            Arc::new(|v: &serde_json::Value| v.clone()),
+        );
         Self {
             run_id: engine.run_id.clone(),
             input: engine.input.clone(),
@@ -156,57 +161,15 @@ impl BaseCtx<serde_json::Value, serde_json::Value, ()> {
 }
 
 impl<In, St, Ext> BaseCtx<In, St, Ext> {
-    /// Write [`Self::state`] back into the engine's live image. Called before
-    /// every durable primitive; the image is what pause snapshots and the
-    /// next drive read. Cheap for the common `Value`/small-struct case.
-    ///
-    /// 与上游一致：flush 时 diff 快照与工作副本，非空则 **emit-only** 发一条
-    /// [`WorkflowEvent::StateDelta`]（不落盘——state 由日志重放推导，持久化
-    /// delta 会在每次 invocation 重放时重复 append，上游注释原话）。
+    /// Write the handler's state changes into the engine's mirror and emit a
+    /// `STATE_DELTA` if anything changed. Called at every durable boundary.
     pub(crate) fn flush_state(&self) -> anyhow::Result<()>
     where
         St: serde::Serialize,
     {
-        self.flush()
-    }
-
-    /// 显式把当前 state 同步进引擎镜像并发射 `STATE_DELTA`。
-    ///
-    /// 供 **handler 末尾**（最后一个耐久边界之后、return 之前）的 state 变更
-    /// 使用：那些变更不经过任何耐久原语，不显式 flush 就没有 `STATE_DELTA`。
-    /// 上游不需要这个方法——它的 `engine.state` 是共享对象，引擎在 handler
-    /// 返回处直接 diff；我们的 state 是 owned 工作副本（PARITY #7，根源是
-    /// Rust 的 `Deref` 无法返回借用临时 `RwLock` guard，共享模型下字段读取
-    /// 无法编译），所以提供显式入口。
-    pub fn flush(&self) -> anyhow::Result<()>
-    where
-        St: serde::Serialize,
-    {
-        let v = serde_json::to_value(&self.state)?;
-        let delta = {
-            let mut prev = self
-                .engine
-                .prev_state_snapshot
-                .lock()
-                .expect("state snapshot lock poisoned");
-            let delta = crate::state_diff::diff_state(&prev, &v);
-            if !delta.is_empty() {
-                *prev = v.clone();
-            }
-            delta
-        };
-        *self
-            .engine
-            .state
-            .write()
-            .expect("workflow state lock poisoned") = v;
-        if !delta.is_empty() {
-            self.engine.publish(&WorkflowEvent::StateDelta {
-                ts: crate::engine::now_ms(),
-                run_id: self.engine.run_id.clone(),
-                delta,
-            });
-        }
+        eprintln!("[trace] flush_state enter");
+        self.state.sync();
+        self.engine.emit_state_delta();
         Ok(())
     }
 

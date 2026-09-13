@@ -252,7 +252,7 @@ impl<TInput, TOutput, TState, TCtxExt> WorkflowBuilder<TInput, TOutput, TState, 
             let output_validator = engine_validator.clone();
             Box::pin(async move {
                 let input = serde_json::from_value(ctx.input.clone())?;
-                let state = serde_json::from_value(ctx.state.clone())?;
+                let state = serde_json::from_value(ctx.state.snapshot())?;
                 let ext: TCtxExt = produce_mw
                     .iter()
                     .filter_map(|m| m.produce.clone())
@@ -263,7 +263,13 @@ impl<TInput, TOutput, TState, TCtxExt> WorkflowBuilder<TInput, TOutput, TState, 
                 let typed = BaseCtx {
                     run_id: ctx.run_id,
                     input,
-                    state,
+                    state: crate::define::StateHandle::new(
+                        state,
+                        ctx.state.mirror(),
+                        Arc::new(|st: &TState| {
+                            serde_json::to_value(st).unwrap_or(serde_json::Value::Null)
+                        }),
+                    ),
                     ext,
                     engine: ctx.engine.clone(),
                 };

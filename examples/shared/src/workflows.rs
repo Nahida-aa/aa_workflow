@@ -1538,9 +1538,9 @@ mod tests {
                 ctx.step("bump-inside", move |_sc: StepCtx| {
                     let mut ctx = inner;
                     async move {
-                        let mut st: CounterState = serde_json::from_value(ctx.state.clone())?;
+                        let mut st: CounterState = serde_json::from_value(ctx.state.snapshot())?;
                         st.total += 1;
-                        ctx.state = serde_json::to_value(st)?;
+                        *ctx.state = serde_json::to_value(st)?;
                         let bumped = ctx.state["total"].clone();
                         Ok(serde_json::json!({ "bumped": true, "total": bumped }))
                     }
@@ -1550,11 +1550,11 @@ mod tests {
                 ctx.approve("gate", "sharp edge gate").await?;
 
                 // step 闭包之外的重放 mutation：重跑后仍会执行。
-                let mut st: CounterState = serde_json::from_value(ctx.state.clone())?;
+                let mut st: CounterState = serde_json::from_value(ctx.state.snapshot())?;
                 st.settle_events.push("outside".into());
-                ctx.state = serde_json::to_value(st)?;
+                *ctx.state = serde_json::to_value(st)?;
 
-                let final_state: CounterState = serde_json::from_value(ctx.state.clone())?;
+                let final_state: CounterState = serde_json::from_value(ctx.state.snapshot())?;
                 Ok(serde_json::json!({
                     "total": final_state.total,
                     "settleEvents": final_state.settle_events,

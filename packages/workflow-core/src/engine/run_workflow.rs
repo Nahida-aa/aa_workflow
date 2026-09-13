@@ -209,10 +209,11 @@ pub async fn run_workflow(
         None => false,
     };
 
+    let state_mirror: Arc<Mutex<serde_json::Value>> = Arc::new(Mutex::new(state.clone()));
     let inner = Arc::new(EngineRuntime {
         run_id: run_id.clone(),
         input: opts.input.clone(),
-        state: Arc::new(std::sync::RwLock::new(state.clone())),
+        state_mirror,
         prev_state_snapshot: Mutex::new(state),
         store: store.clone(),
         gate: Arc::new(Gate::new()),
@@ -235,9 +236,15 @@ pub async fn run_workflow(
         ts,
         run_id: run_id.clone(),
     });
+    eprintln!("[trace] run_started published");
 
     let ctx = crate::define::WorkflowCtx::untyped(inner.clone());
+    eprintln!("[trace] ctx constructed");
     let handler_result = (active.handler)(ctx).await;
+    // 尾段 state delta：ctx 在 handler 内 drop 时已把最终 state 同步进
+    // mirror，这里统一 diff 发射（对齐上游 handler 返回 / catch 处的
+    // flushStateDelta）。
+    inner.emit_state_delta();
 
     // `failure` 是结构化的（`RunState.error`、`RUN_ERRORED`、`RunOutcome.error`
     // 三处同类型）。

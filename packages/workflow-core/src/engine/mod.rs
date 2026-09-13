@@ -104,7 +104,10 @@ pub struct EngineRuntime {
     /// `std::sync::RwLock`; it is the live image that `BaseCtx::state` (the
     /// handler's field working copy) snapshots at drive start and flushes back
     /// to before every durable primitive. Never persisted.
-    pub state: Arc<std::sync::RwLock<serde_json::Value>>,
+    /// Engine-side serialized view of the workflow state, **shared with the
+    /// handler's `StateHandle`**（handle 在变更语句与 drop 时同步进这里）。
+    /// `STATE_DELTA` 的 diff 读它；不含 `prev_state_snapshot` 的历史。
+    pub state_mirror: Arc<Mutex<serde_json::Value>>,
     /// State as of the last flush — the "before" side of the
     /// [`WorkflowEvent::StateDelta`] diff. Reset at drive start (upstream
     /// `prevStateSnapshot: snapshotState(state)`).
@@ -160,6 +163,40 @@ impl EngineRuntime {
     pub(crate) fn publish(&self, ev: &WorkflowEvent) {
         if let Some(p) = &self.publisher {
             p(ev);
+        }
+    }
+
+    /// Diff [`prev_state_snapshot`](Self::prev_state_snapshot) vs
+    /// [`state_mirror`](Self::state_mirror)，非空则 **emit-only** 发一条
+    /// [`WorkflowEvent::StateDelta`] 并推进快照。
+    ///
+    /// 调用点：耐久边界（`flush_state`）与 drive 收尾（尾段 delta，对齐上游
+    /// handler 返回 / catch 处的 `flushStateDelta`）。
+    pub(crate) fn emit_state_delta(&self) {
+        eprintln!("[trace] emit_state_delta enter");
+        let mirror = self
+            .state_mirror
+            .lock()
+            .expect("state mirror lock poisoned")
+            .clone();
+        let delta = {
+            let mut prev = self
+                .prev_state_snapshot
+                .lock()
+                .expect("state snapshot lock poisoned");
+            let delta = crate::state_diff::diff_state(&prev, &mirror);
+            if !delta.is_empty() {
+                *prev = mirror;
+            }
+            delta
+        };
+        eprintln!("[trace] emit_state_delta delta_len={}", delta.len());
+        if !delta.is_empty() {
+            self.publish(&WorkflowEvent::StateDelta {
+                ts: now_ms(),
+                run_id: self.run_id.clone(),
+                delta,
+            });
         }
     }
 
@@ -2578,16 +2615,16 @@ mod tests {
         );
     }
 
-    /// handler 末尾（最后边界之后）的 state 变更默认没有 STATE_DELTA——
-    /// 它们不经过任何耐久原语。显式 \`ctx.flush()\` 补发。
+    /// handler 末尾（最后边界之后）的 state 变更：ctx drop 时同步进 mirror，
+    /// run_workflow 收尾统一 diff——尾段 STATE_DELTA **自动发射**，
+    /// 无需任何显式调用（对齐上游在 handler 返回处的 flushStateDelta）。
     #[tokio::test]
-    async fn tail_state_delta_needs_explicit_flush() {
+    async fn tail_state_delta_emitted_at_drive_end() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&events);
 
-        // 不调 flush：末尾变更不上报。
-        let wf = Workflow::new("tail-no-flush")
+        let wf = Workflow::new("tail-auto")
             .initialize(|_| Ok(serde_json::json!({ "n": 0 })))
             .handler(|mut ctx: WorkflowCtx| async move {
                 ctx.step("a", move |_sc: StepCtx| async move {
@@ -2597,37 +2634,6 @@ mod tests {
                 ctx.state["n"] = serde_json::json!(1);
                 Ok(serde_json::Value::Null)
             });
-        run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("tail:0"),
-            Some(Arc::new(move |e: &WorkflowEvent| {
-                sink.lock().unwrap().push(e.clone())
-            })),
-        )
-        .await
-        .unwrap();
-        let collected = events.lock().unwrap().clone();
-        let deltas: Vec<&WorkflowEvent> = collected
-            .iter()
-            .filter(|e| matches!(e, WorkflowEvent::StateDelta { .. }))
-            .collect();
-        assert!(deltas.is_empty(), "未 flush 的尾段变更不应有 STATE_DELTA");
-        events.lock().unwrap().clear();
-
-        // 调 ctx.flush()：补发。
-        let wf = Workflow::new("tail-flush")
-            .initialize(|_| Ok(serde_json::json!({ "n": 0 })))
-            .handler(|mut ctx: WorkflowCtx| async move {
-                ctx.step("a", move |_sc: StepCtx| async move {
-                    Ok(serde_json::Value::Null)
-                })
-                .await?;
-                ctx.state["n"] = serde_json::json!(1);
-                ctx.flush()?;
-                Ok(serde_json::Value::Null)
-            });
-        let sink = Arc::clone(&events);
         run_workflow(
             &wf,
             store.clone(),
@@ -2645,7 +2651,7 @@ mod tests {
             .into_iter()
             .filter(|e| matches!(e, WorkflowEvent::StateDelta { .. }))
             .collect();
-        assert_eq!(deltas.len(), 1, "显式 flush 应补发尾段 STATE_DELTA");
+        assert_eq!(deltas.len(), 1, "尾段 STATE_DELTA 应自动发射");
         match &deltas[0] {
             WorkflowEvent::StateDelta { delta, .. } => assert_eq!(
                 delta,
