@@ -43,7 +43,7 @@ pub mod run_store_adapter;
 pub mod types;
 
 pub use run_store_adapter::{
-    RunStoreAdapter, WorkflowExecutionStore, WorkflowRunStoreAdapterStore, create_run_store_adapter,
+    WorkflowExecutionStore, WorkflowRunStoreAdapterStore, create_run_store_adapter,
 };
 pub use types::{
     AppendEventsArgs, AppendEventsResult, LeaseOwner, LoadedExecution, ReadEventsArgs, RunId,

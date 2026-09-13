@@ -184,7 +184,17 @@ pub trait WorkflowExecutionStore: WorkflowRunStoreAdapterStore {}
 // 供 core 使用的降格适配器
 // ============================================================
 
-/// 把 [`WorkflowExecutionStore`] 降格成 core 的 [`RunStore`]。
+/// 内部载体：给 `dyn WorkflowExecutionStore` 挂 `impl RunStore` 的具体类型。
+///
+/// Rust 不允许直接给 `dyn Trait A` 实现 `Trait B`，需要一个具体类型承载。
+/// **不是公共 API**——调用方拿到的永远是 [`create_run_store_adapter`] 返回的
+/// `Arc<dyn RunStore>`，不需要知道背后是谁。
+struct RunStoreAdapter {
+    inner: Arc<dyn WorkflowExecutionStore>,
+}
+
+/// 把 [`WorkflowExecutionStore`] 降格成 core 的 [`RunStore`]，供 `run_workflow`
+/// 使用。
 ///
 /// 对齐上游 `run-store-adapter.ts` 的 `createRunStoreAdapter`——**它是必需的**，
 /// 因为 core 的 `run_workflow` 入参是 `Arc<dyn RunStore>`（具体 trait 对象），
@@ -192,6 +202,13 @@ pub trait WorkflowExecutionStore: WorkflowRunStoreAdapterStore {}
 /// （`WorkflowExecutionStore: WorkflowRunStoreAdapterStore`）**与 `RunStore`
 /// 无关**。实测把 `&dyn WorkflowExecutionStore` 传给要 `&dyn RunStore` 的函数会
 /// 报 `E0308: mismatched types`。
+///
+/// # 用法
+///
+/// ```ignore
+/// let store: Arc<dyn WorkflowExecutionStore> = Arc::new(MyStore::new());
+/// let outcome = run_workflow(&wf, create_run_store_adapter(store), &opts, None).await?;
+/// ```
 ///
 /// # 为什么不让实现者自己 `impl RunStore`
 ///
@@ -209,11 +226,6 @@ pub trait WorkflowExecutionStore: WorkflowRunStoreAdapterStore {}
 ///
 /// 每次调用多一次 `dyn` 间接 + 参数转换（`&str` → `&String`、单条包成单元素
 /// 数组等）。对本地低频率调用可忽略。
-pub struct RunStoreAdapter {
-    inner: Arc<dyn WorkflowExecutionStore>,
-}
-
-/// 构造适配器。返回 `Arc<dyn RunStore>`，可直接交给 core 的 `run_workflow`。
 pub fn create_run_store_adapter(store: Arc<dyn WorkflowExecutionStore>) -> Arc<dyn RunStore> {
     Arc::new(RunStoreAdapter { inner: store })
 }
