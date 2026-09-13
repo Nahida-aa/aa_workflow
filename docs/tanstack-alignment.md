@@ -227,3 +227,38 @@ compile time）。guide 的写法受这个契约保护，examples 的 `as` 断�
 - 那个 `expectTypeOf` 契约我们无法照搬，只能用手写标注 + 测试代偿。
 
 结论：**位置参考 examples（示例层该放什么），代码写法参考 guide。**
+
+### 但 examples 内部也不齐：只有 `cloudflare-d1/` 用了 runtime
+
+上面那批 examples 内部还有一层分裂。`examples/deployment-pocs/` 下 6 个目录，
+**只有 `cloudflare-d1/` 引用了 `@tanstack/workflow-runtime`**：
+
+| 目录 | 依赖 | 诞生 |
+| ---- | ---- | ---- |
+| `cloudflare/` / `netlify/` / `vercel/` / `api/` / `shared/` | 只有 `@tanstack/workflow-core@^0.0.2` | 05-28 |
+| **`cloudflare-d1/`** | core + **runtime** + `workflow-cloudflare` + `store-cloudflare-d1`（全 `workspace:*`） | **05-30** |
+
+两个可读的信号：
+
+1. **`cloudflare-d1/` 是后补的**（晚两天，`602cdec`），与那批 05-28 的示例不是
+   一次写的。
+2. **依赖版本暴露视角差异**：老的写死 `^0.0.2`（发布包消费者视角），
+   `cloudflare-d1` 用 `workspace:*`（仓库内开发视角）。
+
+所以 05-28 那批是**半成品**：core 裸跑 + 手写 HTTP 端点，**没有 sweep、没有
+lease、没有 timer 投递**——也就是没有 runtime 层。而 `docs/guide/index.md`
+（07-20）里的示例全是 `defineWorkflowRuntime` + `runtime.sweep()`。
+
+**这比上一节的结论更严重**：guide 与 examples 的差距不只是写法新旧，是
+**架构层次不同**——examples 演示的是没有 runtime 的用法。
+
+**实际参考价值排序**：
+
+1. `docs/guide/` —— 权威，代表当前架构
+2. `examples/deployment-pocs/cloudflare-d1/` —— 唯一用了完整架构的示例，且带
+   `migrations/0000_workflow_store.sql`，能看到 store 契约在真实数据库里的形状
+3. 其余四个平台目录 —— 演示的用法已不推荐
+
+顺带说明：本仓 `examples/shared/` 是我们自己的示例层，对应的是**位置**，不是
+上面这批的写法。我们还没有 runtime 层，所以现阶段与 05-28 那批的处境类似——
+这也是为什么 README 的「已知边界」要显式列出缺的那几项，而不是含糊带过。
