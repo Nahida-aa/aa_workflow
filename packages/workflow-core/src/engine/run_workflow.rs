@@ -212,7 +212,8 @@ pub async fn run_workflow(
     let inner = Arc::new(EngineRuntime {
         run_id: run_id.clone(),
         input: opts.input.clone(),
-        state: Arc::new(std::sync::RwLock::new(state)),
+        state: Arc::new(std::sync::RwLock::new(state.clone())),
+        prev_state_snapshot: Mutex::new(state),
         store: store.clone(),
         gate: Arc::new(Gate::new()),
         log_len: AtomicUsize::new(log_len),

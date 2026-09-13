@@ -151,6 +151,18 @@ pub enum WorkflowEvent {
         step_id: String,
         value: String,
     },
+    /// Observability only (not persisted): RFC 6902 JSON Patch describing
+    /// `ctx.state` changes since the last durable boundary (TanStack
+    /// `STATE_DELTA`).
+    ///
+    /// **emit-only** 的理由（上游注释原话）：state 由日志重放推导，持久化
+    /// delta 会在每次 invocation 重放时重复 append，或者需要重放时跳过。
+    /// delta 语义见 [`crate::state_diff`]。
+    StateDelta {
+        ts: i64,
+        run_id: String,
+        delta: Vec<crate::state_diff::Operation>,
+    },
 }
 
 impl WorkflowEvent {
@@ -159,7 +171,8 @@ impl WorkflowEvent {
             WorkflowEvent::RunStarted { .. }
             | WorkflowEvent::RunFinished { .. }
             | WorkflowEvent::RunErrored { .. }
-            | WorkflowEvent::Custom { .. } => None,
+            | WorkflowEvent::Custom { .. }
+            | WorkflowEvent::StateDelta { .. } => None,
             WorkflowEvent::StepStarted { step_id, .. }
             | WorkflowEvent::StepFinished { step_id, .. }
             | WorkflowEvent::StepFailed { step_id, .. }
@@ -185,14 +198,12 @@ impl WorkflowEvent {
             | WorkflowEvent::StepProgress { ts, .. }
             | WorkflowEvent::Custom { ts, .. }
             | WorkflowEvent::NowRecorded { ts, .. }
-            | WorkflowEvent::UuidRecorded { ts, .. } => *ts,
+            | WorkflowEvent::UuidRecorded { ts, .. }
+            | WorkflowEvent::StateDelta { ts, .. } => *ts,
         }
     }
 
-    /// serde tag 值（`"RUN_STARTED"` 等，对齐 TS 侧 `event.type`）。
-    ///
-    /// 供 [`crate::run_store` 之外的存储信封]冗余建索引用——例如 runtime 的
-    /// `StoredWorkflowEvent.event_type`。
+    /// 对齐 TS 侧 `event.type`）。
     pub fn type_name(&self) -> &'static str {
         let name = match self {
             WorkflowEvent::RunStarted { .. } => "RUN_STARTED",
@@ -207,6 +218,7 @@ impl WorkflowEvent {
             WorkflowEvent::Custom { .. } => "CUSTOM",
             WorkflowEvent::NowRecorded { .. } => "NOW_RECORDED",
             WorkflowEvent::UuidRecorded { .. } => "UUID_RECORDED",
+            WorkflowEvent::StateDelta { .. } => "STATE_DELTA",
         };
         debug_assert_eq!(
             serde_json::to_value(self).unwrap()["type"],

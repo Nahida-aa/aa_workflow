@@ -105,6 +105,10 @@ pub struct EngineRuntime {
     /// handler's field working copy) snapshots at drive start and flushes back
     /// to before every durable primitive. Never persisted.
     pub state: Arc<std::sync::RwLock<serde_json::Value>>,
+    /// State as of the last flush — the "before" side of the
+    /// [`WorkflowEvent::StateDelta`] diff. Reset at drive start (upstream
+    /// `prevStateSnapshot: snapshotState(state)`).
+    pub prev_state_snapshot: Mutex<serde_json::Value>,
     pub store: Arc<dyn RunStore>,
     pub gate: Arc<Gate>,
     /// Monotonic next-appendix index. Concurrent steps (via `try_join!`)
@@ -2495,6 +2499,82 @@ mod tests {
                     WorkflowEvent::StepFailed { attempts, .. } if attempts.len() == 1
                 )) == 1,
             "per-step retry 覆盖 workflow 兜底"
+        );
+    }
+
+    /// ctx.state 的变更在耐久边界 flush 时以 `STATE_DELTA`（emit-only）上报，
+    /// op 语义对齐 RFC 6902；**不落盘**（state 由日志重放推导，持久化 delta
+    /// 会在每次 invocation 重放时重复 append）。
+    #[tokio::test]
+    async fn state_mutations_emit_state_delta_at_boundaries() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let wf = Workflow::new("sd")
+            .initialize(|_| Ok(serde_json::json!({ "count": 0, "items": [] })))
+            .handler(|mut ctx: WorkflowCtx| async move {
+                ctx.state["count"] = serde_json::json!(1);
+                ctx.step("a", move |_sc: StepCtx| async move {
+                    Ok(serde_json::Value::Null)
+                })
+                .await?;
+                ctx.state["items"] = serde_json::json!(["x"]);
+                ctx.step("b", move |_sc: StepCtx| async move {
+                    Ok(serde_json::Value::Null)
+                })
+                .await?;
+                Ok(serde_json::Value::Null)
+            });
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("sd"),
+            Some(Arc::new(move |e: &WorkflowEvent| {
+                sink.lock().unwrap().push(e.clone())
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+
+        let collected = events.lock().unwrap().clone();
+        let deltas: Vec<&WorkflowEvent> = collected
+            .iter()
+            .filter(|e| matches!(e, WorkflowEvent::StateDelta { .. }))
+            .collect();
+        assert_eq!(deltas.len(), 2, "两次耐久边界各一条 StateDelta");
+
+        use crate::state_diff::Operation;
+        let ops1 = match deltas[0] {
+            WorkflowEvent::StateDelta { delta, .. } => delta,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            ops1,
+            &vec![Operation::Replace {
+                path: "/count".into(),
+                value: serde_json::json!(1)
+            }]
+        );
+        let ops2 = match deltas[1] {
+            WorkflowEvent::StateDelta { delta, .. } => delta,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            ops2,
+            &vec![Operation::Replace {
+                path: "/items".into(),
+                value: serde_json::json!(["x"])
+            }]
+        );
+
+        // emit-only：日志里没有 StateDelta。
+        assert_eq!(
+            count_events(&store, "sd", |e| matches!(
+                e,
+                WorkflowEvent::StateDelta { .. }
+            )),
+            0
         );
     }
 }

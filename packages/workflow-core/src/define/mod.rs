@@ -159,16 +159,39 @@ impl<In, St, Ext> BaseCtx<In, St, Ext> {
     /// Write [`Self::state`] back into the engine's live image. Called before
     /// every durable primitive; the image is what pause snapshots and the
     /// next drive read. Cheap for the common `Value`/small-struct case.
+    ///
+    /// 与上游一致：flush 时 diff 快照与工作副本，非空则 **emit-only** 发一条
+    /// [`WorkflowEvent::StateDelta`]（不落盘——state 由日志重放推导，持久化
+    /// delta 会在每次 invocation 重放时重复 append，上游注释原话）。
     pub(crate) fn flush_state(&self) -> anyhow::Result<()>
     where
         St: serde::Serialize,
     {
         let v = serde_json::to_value(&self.state)?;
+        let delta = {
+            let mut prev = self
+                .engine
+                .prev_state_snapshot
+                .lock()
+                .expect("state snapshot lock poisoned");
+            let delta = crate::state_diff::diff_state(&prev, &v);
+            if !delta.is_empty() {
+                *prev = v.clone();
+            }
+            delta
+        };
         *self
             .engine
             .state
             .write()
             .expect("workflow state lock poisoned") = v;
+        if !delta.is_empty() {
+            self.engine.publish(&WorkflowEvent::StateDelta {
+                ts: crate::engine::now_ms(),
+                run_id: self.engine.run_id.clone(),
+                delta,
+            });
+        }
         Ok(())
     }
 
