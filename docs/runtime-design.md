@@ -1,8 +1,6 @@
 # workflow-runtime 设计意图
 
-> **状态**：D1 已定（supertrait，不设中间层）。**D3 已落地**（core 挂起即返回）、
-> **D7 已落地**（drive 收尾登记 timer，serverless 路径打通）、**D8 已落地**
-> （resume 带持久化 input）、**D9 已落地**（store 契约套件）。D2 / D4 有倾向待确认。
+> **状态**：D1 / D2 / D3 / D4 / D7 / D8 / D9 **均已定**。D5 是背景论证，D6 已归档。
 >
 > **结论：runtime 层必需**——判据是**「有没有常驻的驱动者」**（不是「有没有
 > 持久存储」，两者正交；见 D5）。LocalDub 有常驻 worker，属形态 A，**只用
@@ -313,17 +311,14 @@ RunStore::get_events(x, "r1")                                            // ✅ 
 
 **所以 D1 的最终结论是「立 ②，不立 ③」**，见上文「我们的选择（已修正）」。
 
-### D2. lease 放 store 还是放 runtime？
+### D2. lease 放 store 还是放 runtime？—— **已定：放 store**（但**不写第二个 store 实现**）
 
 上游把 lease 交给 store（`leaseOwner` / `leaseMs`，runtime 负责续租）。
 
-| 选项 | 代价 | 倾向 |
+| 选项 | 代价 | 结论 |
 | --- | --- | --- |
-| **A. lease 在 store（原子 claim 由 store 保证）** | 每个 store 实现要正确处理并发 claim；`FileRunStore` 这种单机实现要伪造成「总能 claim 成功」 | ✅ |
-| B. lease 在 runtime（进程内锁） | 多进程无效——runtime 的整个存在意义就是跨进程，进程内的锁解决不了 | ❌ |
-
-**倾向 A**。**但注意**：这一条**不影响 core**——只要 lease 不塞进 `RunStore`
-（见 D1），core 完全无感。
+| **A. lease 在 store（原子 claim 由 store 保证）** | 每个 store 实现要正确处理并发 claim | ✅ **采用** |
+| B. lease 在 runtime（进程内锁） | 多进程无效——runtime 的整个存在意义就是跨进程 | ❌ |
 
 **为什么必需**（而不是「待定」）：serverless 形态下每次调用都是新进程，
 两个 worker 可能同时 drive 同一个 run——`cloudflare-d1/src/worker.ts` 里
@@ -331,8 +326,31 @@ RunStore::get_events(x, "r1")                                            // ✅ 
 'http:payment' })` 就是为此。LocalDub 用进程内 `INFLIGHT` 解决同一个问题，但
 那只在「单进程常驻」下有效。
 
-**单机 store 的退化**：`InMemoryStore` / `FileRunStore` 这类实现可以让 `claim`
+**单机 store 的退化**：`InMemoryExecutionStore` 这类实现可以让 `claim`
 永远成功（无并发场景），但**接口必须存在**——否则 serverless 形态没法接入。
+
+#### 决定：不发布第二个 store（2026-09-14）
+
+曾计划写一个 `FileExecutionStore` 作为第二实现来「验证 lease 语义」。**不做**，
+理由是**上游就没有**：
+
+| 上游的 store 包 | 后端 |
+| --- | --- |
+| `workflow-store-cloudflare-d1` | Cloudflare D1（托管 SQLite） |
+| `workflow-store-drizzle-postgres` | Postgres |
+| `workflow-runtime` 内置 in-memory | 仅测试 |
+
+两个都是**云托管数据库**。它们的并发语义由平台决定（D1 的单写者、Postgres 的
+事务），**不是本地文件能模仿出来的**——写一个 `flock` 版只会得到一个
+「看起来像但语义不同」的第三种东西。
+
+所以第二个 store 是**「等有真实宿主时再写」**，不是「现在补上」。
+LocalDub 用 core 层的 `FsRunStore`，属形态 A（常驻驱动者），本来就不需要
+runtime 的 lease；等真有 serverless 宿主接进来，那时自然知道 store 该长什么样。
+
+**对 D2 的影响**：结论不变（lease 在 store），但**它现在靠契约套件固化，
+而不是靠第二个实现验证**（见 D9）。契约套件把「store 该保证什么」写成了
+可执行规格——将来写 D1 / Postgres 实现时照着跑即可。
 
 ### D3. timer 投递：谁来唤醒 sleep？—— **已定：core 不自轮询，挂起即返回（对齐上游）**
 
@@ -462,7 +480,7 @@ Err(e) if e.downcast_ref::<WorkflowParked>().is_some() => {
 教训与前几次一致：**移植时行为必须逐条对照上游实跑**，不能凭「功能上像是等价的」
 推断。这次是用户要求「看看上游 / 可以对 TS 测试」，实跑后 5 分钟就得到了相反的答案。
 
-### D4. sweep 的边界怎么定？
+### D4. sweep 的边界怎么定？—— **已定：保留有界 sweep**
 
 上游：`sweep({ maxRecoveredRuns, maxScheduledRuns, maxTimers, maxDurationMs })`，
 边界是为了「塞进一次 host 执行」（serverless 函数超时）。
@@ -470,13 +488,19 @@ Err(e) if e.downcast_ref::<WorkflowParked>().is_some() => {
 本地常驻进程没有 host 超时概念——但 serverless 形态有
 （`cloudflare-d1` 用 `maxDurationMs: 25_000` / `maxTimers: 25`）。
 
-| 选项 | 代价 | 倾向 |
+| 选项 | 代价 | 结论 |
 | --- | --- | --- |
-| **A. 保留有界 sweep（`max_*` + `maxDurationMs`），常驻形态传大值** | 多几个参数，但接口与上游同构，两种形态都能覆盖 | ✅ |
+| **A. 保留有界 sweep（`max_*` + `maxDurationMs`），常驻形态传大值** | 多几个参数，但接口与上游同构，两种形态都能覆盖 | ✅ **采用** |
 | B. 无界 sweep（跑到没有活干为止） | 简单，但 serverless 形态直接不可用 | ❌ |
 
-**倾向 A**。边界是**接口形状**的一部分——只有它能同时覆盖常驻与 serverless
+边界是**接口形状**的一部分——只有它能同时覆盖常驻与 serverless
 两种形态；省掉它就把 serverless 排除了。
+
+**落地状态**：`WorkflowRuntimeSweepArgs` 已有 `max_recovered_runs` /
+`max_scheduled_runs` / `max_timers` / `max_duration_ms`（以及 `limit` 兜底），
+`WorkflowRuntimeSweepResult` 回报 `remaining_may_exist` / `deadline_reached`。
+D3/D7 之后 sweep 是**必需**路径（core 不自投递 timer），所以这个边界不再只是
+「为 serverless 预留」，而是常驻形态也每天在用的东西。
 
 ### D5. 我们真的需要哪些能力？
 
@@ -628,23 +652,21 @@ separate → separate_after → sf_ocr_pre → sf_ocr → sf_ocr_fix
 
 ---
 
-## 下一步（按顺序）
+## 下一步
 
-1. ~~查 D3 的影响面~~ —— **已实测**，见 D3 附。
-2. ~~查 D5~~ —— **已调查**，见 D5：runtime 层必需（判据是通用形态而非单个应用）。
-3. ~~拍板 D3~~ → ~~动手改 core~~ —— **已完成**（见 D3 结论）。`exec_pause` 不再等，
-   `WorkflowParked` 哨兵就位，21 个测试改写，145 个测试全绿。
-   - **LocalDub 侧未同步**：`engine.rs:282` 的 `other =>` 仍需加 `Paused`。这是一处
-     破坏性的接口变更——LocalDub 下次升级依赖时会踩到。
-4. ~~补 timer 登记~~ —— **已完成**，见 D7。这是 D3 的必然后续：core 不再自投递，
-   runtime 就必须把 `waiting_for.deadline` 登记成 sweep 认得的记录。
-5. **拍板 D2 / D4**（D1 已定）：
-   - D2（lease 位置）—— 倾向 store，前提是不塞进 `RunStore`
-   - D4（sweep 边界）—— 倾向保留 `max_*` / `maxDurationMs`
-6. **并行编排（D5 附二）可以独立推进**：它只依赖 core 的 `try_join!`，与
-   runtime 层的决策无关。如果想让 LocalDub 先有收益，这条可以并行开工。
+**D1–D9 全部已定并落地**。runtime 层的设计工作到此告一段落。
 
-**次序**：D3 已落地（它反向决定了 core 的形状），接下来是 D2 / D4 的细节。
+剩下的都不是「补设计」，而是「等条件具备」：
+
+| 事项 | 前置条件 | 说明 |
+| --- | --- | --- |
+| **第二个 store 实现** | 有真实的 serverless 宿主 | 上游只有 D1 / Postgres 两个**托管数据库**实现，没有本地文件版（见 D2 的决定）。写 D1/Postgres 对等物时照着 D9 的契约套件跑即可 |
+| **serverless host adapter** | 同上 | Rust 侧对应物是「一个最小 HTTP server 或 CLI 子命令去调 `sweep()`」，不是平台专属薄壳（见下方「明确不做的事」） |
+| **LocalDub 侧同步** | 无（可随时做） | `engine.rs:282` 的 `other =>` 需加 `Paused`。破坏性变更，见 D3 结论 |
+| **并行编排** | 无（可随时做） | 只依赖 core 的 `try_join!`，与 runtime 决策无关。想让 LocalDub 先有收益可以并行开工 |
+
+**当前的真实状态**：runtime 层测全绿（164 个测试），但**没有被任何真实宿主用过**。
+这是「设计完成、等待验证」——不是缺陷，但也别把它当成「已经能上生产」。
 
 ### D7. timer 登记：谁把 `waiting_for.deadline` 变成 sweep 能认领的记录？—— **已定且已落地**
 

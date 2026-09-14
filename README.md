@@ -298,16 +298,20 @@ docs/runtime-design.md      runtime 层决策记录（D1-D9）
 
 ## 已知边界
 
-`workflow-runtime` 层已移植（存储契约 / in-memory 实现 / driver / schedule
-materializer / 规格构造器），**但还没有被任何真实 host 用过**——以下是尚未验证
-或缺失的部分：
+**设计已完成**（`docs/runtime-design.md` D1–D9 全部定案并落地），但这一层
+**没有被任何真实宿主用过**。之所以不急着补 store 实现：上游也只有两个**托管
+数据库**实现（D1 / Postgres），没有本地文件版——第二个 store 的形状由平台的
+并发模型决定，得等真有宿主接进来才知道该长什么样（见 D2）。
 
-- **多 worker 协调**：lease / 心跳 / 抢占的接口都在 `WorkflowExecutionStore` 上，
-  但只有 `InMemoryExecutionStore` 一个实现，**没有生产级 store 验证过它**。
-- **schedules / cron**：已有 spec → `next_fire_at` 的换算，缺分桶调度接进真实 host。
-- **timer**：`drive_claimed_run` 收尾会把 `waiting_for.deadline` 登记成 timer
-  （`sync_timer_from_run_state`，对齐上游 `syncTimerFromRunState`），`sweep`
-  认领到期项并投递 `__timer`。端到端已有测试覆盖，同样**没有生产级 store 验证过**。
+已知未验证/缺失的部分：
+
+- **多 worker 协调**：lease / 心跳 / 抢占的接口与语义已由 `store_contract`
+  的契约套件固化，但只在 `InMemoryExecutionStore` 上跑过——那个实现
+  `claim` 永远成功，**不制造真实竞争**。
+- **schedules / cron**：已有 spec → `next_fire_at` 的换算与分桶认领，
+  缺一个真实宿主把它们接起来。
+- **serverless host adapter**：Rust 侧对应物是「最小 HTTP server 或 CLI 子命令
+  去调 `sweep()`」，尚未动工。
 
 这一层在上游也是**后补的**：core 的 0.0.1 之后六天，才由 `5d05fa8` 一次性带出
 runtime + 各 host/store adapter。所以这是阶段性缺位而非设计缺陷；补的时候应照
@@ -316,8 +320,8 @@ runtime + 各 host/store adapter。所以这是阶段性缺位而非设计缺陷
 
 其他缺口：
 
-- **没有生产级 store**：core 只有 `InMemoryStore`；`FileRunStore` 的 `append_event`
-  是全量读 + 全量重写（O(n²)），且 `Mutex` 只在单进程内有效。
+- **没有生产级 store**：`FileRunStore`（examples 层，供 core 用）的
+  `append_event` 是全量读 + 全量重写（O(n²)），且 `Mutex` 只在单进程内有效。
 - **确定性契约未强制**：引擎不检测 handler 的非确定性写法（TanStack 同样不检测）。
 - **无 observability 集成**：`publisher` 是裸 `Arc<dyn Fn(&WorkflowEvent)>`，core 不依赖
   tracing，接入要自己搭桥。
