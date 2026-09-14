@@ -687,10 +687,14 @@ fn clear_run_wait(store: &Arc<dyn RunStore>, run_id: &str) {
 
 /// Appends a `StepResume` for a paused run — the external side of
 /// [`WorkflowCtx::approve`](crate::define::WorkflowCtx::approve). Safe to call
-/// any time: a live instance picks it up via polling, and a later replay
-/// resolves from the log without re-waiting. The first append per
+/// any time: a parked drive observes it via `exec_pause`'s poll loop, and a
+/// later replay resolves from the log without re-waiting. The first append per
 /// `(run_id, step_id)` wins; duplicates drop via the store's CAS append.
 /// `payload` is what the parked `approve` call returns.
+///
+/// **待改**：`exec_pause` 的轮询循环将被删除（对齐上游「挂起即返回」），
+/// 届时「a parked drive observes it」不再成立——投递只对**下一次 drive**
+/// 生效，由外部驱动器负责发起。见 `docs/runtime-design.md` D3。
 pub fn signal_run(
     store: &dyn RunStore,
     run_id: &str,

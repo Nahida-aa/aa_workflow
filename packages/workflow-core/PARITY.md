@@ -7,6 +7,13 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunOptions.runtime�
 
 图例：✅ 完全对等（含语义） · ◐ 对等但有命名/签名差异 · ◯ 部分实现 · ✖ 未实现
 
+> **⚠️ 全局偏离（未修）**：表内 `yield_` / `sleep` / `sleep_until` /
+> `wait_for_event` / `approve` 几行的「轮询后放行」「≈25-50ms」等描述，
+> 都建立在**我们的挂起是阻塞式**这一前提上。上游不是——上游写 checkpoint 后
+> **立即返回 `paused`**。这是语义偏离而非实现差异（我们的挂起要求进程存活），
+> 已定性待改。见 [`docs/runtime-design.md`](../../docs/runtime-design.md) D3。
+> 改动落地后本表的「耗时」类备注要一并删掉。
+
 ## ctx（handler 参数）
 
 | TanStack BaseCtx | Rust（`Ctx<In, St, Ext>` 即 `BaseCtx<In, St, Ext>`；`WorkflowCtx = Ctx<Value, Value, ()>`） | 状态 | 备注 |

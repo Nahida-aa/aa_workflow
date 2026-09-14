@@ -1,6 +1,7 @@
 # workflow-runtime 设计意图
 
-> **状态**：D1 已定（supertrait，不设中间层）。D2 / D4 有倾向待确认。
+> **状态**：D1 已定（supertrait，不设中间层）。**D3 已定**（core 不自轮询，
+> 挂起即返回——但**尚未动手改 core**）。D2 / D4 有倾向待确认。
 >
 > **结论：runtime 层必需**——判据是**「有没有常驻的驱动者」**（不是「有没有
 > 持久存储」，两者正交；见 D5）。LocalDub 有常驻 worker，属形态 A，**只用
@@ -332,54 +333,118 @@ RunStore::get_events(x, "r1")                                            // ✅ 
 **单机 store 的退化**：`InMemoryStore` / `FileRunStore` 这类实现可以让 `claim`
 永远成功（无并发场景），但**接口必须存在**——否则 serverless 形态没法接入。
 
-### D3. timer 投递：谁来唤醒 sleep？
+### D3. timer 投递：谁来唤醒 sleep？—— **已定：core 不自轮询，挂起即返回（对齐上游）**
 
-现状：`exec_pause` 在挂起点自轮询（`engine/mod.rs` 的 `RESUME_POLL_MS = 25ms`），
-到期后引擎自己 `signal_run` 投递。
+#### 实测：上游的行为（2026-09-14，在 `learn_ls/workflow` 实跑）
 
-| 选项 | 代价 | 倾向 |
+探针（`packages/workflow-core/tests/probe.suspend.test.ts`，已清理）：
+
+| 挂起点 | 耗时 | 事件流 | 返回后 `RunState` |
+| --- | --- | --- | --- |
+| `ctx.approve` | **1 ms** | `RUN_STARTED` → `APPROVAL_REQUESTED` | `status: "paused"` + `pendingApproval` |
+| `ctx.sleep(60s)` | **0 ms** | `RUN_STARTED` → `SIGNAL_AWAITED`（含 `deadline`） | `status: "paused"` |
+
+**上游是「写到挂起点就返回」**。看源码就能看到机制（`run-workflow.ts`）：
+
+```ts
+// engineWaitForEvent（sleep / wait_for_event 走这条）：
+await emitAndAppend(... { type: 'SIGNAL_AWAITED', stepId, name, deadline })  // 写日志
+if (persisted) await runStore.setRunState(runId, { ...persisted, status: 'paused', waitingFor })
+engine.paused = true
+throw new WorkflowPaused()          // ← 用异常把控制权弹回 drive
+```
+
+`drive` 的 catch 里专门认这个标志（`run-workflow.ts:529`）：
+
+```ts
+if (engine.paused) {
+  // The primitive that paused already wrote the pause state — status,
+  // waitingFor / pendingApproval — directly to the store.
+  return                            // ← 不写终态事件、不写终态 status
+}
+```
+
+所以「挂起」不是一个 await 点，而是**一条以 `paused` 收尾的退出路径**——
+drive 正常结束、进程可以走了。
+
+`sleep` 与 `approve` **是同一机制**——都等一个信号（`sleep` 等 `__timer`，
+`approve` 等审批），都由**外部**投递。`SIGNAL_AWAITED` 事件里带 `deadline`，
+供 timer 索引使用。上游自己唯一产生 `__timer` 信号的地方是
+`yieldForDeadlineIfNeeded`（预算耗尽的主动让出），而且它也是**写事件 + 弹异常**，
+不是自己等自己——「到期投递」这件事上游整体交给外部。
+
+#### 我们现在的行为（偏离）
+
+`exec_pause` 是**阻塞轮询**（`RESUME_POLL_MS = 25ms` 自旋）：
+
+| | 上游 | 我们（改前） |
 | --- | --- | --- |
-| **A. runtime 的 sweep 认领到期 timer 并投递** | core 要提供「查询哪些 run 在等、deadline 是什么」的入口；或 runtime 自己扫 `RunState.waiting_for` | ✅ 与上游一致 |
-| B. 保持 core 自轮询 | 每个挂起的 run 占一个存活的任务 + 25ms 轮询；进程一退，timer 就没人投递（除非有人重放） | ⚠️ 见下 |
-| C. core 提供 `subscribe` 等待 | 已有 `RunStore::subscribe`，但 `FileRunStore` 之外未必有 | — |
+| `approve` 挂起 | 1ms 返回 `paused` | **阻塞等外部 `signal_run`** |
+| `sleep(60s)` | 0ms 返回 `paused` + `deadline` | **自轮询 60 秒**，同一次 drive 内恢复 |
+| 挂起期间需要进程活着吗 | **不需要** | **需要** |
 
-现在其实是 **B**。它能工作是因为「drive 期间进程活着」；一旦把 run 交给运行时
-边界（进程退出），**没有东西会来投递 timer**——这正是 runtime 存在的理由。
+**这不只是「实现细节不同」，是核心语义上的能力差异**：我们的挂起依赖进程存活，
+上游的挂起不需要。上游因此可以把 `sleep` 挂几天的 run 交给存储，自己退出。
 
-**但这个切换有代价**（已实测，见下）：从 B 到 A 意味着 `exec_pause` 不再自己等，
-而是「写 `STEP_PAUSED` → 返回」。这是**行为变更**。
+#### 结论
 
-### D3 附：影响面实测
+改 `exec_pause`：**写挂起 checkpoint（`StepPaused`）后立即返回**，不再自轮询。
+
+实现上对齐上游的 `throw new WorkflowPaused()` 形态——需要一个类似
+`StepHalt` 的内部哨兵错误（比如 `WorkflowParked`），让 drive 的
+`match handler_result` 认出它并走 `Paused` 收尾：
+
+```rust
+Err(e) if e.downcast_ref::<WorkflowParked>().is_some() => (RunStatus::Paused, None, None),
+```
+
+**挂起不是终态**：`RunStatus::Paused` 下**不 append** `RunFinished` / `RunErrored`
+（照上游 `if (engine.paused) return`）；`RunOutcome.error` 保持 `None`。
+`RunOutcome`/`RunState` 的 `status` 就是 `Paused`，外部据此决定是投递信号还是
+留给 sweep。这也让 `RunStatus::Paused` 从「投影状态」变成**真实的 drive 终态**。
+
+这同时解释了为什么 runtime 的 `sweep` 是**必需**而非可选——core 不再自投递，
+就必须有外部驱动器。
+
+连带影响：
+
+| 影响 | 内容 |
+| --- | --- |
+| core | `exec_pause` 去掉轮询循环；新增 `WorkflowParked` 哨兵（沿用 `StepHalt` 的位置与处理方式） |
+| `run_workflow` | `match handler_result` 新增 `Paused` 分支；`Paused` 下不 append 终态事件 |
+| `RunStatus::Paused` | 从「投影状态」变成**真实的 drive 终态** |
+| **上一版的「折中方案」作废** | 「core 保留自投递 + runtime 作为可选驱动器」不成立——那正是偏离本身 |
+| 测试 | 依赖「同一次 drive 内自动 resume」的 7 个测试要改成「等 pause → 投递 → 再 drive」（与 approval 类测试同模式） |
+| `yield_` | 走 `exec_pause`，所以 `should_yield` 路径也变成挂起即返回——这正是上游的语义（让出预算后由 host 重新唤起） |
+| **LocalDub** | `run_workflow_engine` 的 `match outcome.status` **必须**处理 `Paused`（`engine.rs:282` 现在掉进 `other =>` 报「unexpected engine status」）。语义上应把 workflow 标记为「等待中」而非失败 |
+
+#### D3 附一：影响面实测（改前做的）
 
 依赖「同一次 drive 内自动 resume」的测试共 **7 个**：
 
 | 位置 | 测试 |
 | --- | --- |
-| `engine/mod.rs:1555` | `sleep_pauses_then_auto_resumes` —— 断言 `task.await` 在整个 sleep 期间不返回，**且引擎自己 append 了 `StepResume`**（`:1612-1620`） |
+| `engine/mod.rs:1555` | `sleep_pauses_then_auto_resumes` —— 断言 `task.await` 在整个 sleep 期间不返回，**且引擎自己 append 了 `StepResume`** |
 | `engine/mod.rs:1808` | `sleep_until_past_resolves_immediately` |
 | `engine/mod.rs:1841` | `sleep_until_schedules_timer` |
 | `examples/.../workflows.rs:1068` | `invoice_double_sleep_auto_resumes` |
 | `examples/.../workflows.rs:1184` | `refund_approved_disburses_after_timer` |
 | `examples/.../workflows.rs:1614` | `event_gate_emit_wait_then_sleep_until` |
-| `examples/.../runtime.rs:265` | `invoice_double_sleep_survives_restart`（跨进程重启，本身就不依赖单次 drive） |
+| `examples/.../runtime.rs:265` | `invoice_double_sleep_survives_restart`（跨进程重启，本就不依赖单次 drive） |
 
-**结论**：切换到 A 是**行为变更但非破坏性**——没有测试断言「引擎绝不会自己
-投递 timer」，只是它们**顺带**依赖了这个行为。改写方式是把
-`task.await` 换成「等 pause → 手动投递 timer → 再 drive」，与
-`approval` 类测试的写法一致（那类测试已经是这个模式）。
+改写方式统一为「等 pause → 手动投递 → 再 drive」，与 approval 类测试同模式。
 
-**但这会损失一个能力**：现在「一次 `run_workflow` 调用就能跑完含 sleep 的
-workflow」是成立的，切到 A 之后就需要外部驱动器。如果 LocalDub 的调用方
-（`packages/cli/run-task.ts`）依赖这个便利，得先确认。
+#### D3 附二：曾经的错误结论（留档）
 
-**可能的折中**：core 保留自投递（B），runtime 的 sweep 作为**可选的**
-外部驱动器（A）——两者不冲突，`exec_pause` 的行为不变，runtime 只是多了一条
-「不依赖进程存活」的路径。这样零测试改动。**这一条值得优先考虑。**
+本决策曾两次被记错，都是**没查上游就下结论**：
 
-**但 fold 的适用边界要想清楚**：B 只在「进程活着」时有效。serverless 下进程
-随时退出（`cloudflare-d1` 的 `scheduled` handler 每次都是新 isolate），所以
-**B 必须能退化成 A**——即「挂起点由外部 sweep 投递」这条路径必须走得通，不能
-只有自轮询。折中的正确形态是：**两条路径都支持，由调用方形态决定用哪条**。
+1. 记成「折中方案：core 保留自投递，runtime 作为**可选的**外部驱动器，两者不冲突」
+   ——实际上上游根本没有自投递这条路，自投递本身就是偏离。
+2. 把「core 自轮询」说成能用、只是效率差 —— 实际上它**改变了语义**：
+   挂起依赖进程存活，`approve` 会永久阻塞（而非返回 `paused`）。
+
+教训与前几次一致：**移植时行为必须逐条对照上游实跑**，不能凭「功能上像是等价的」
+推断。这次是用户要求「看看上游 / 可以对 TS 测试」，实跑后 5 分钟就得到了相反的答案。
 
 ### D4. sweep 的边界怎么定？
 
@@ -515,18 +580,20 @@ separate → separate_after → sf_ocr_pre → sf_ocr → sf_ocr_fix
 这是 core 的 `tokio::try_join!` 能解决的问题（`fulfillment-saga` 示例就是），
 **与 runtime 层无关，可以独立推进**。
 
-### D6. core 的 25ms 轮询要不要顺带修？
+### D6. core 的 25ms 轮询要不要顺带修？—— **已被 D3 吸收：代码直接删除**
 
-现状：`exec_pause` 每 25ms `store.get_events()` 全量重读 + `find_resume` 线性扫，
-是 O(n²)。这是 README「已知边界」里记的唯一性能硬伤。
+原问题：`exec_pause` 每 25ms `store.get_events()` 全量重读 + `find_resume`
+线性扫，是 O(n²)，README「已知边界」里记的唯一性能硬伤。当时纠结的是
+「换成 `subscribe` 还是先不动」。
 
-| 选项 | 代价 | 倾向 |
-| --- | --- | --- |
-| **A. 先不动，等 runtime 定了再说** | 硬伤留着 | ✅ 见下 |
-| B. 现在换成 `subscribe` | `subscribe` 返回阻塞 `mpsc::Receiver`，async 上下文里要 `spawn_blocking`；且 store 可以不给（`None`） | ⚠️ |
+**D3 定案后这个问题不存在了**：`exec_pause` 不再等，轮询循环整段删除，
+`RESUME_POLL_MS` 常量随之消失。不是「换个更快的等待方式」，是「不再需要等待」。
 
-**倾向 A 暂时不动**，但要在 D3 的讨论里一并考虑——因为「谁来唤醒」这个问题的
-答案，会决定轮询要留还是要改。
+顺带的收益：`subscribe` 那条路也不用走了（它在 async 上下文里要
+`spawn_blocking`，且 store 可以不给）。
+
+**遗留**：`signal_run` 的文档注释还写着「a live instance picks it up via
+polling」——改成挂起即返回后，这句话不再成立，注释要一并修。
 
 ---
 
@@ -552,11 +619,16 @@ separate → separate_after → sf_ocr_pre → sf_ocr → sf_ocr_fix
 
 1. ~~查 D3 的影响面~~ —— **已实测**，见 D3 附。
 2. ~~查 D5~~ —— **已调查**，见 D5：runtime 层必需（判据是通用形态而非单个应用）。
-3. **拍板 D2 / D4**（D1 已定）：
+3. ~~拍板 D3~~ —— **已定：core 不自轮询**。**下一步是动手改 core**（见 D3 结论的
+   影响表），改完 runtime 的 sweep 才有意义——否则 core 还在自投递。
+   - 改动范围：`exec_pause` 去轮询 → 新增 `WorkflowParked` 哨兵 →
+     `run_workflow` 的 `match` 加 `Paused` 分支（不 append 终态）→ 改 7 个测试。
+   - **LocalDub 同步**：`engine.rs:282` 的 `other =>` 加 `Paused`。这是破坏性的
+     ——不改 LocalDub 会直接把挂起的 workflow 报成错误。
+4. **拍板 D2 / D4**（D1 已定）：
    - D2（lease 位置）—— 倾向 store，前提是不塞进 `RunStore`
    - D4（sweep 边界）—— 倾向保留 `max_*` / `maxDurationMs`
-4. **并行编排（D5 附二）可以独立推进**：它只依赖 core 的 `try_join!`，与
+5. **并行编排（D5 附二）可以独立推进**：它只依赖 core 的 `try_join!`，与
    runtime 层的决策无关。如果想让 LocalDub 先有收益，这条可以并行开工。
 
-**次序**：D1 已定，`WorkflowExecutionStore: RunStore` 的骨架可以立起来了。
-D2 / D4 是在此之上的细节，可在实现 lease / sweep 时再敲定。
+**次序**：D3 先落地（它反向决定 core 的形状），再 D2 / D4 的细节。

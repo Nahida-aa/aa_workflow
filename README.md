@@ -254,7 +254,9 @@ store 必须报 `StoreError::Io`，不许静默 no-op。
   `.middleware::<PExt>()` 决定 `Ext`。
 - schema 即 serde 类型，没有 zod schema 实例对象。
 - 本地一等公民（TS 没有）：`continue_from`、`target_step`、`resource` 门、`up_to_date`。
-- 挂起等待是**轮询式**（25ms 重读日志），因为下游 `FsRunStore` 无 `subscribe`。
+- 挂起**当前**是阻塞式（`exec_pause` 25ms 轮询自投递 timer）——这是与上游的
+  **语义偏离**，已定性、待改：上游是「写到挂起点就返回 `paused`」。见
+  `docs/runtime-design.md` D3。
 
 ## 仓库结构
 
@@ -284,7 +286,8 @@ docs/tanstack-alignment.md  对齐决策记录（含推翻第一轮的论证）
 - **多 worker 协调**：只有 CAS 原语，没有 lease / 心跳 / 抢占 / 陈旧 run 恢复。
   两个 worker 同时 drive 同一 run_id 会同时重放（日志不会坏，但不保证只有一个人在跑）。
 - **sweep**：没有统一的后台单元做崩溃恢复扫描、到期定时器投递、调度桶启动。
-  sleep 目前靠引擎自己在挂起点轮询自投递。
+  sleep 目前靠引擎自己在挂起点轮询自投递——**这是偏离上游的**（上游挂起即返回，
+  由外部投递），已定性待改，见 `docs/runtime-design.md` D3。
 - **schedules / cron**：没有 schedule 定义与分桶。
 - **timer 索引**：`waiting_for.deadline` 有投影，但没有按时间索引的唤醒面，host
   只能轮询。
@@ -298,7 +301,8 @@ runtime + 各 host/store adapter。所以这是阶段性缺位而非设计缺陷
 
 - **没有生产级 store**：core 只有 `InMemoryStore`；`FileRunStore` 的 `append_event`
   是全量读 + 全量重写（O(n²)），且 `Mutex` 只在单进程内有效。
-- **性能是平方级**：25ms 轮询 × 每次全量反序列化日志 × 全量线性扫。长 run 需注意。
+- **性能是平方级**：挂起期间 25ms 轮询 × 每次全量反序列化日志 × 全量线性扫。
+  这条随 D3 的落地一并消失（轮询循环整段删除）。
 - **确定性契约未强制**：引擎不检测 handler 的非确定性写法（TanStack 同样不检测）。
 - **无 observability 集成**：`publisher` 是裸 `Arc<dyn Fn(&WorkflowEvent)>`，core 不依赖
   tracing，接入要自己搭桥。

@@ -112,9 +112,11 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
    我们按同一语义落地：`ctx.approve(key, reason)` / `ctx.sleep(key, dur)` 在
    handler 内挂起，引擎持久化 `STEP_PAUSED` checkpoint（`due_at` 供 timer
    host），外部 `signal_run(run_id, step_id, payload)` 追加 `STEP_RESUME`
-   唤醒（approvals），sleep 到期由引擎自 deliver。等待方是轮询式
-   （25ms 重读日志），因为 LocalDub `FsRunStore` 无 `subscribe`；重放时
-   已交付的 `STEP_RESUME` 从日志短路，挂起点幂等（绝无重复 append）。
+   唤醒；重放时已交付的 `STEP_RESUME` 从日志短路，挂起点幂等（绝无重复 append）。
+   **⚠️ 已知偏离**：上游挂起是「写 checkpoint 后**立即返回** `paused`」，
+   我们是「阻塞在挂起点 25ms 轮询、sleep 到期由引擎自 deliver」。这不只是
+   实现差异——我们的挂起要求进程存活，上游不要求。已定性待改，见
+   `docs/runtime-design.md` D3。
 
 ## 换了模型仍没变的硬设计
 
