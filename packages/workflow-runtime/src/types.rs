@@ -466,8 +466,16 @@ pub enum WorkflowOverlapPolicy {
 }
 
 /// schedule 规格（对齐 `types.ts:192`）：cron 表达式或固定间隔。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+///
+/// `rename_all = "kebab-case"` 管**变体名**（`kind: "interval"`）；
+/// `rename_all_fields = "camelCase"` 管**变体字段**（`everyMs`，对齐上游的
+/// camelCase 字段名）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
 pub enum WorkflowScheduleSpec {
     Cron {
         expression: String,
