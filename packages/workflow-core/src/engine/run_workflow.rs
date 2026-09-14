@@ -645,7 +645,7 @@ mod tests {
                 .await
             }
         });
-        // 等挂起（run.json 写入 workflow_version = "v1"）。
+        // 等挂起（`RunState` 信封此时已记下 `workflow_version = "v1"`）。
         for _ in 0..500 {
             if let Some(st) = store.get_run_state("ver:mismatch").unwrap()
                 && st.status == RunStatus::Paused
