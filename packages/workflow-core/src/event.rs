@@ -157,11 +157,11 @@ pub enum WorkflowEvent {
     ///
     /// **emit-only** 的理由（上游注释原话）：state 由日志重放推导，持久化
     /// delta 会在每次 invocation 重放时重复 append，或者需要重放时跳过。
-    /// delta 语义见 [`crate::state_diff`]。
+    /// delta 语义见 [`crate::engine::state_diff`]。
     StateDelta {
         ts: i64,
         run_id: String,
-        delta: Vec<crate::state_diff::Operation>,
+        delta: Vec<crate::engine::state_diff::Operation>,
     },
 }
 

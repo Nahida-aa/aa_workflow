@@ -17,9 +17,11 @@ use crate::resource::Gate;
 use crate::run_store::RunStore;
 
 mod run_workflow;
+pub mod state_diff;
 pub use run_workflow::{
     RunOptions, RunOutcome, run_workflow, run_workflow_sync, select_workflow_version,
 };
+pub use state_diff::{Operation, diff_state, snapshot_state};
 
 pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
@@ -184,7 +186,7 @@ impl EngineRuntime {
                 .prev_state_snapshot
                 .lock()
                 .expect("state snapshot lock poisoned");
-            let delta = crate::state_diff::diff_state(&prev, &mirror);
+            let delta = state_diff::diff_state(&prev, &mirror);
             if !delta.is_empty() {
                 *prev = mirror;
             }
@@ -2581,7 +2583,7 @@ mod tests {
             .collect();
         assert_eq!(deltas.len(), 2, "两次耐久边界各一条 StateDelta");
 
-        use crate::state_diff::Operation;
+        use state_diff::Operation;
         let ops1 = match deltas[0] {
             WorkflowEvent::StateDelta { delta, .. } => delta,
             _ => unreachable!(),
@@ -2655,7 +2657,7 @@ mod tests {
         match &deltas[0] {
             WorkflowEvent::StateDelta { delta, .. } => assert_eq!(
                 delta,
-                &vec![crate::state_diff::Operation::Replace {
+                &vec![state_diff::Operation::Replace {
                     path: "/n".into(),
                     value: serde_json::json!(1)
                 }]

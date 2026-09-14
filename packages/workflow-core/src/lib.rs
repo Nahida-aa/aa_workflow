@@ -47,12 +47,12 @@ pub mod event;
 pub mod middleware;
 pub mod resource;
 pub mod run_store;
-pub mod state_diff;
 
 pub use define::{
     Backoff, BaseCtx, CreateWorkflowConfig, RetryPolicy, StepCtx, StepOptions, Workflow,
     WorkflowBuilder, WorkflowCtx, WorkflowDefinition, create_workflow,
 };
+pub use engine::{Operation, diff_state, snapshot_state};
 pub use engine::{
     RunOptions, RunOutcome, cancel_run, run_workflow, run_workflow_sync, select_workflow_version,
     signal_event, signal_run,
@@ -64,4 +64,3 @@ pub use resource::{Gate, GateGuard, ResourceKey};
 pub use run_store::{
     DeleteReason, InMemoryStore, PendingApproval, RunState, RunStore, WaitForState,
 };
-pub use state_diff::{Operation, diff_state, snapshot_state};
