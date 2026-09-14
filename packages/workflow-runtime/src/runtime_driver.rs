@@ -438,7 +438,11 @@ impl WorkflowRuntime {
                         workflow: &workflow,
                         workflow_id: &workflow_id,
                         run_id: &args.run_id,
-                        input: None,
+                        // resume 用**持久化在 run 记录里的 input**，不是 None：
+                        // core 每次 drive 都用 `initialize(input)` 重建 state，
+                        // 给 Null 会让强类型 input（`.input::<T>()`）反序列化失败。
+                        // 上游同此：`runtime-driver.ts:481` 传 `claim.run.input`。
+                        input: Some(run.input.clone()),
                         lease_owner,
                         lease_ms,
                         deadline,
@@ -541,11 +545,18 @@ impl WorkflowRuntime {
         )?;
 
         let workflow = self.load_workflow(&workflow_id)?;
+        // 同 `deliver_signal`：resume 必须带持久化的 input。
+        let input = self
+            .config
+            .store
+            .load_run(&args.run_id)?
+            .map(|r| r.input)
+            .unwrap_or(serde_json::Value::Null);
         self.drive_claimed_run(DriveArgs {
             workflow: &workflow,
             workflow_id: &workflow_id,
             run_id: &args.run_id,
-            input: None,
+            input: Some(input),
             lease_owner,
             lease_ms,
             deadline,
@@ -558,8 +569,7 @@ impl WorkflowRuntime {
     }
 
     /// 有界 sweep：恢复陈旧 run → 启动到期 schedule → 投递到期 timer。
-    pub async fn sweep(
-        &self,
+    pub async fn sweep(        &self,
         args: WorkflowRuntimeSweepArgs,
     ) -> anyhow::Result<WorkflowRuntimeSweepResult> {
         let started_at = now_ms();

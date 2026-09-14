@@ -283,11 +283,16 @@ packages/workflow-runtime/  执行所有权层（lease / sweep / timer / schedul
   src/define_runtime.rs     cron / every 规格构造器
   src/schedule_materializer.rs  spec → next_fire_at
 examples/shared/            host 无关示例层（10 个 workflow + FileRunStore + drive 薄壳）
+examples/guide/             TanStack guide 的可运行移植（唯一跑通 core+runtime 端到端的地方）
 docs/tanstack-alignment.md  对齐决策记录（含推翻第一轮的论证）
-docs/runtime-design.md      runtime 层决策记录（D1-D7）
+docs/runtime-design.md      runtime 层决策记录（D1-D8）
 ```
 
 示例层强约束：只依赖 `workflow-core` + tokio，**不依赖 LocalDub**。
+
+> `examples/` 下的示例**必须带断言**（`#[cfg(test)]`）：它们不在
+> `cargo test` 的默认视野里，没有断言就只能靠人手动 `cargo run` 发现问题。
+> `guide` 曾因此静默失效——见 `docs/runtime-design.md` D8。
 
 ## 已知边界
 

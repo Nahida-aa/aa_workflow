@@ -1,7 +1,8 @@
 # workflow-runtime 设计意图
 
 > **状态**：D1 已定（supertrait，不设中间层）。**D3 已落地**（core 挂起即返回）、
-> **D7 已落地**（drive 收尾登记 timer，serverless 路径打通）。D2 / D4 有倾向待确认。
+> **D7 已落地**（drive 收尾登记 timer，serverless 路径打通）、**D8 已落地**
+> （resume 带持久化 input）。D2 / D4 有倾向待确认。
 >
 > **结论：runtime 层必需**——判据是**「有没有常驻的驱动者」**（不是「有没有
 > 持久存储」，两者正交；见 D5）。LocalDub 有常驻 worker，属形态 A，**只用
@@ -678,6 +679,47 @@ sweep 能认领，必须有人把它登记成 `WorkflowExecutionStore::schedule_
 
 **教训**：手工构造状态的测试测不出「生产者缺失」——它把被测环节的输入直接摆好了。
 一个环节有两端（生产者/消费者），只测消费者等于没测。
+
+### D8. resume 时 input 从哪来？—— **已定且已落地**（由 guide 暴露）
+
+core 每次 drive 都用 `initialize(input)` **重建 state**，所以 resume 也必须拿到
+原始 input。原来 `deliver_signal` / `deliver_approval` 给的是 `input: None`，
+落到 `RunOptions::new(Null)`——强类型 input（`.input::<FulfillmentInput>()`）
+直接反序列化失败：
+
+```
+invalid type: null, expected struct FulfillmentInput
+```
+
+**表现极具迷惑性**：run 不是报错在挂起时，而是**第一次被唤醒时才 Errored**。
+所以「能挂起」看起来是对的，挂起之后就再也起不来了。
+
+修法（对齐上游 `runtime-driver.ts:481` 传 `claim.run.input`）：resume 一律从
+run 记录里取持久化的 input。三个入口都补了：
+
+| 入口 | 原来 | 现在 |
+| --- | --- | --- |
+| `deliver_signal` | `input: None` | `Some(run.input)` |
+| `deliver_approval` | `input: None` | 从 store 读 run 记录 |
+| sweep 的 recover | `Some(claim.run.input)` ✅ | 本来就对 |
+| sweep 的 timer | 走 `deliver_signal` | 随之修好 |
+
+#### 为什么之前没发现
+
+`examples/guide` 是**唯一**同时用到「强类型 input（`.input::<T>()`）+ runtime 的
+resume 路径」的地方。而它：
+
+1. **没有测试**——`cargo test` 看不见它，只有 `cargo run` 才炸；
+2. 它写在上个时代的语义上（等自轮询），所以 D3 之后**早就跑不通了**，
+   真正的原因（input）被那层更显眼的 panic 盖住了。
+
+补的测试：`examples/guide` 现在有 `#[cfg(test)] mod guide_tests`，三条断言覆盖
+「定时器挂起 → sweep 唤醒 → 信号挂起 → 投递完成」的完整链路 + webhook 重投幂等
++ 已完成 step 的 replay 短路。
+
+**教训**：`examples/` 里没有测试的 crate 是**语义漂移的盲区**。它编译得过
+（类型没变）、`cargo test` 也不看它（没有测试），只有在有人手动 `cargo run`
+时才发现——而那次运行很可能是在几个月后。**可运行的示例必须带断言**。
 
 #### 顺带发现（未改）
 
