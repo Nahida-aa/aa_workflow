@@ -7,12 +7,14 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunOptions.runtime�
 
 图例：✅ 完全对等（含语义） · ◐ 对等但有命名/签名差异 · ◯ 部分实现 · ✖ 未实现
 
-> **⚠️ 全局偏离（未修）**：表内 `yield_` / `sleep` / `sleep_until` /
-> `wait_for_event` / `approve` 几行的「轮询后放行」「≈25-50ms」等描述，
-> 都建立在**我们的挂起是阻塞式**这一前提上。上游不是——上游写 checkpoint 后
-> **立即返回 `paused`**。这是语义偏离而非实现差异（我们的挂起要求进程存活），
-> 已定性待改。见 [`docs/runtime-design.md`](../../docs/runtime-design.md) D3。
-> 改动落地后本表的「耗时」类备注要一并删掉。
+> **挂起语义（已对齐）**：`yield_` / `sleep` / `sleep_until` / `wait_for_event` /
+> `approve` 都是**写到挂起点就抛内部哨兵返回**，drive 以 `Paused` 收尾
+> （`WorkflowParked`，对应上游的 `throw new WorkflowPaused()` +
+> `if (engine.paused) return`）。**不阻塞等待**——唤醒由外部投递。
+> 详见 [`docs/runtime-design.md`](../../docs/runtime-design.md) D3。
+>
+> 表内 `deadline` 一律是**绝对** UTC ms 时间戳（上游同形：`sleep(ms)` 定义在
+> `sleepUntil(Date.now()+ms)` 上，`run-workflow.ts:992`）。
 
 ## ctx（handler 参数）
 
@@ -27,7 +29,7 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunOptions.runtime�
 | `runtime.deadline?: number` | `deadline() -> Option<i64>` | ✅ | 无 deadline 时 TS 为 `undefined`，Rust 为 `None` |
 | `runtime.timeRemaining()` | `time_remaining() -> u64` | ✅ | 无 deadline：TS `Infinity`，Rust `u64::MAX`（外部可见均为「无限」，值不同） |
 | `runtime.shouldYield(minRemainingMs?)` | `should_yield()` | ◐ | TS 支持按调用传 `minRemainingMs` 覆盖；Rust 只有 RunOptions 级默认值，不支持逐调用覆盖 |
-| `runtime.yield(options?)` | `yield_()` | ◐ | 行为对等：park 在 `"__timer"` 直到 `yieldResumeAt`（缺省 now+1ms）。差异：TS 可传 `id`/`reason`；Rust 自动派生 `__yield-{n}` key，无 reason。缺省 1ms 会经 timer 轮询 tick（25ms）后放行，实际≈25-50ms |
+| `runtime.yield(options?)` | `yield_()` | ◐ | 行为对等：park 在 `"__timer"` 直到 `yieldResumeAt`（缺省 now+1ms），**写 checkpoint 即返回**，由外部 timer 投递放行。差异：TS 可传 `id`/`reason`；Rust 自动派生 `__yield-{n}` key，无 reason |
 | `step(id, fn, options?)` | `step(id, f)` / `step_with(id, f, StepOptions)` | ✅ | |
 | `sleep(ms, options?)` | `sleep(key, ms)` | ◐ | TS `id` 可选；Rust key **必填**（确定性/可重入之需） |
 | `sleepUntil(timestamp, options?)` | `sleep_until(key, ts_ms)` | ◐ | 同上；过去时间戳立即放行，二者一致 |
@@ -71,8 +73,11 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunOptions.runtime�
 1. **`yield` 命名**：Rust 保留字 → `yield_`（引用方需注意）。
 2. **run 级 `signal`**：仅 `is_cancelled()` 谓词；无中止回调注册。实现细节：
    取消由 `cancel_run` 将 RunState 置 `Aborted`，引擎在 step 入口 / attempt
-   重试前 / pause 轮询 tick（≤25ms）轮询拾取 → run 以 `Aborted` + `RunErrored
-   "workflow aborted"` 终局（对齐 TanStack code `'aborted'`）。
+   重试前 / `exec_pause` 入口轮询拾取 → run 以 `Aborted` + `RunErrored
+   "workflow aborted"` 终局（对齐 TanStack code `'aborted'`）。**`Aborted` 是
+   锁存终态**：后续 drive 直接返回 `Aborted`，不把 run 复活（对齐上游 `resumeRun`
+   对 aborted 的处理）。挂起期间 cancel 只翻状态，等下次 drive 才被观察——挂起时
+   本来就没有进程在跑。
 3. **step 级 `attempt` / `signal`**：`StepCtx.attempt` 与 `StepCtx::is_cancelled()`
    已暴露（见 StepContext 矩阵）；仍缺的是「可被中断的 await」——只能协作式自检。
 4. **`shouldYield` 逐调用 `minRemainingMs`**：未支持（仅 RunOptions 级）。

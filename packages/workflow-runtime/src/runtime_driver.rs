@@ -1112,41 +1112,34 @@ mod driver_tests {
         assert_eq!(second.kind, RunResultKind::NotClaimable);
     }
 
-    /// 信号投递：核心断言是 run 最终完成。原 drive 仍持有 lease（自轮询中），
-    /// 所以 deliver 的尝试认领会得到 `NotClaimable`——恢复由存活的 drive 完成
-    /// （25ms 内拾取 StepResume）。
+    /// 信号投递：`deliver_signal` 自己认领 + 驱动到完成。
+    ///
+    /// D3 之后挂起会**释放** lease（drive 已返回），所以 deliver 能直接 claim，
+    /// 不用再等一个存活的自轮询 drive 来拾取 StepResume。
     #[tokio::test]
     async fn deliver_signal_resumes_paused_run() {
         let fx = runtime_with("waiter", waiting_workflow());
-        let rt = Arc::clone(&fx.rt);
-        let drive = tokio::spawn(async move {
-            rt.start_run(WorkflowRuntimeStartRunArgs {
+
+        // start_run 跑到挂起点就返回，run 落在 Paused。
+        let started = fx
+            .rt
+            .start_run(WorkflowRuntimeStartRunArgs {
                 workflow_id: "waiter".into(),
                 run_id: "r1".into(),
                 input: serde_json::json!({}),
                 ..Default::default()
             })
             .await
-        });
+            .unwrap();
+        assert_eq!(started.kind, RunResultKind::Paused);
+        let run = fx.mem.load_run("r1").unwrap().unwrap();
+        assert_eq!(run.status, WorkflowExecutionStatus::Paused);
+        assert_eq!(
+            run.waiting_for.as_ref().map(|w| w.signal_name.as_str()),
+            Some("payment")
+        );
 
-        // 等 run 在 wait_for_event 挂起（waiting_for 投影出现）。
-        for _ in 0..500 {
-            let Some(run) = fx.mem.load_run("r1").unwrap() else {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                continue;
-            };
-            if run.status == WorkflowExecutionStatus::Paused
-                && run
-                    .waiting_for
-                    .as_ref()
-                    .map(|w| w.signal_name == "payment")
-                    .unwrap_or(false)
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-
+        // deliver_signal 认领 + 驱动到完成。
         let result = fx
             .rt
             .deliver_signal(WorkflowRuntimeDeliverSignalArgs {
@@ -1158,14 +1151,13 @@ mod driver_tests {
             })
             .await
             .unwrap();
-        assert_eq!(result.kind, RunResultKind::NotClaimable);
+        assert_eq!(result.kind, RunResultKind::Completed);
 
         let finished = wait_for_status(&fx.mem, "r1", WorkflowExecutionStatus::Finished).await;
         assert_eq!(
             finished.output,
             Some(serde_json::json!({ "shipped": true }))
         );
-        drive.await.unwrap().unwrap();
     }
 
     /// 模拟「上一个 worker 刚 claim 就死了」：create + claim（短 lease），不驱动。

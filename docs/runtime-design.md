@@ -1,7 +1,7 @@
 # workflow-runtime 设计意图
 
-> **状态**：D1 已定（supertrait，不设中间层）。**D3 已定**（core 不自轮询，
-> 挂起即返回——但**尚未动手改 core**）。D2 / D4 有倾向待确认。
+> **状态**：D1 已定（supertrait，不设中间层）。**D3 已定且已落地**（core 不自轮询，
+> 挂起即返回）。D2 / D4 有倾向待确认。
 >
 > **结论：runtime 层必需**——判据是**「有没有常驻的驱动者」**（不是「有没有
 > 持久存储」，两者正交；见 D5）。LocalDub 有常驻 worker，属形态 A，**只用
@@ -386,16 +386,17 @@ drive 正常结束、进程可以走了。
 **这不只是「实现细节不同」，是核心语义上的能力差异**：我们的挂起依赖进程存活，
 上游的挂起不需要。上游因此可以把 `sleep` 挂几天的 run 交给存储，自己退出。
 
-#### 结论
+#### 结论（**已落地**）
 
 改 `exec_pause`：**写挂起 checkpoint（`StepPaused`）后立即返回**，不再自轮询。
 
-实现上对齐上游的 `throw new WorkflowPaused()` 形态——需要一个类似
-`StepHalt` 的内部哨兵错误（比如 `WorkflowParked`），让 drive 的
-`match handler_result` 认出它并走 `Paused` 收尾：
+对齐上游的 `throw new WorkflowPaused()` 形态——新增内部哨兵
+`WorkflowParked`（与 `StepHalt` 并列），由 drive 的 `match handler_result` 收尾：
 
 ```rust
-Err(e) if e.downcast_ref::<WorkflowParked>().is_some() => (RunStatus::Paused, None, None),
+Err(e) if e.downcast_ref::<WorkflowParked>().is_some() => {
+    return Ok(RunOutcome { run_id, status: RunStatus::Paused, output: None, error: None });
+}
 ```
 
 **挂起不是终态**：`RunStatus::Paused` 下**不 append** `RunFinished` / `RunErrored`
@@ -406,33 +407,47 @@ Err(e) if e.downcast_ref::<WorkflowParked>().is_some() => (RunStatus::Paused, No
 这同时解释了为什么 runtime 的 `sweep` 是**必需**而非可选——core 不再自投递，
 就必须有外部驱动器。
 
-连带影响：
+落地时**顺带发现并修掉的四处**（不在最初的评估里，都是删掉轮询后暴露的）：
+
+| 项 | 问题 | 修法 |
+| --- | --- | --- |
+| **deadline 语义** | `exec_pause` 收的是 `dur: Duration`，`sleep_until(过去)` 被 clamp 成 `sleep(0)`，`due_at` 变成 `now`——**原始时间戳丢了**，sweep 无法索引 | `exec_pause` 改收 `deadline: Option<i64>`（**绝对**时间戳，原样存）。`sleep(ms)` 按上游改写为 `sleep_until(now+ms)`（`run-workflow.ts:992`），`yield_` 同理传 `yield_resume_at` |
+| **wait 投影的清除点** | 原 `clear_run_wait` 在「恢复的那一刻」清；挂起即返回后没有「那一刻」了 | 移到**下次 drive 的前导**（`run_workflow`），对齐上游 `run-workflow.ts:336-342`。顺带清 `pending_approval` |
+| **cancel 不再被观察** | 原检查在轮询循环里 | 移到 `exec_pause` 入口（挂起是最后一个能观察 flag 的边界）；并把 `Aborted` 做成**锁存终态**——drive 前导直接返回 `Aborted`，不再把 run 复活成 `Running`（对齐上游 `resumeRun` 对 aborted 的处理，`run-workflow.ts:275-282`） |
+| **runtime driver 的 deliver** | 原来 deliver 拿到 `NotClaimable`（挂起的 drive 还攥着 lease）；现在挂起即释放，deliver 自己 claim + 驱动到 `Completed` | 测试断言随之改成 `Completed` |
+
+连带影响（均已落地）：
 
 | 影响 | 内容 |
 | --- | --- |
-| core | `exec_pause` 去掉轮询循环；新增 `WorkflowParked` 哨兵（沿用 `StepHalt` 的位置与处理方式） |
-| `run_workflow` | `match handler_result` 新增 `Paused` 分支；`Paused` 下不 append 终态事件 |
+| core | `exec_pause` 去掉轮询循环与 `RESUME_POLL_MS`；新增 `WorkflowParked` 哨兵；`clear_run_wait` 删除 |
+| `run_workflow` | 新增 `Paused` 收尾分支（不 append 终态）；drive 前导清 wait 投影 + 锁存 `Aborted` |
 | `RunStatus::Paused` | 从「投影状态」变成**真实的 drive 终态** |
 | **上一版的「折中方案」作废** | 「core 保留自投递 + runtime 作为可选驱动器」不成立——那正是偏离本身 |
-| 测试 | 依赖「同一次 drive 内自动 resume」的 7 个测试要改成「等 pause → 投递 → 再 drive」（与 approval 类测试同模式） |
+| 测试 | 实际改了 **21 个**（不是评估时估的 7 个——approve 类也依赖了阻塞行为）。写法统一为「drive → 断言 `Paused` → 投递 → 再 drive」 |
 | `yield_` | 走 `exec_pause`，所以 `should_yield` 路径也变成挂起即返回——这正是上游的语义（让出预算后由 host 重新唤起） |
-| **LocalDub** | `run_workflow_engine` 的 `match outcome.status` **必须**处理 `Paused`（`engine.rs:282` 现在掉进 `other =>` 报「unexpected engine status」）。语义上应把 workflow 标记为「等待中」而非失败 |
+| **LocalDub** | `run_workflow_engine` 的 `match outcome.status` **必须**处理 `Paused`（`engine.rs:282` 现在掉进 `other =>` 报「unexpected engine status」）——**这是一处破坏性变更**，LocalDub 侧未同步修（按「LocalDub 只是普通使用者」处理） |
 
-#### D3 附一：影响面实测（改前做的）
+**测试耗时顺带暴跌**：examples 包从 66.77s → 0.52s。原来是真在等 sleep。
 
-依赖「同一次 drive 内自动 resume」的测试共 **7 个**：
+#### D3 附一：影响面实测（改前做的，事后看偏保守）
+
+当时统计「依赖同一次 drive 内自动 resume」的测试为 **7 个**：
 
 | 位置 | 测试 |
 | --- | --- |
-| `engine/mod.rs:1555` | `sleep_pauses_then_auto_resumes` —— 断言 `task.await` 在整个 sleep 期间不返回，**且引擎自己 append 了 `StepResume`** |
-| `engine/mod.rs:1808` | `sleep_until_past_resolves_immediately` |
-| `engine/mod.rs:1841` | `sleep_until_schedules_timer` |
-| `examples/.../workflows.rs:1068` | `invoice_double_sleep_auto_resumes` |
-| `examples/.../workflows.rs:1184` | `refund_approved_disburses_after_timer` |
-| `examples/.../workflows.rs:1614` | `event_gate_emit_wait_then_sleep_until` |
-| `examples/.../runtime.rs:265` | `invoice_double_sleep_survives_restart`（跨进程重启，本就不依赖单次 drive） |
+| `engine/mod.rs` | `sleep_pauses_then_auto_resumes` |
+| `engine/mod.rs` | `sleep_until_past_resolves_immediately` |
+| `engine/mod.rs` | `sleep_until_schedules_timer` |
+| `examples/.../workflows.rs` | `invoice_double_sleep_auto_resumes` |
+| `examples/.../workflows.rs` | `refund_approved_disburses_after_timer` |
+| `examples/.../workflows.rs` | `event_gate_emit_wait_then_sleep_until` |
+| `examples/.../runtime.rs` | `invoice_double_sleep_survives_restart` |
 
-改写方式统一为「等 pause → 手动投递 → 再 drive」，与 approval 类测试同模式。
+**漏的是「阻塞式 approve」那一类**：它们在评估时被当作「已经是正确写法」（因为
+测试用的是 `spawn` + `wait_until` + 外部 `signal_run`），但那个写法的前提正是
+「drive 会一直阻塞」，所以也得改。教训：**别按「测试怎么写」分类，要按「依赖了
+哪个行为」分类**。
 
 #### D3 附二：曾经的错误结论（留档）
 
@@ -580,20 +595,17 @@ separate → separate_after → sf_ocr_pre → sf_ocr → sf_ocr_fix
 这是 core 的 `tokio::try_join!` 能解决的问题（`fulfillment-saga` 示例就是），
 **与 runtime 层无关，可以独立推进**。
 
-### D6. core 的 25ms 轮询要不要顺带修？—— **已被 D3 吸收：代码直接删除**
+### D6. core 的 25ms 轮询要不要顺带修？—— **已被 D3 吸收：代码已删除**
 
 原问题：`exec_pause` 每 25ms `store.get_events()` 全量重读 + `find_resume`
 线性扫，是 O(n²)，README「已知边界」里记的唯一性能硬伤。当时纠结的是
 「换成 `subscribe` 还是先不动」。
 
-**D3 定案后这个问题不存在了**：`exec_pause` 不再等，轮询循环整段删除，
+**D3 落地后这个问题不存在了**：`exec_pause` 不再等，轮询循环整段删除，
 `RESUME_POLL_MS` 常量随之消失。不是「换个更快的等待方式」，是「不再需要等待」。
 
 顺带的收益：`subscribe` 那条路也不用走了（它在 async 上下文里要
 `spawn_blocking`，且 store 可以不给）。
-
-**遗留**：`signal_run` 的文档注释还写着「a live instance picks it up via
-polling」——改成挂起即返回后，这句话不再成立，注释要一并修。
 
 ---
 
@@ -619,16 +631,21 @@ polling」——改成挂起即返回后，这句话不再成立，注释要一�
 
 1. ~~查 D3 的影响面~~ —— **已实测**，见 D3 附。
 2. ~~查 D5~~ —— **已调查**，见 D5：runtime 层必需（判据是通用形态而非单个应用）。
-3. ~~拍板 D3~~ —— **已定：core 不自轮询**。**下一步是动手改 core**（见 D3 结论的
-   影响表），改完 runtime 的 sweep 才有意义——否则 core 还在自投递。
-   - 改动范围：`exec_pause` 去轮询 → 新增 `WorkflowParked` 哨兵 →
-     `run_workflow` 的 `match` 加 `Paused` 分支（不 append 终态）→ 改 7 个测试。
-   - **LocalDub 同步**：`engine.rs:282` 的 `other =>` 加 `Paused`。这是破坏性的
-     ——不改 LocalDub 会直接把挂起的 workflow 报成错误。
+3. ~~拍板 D3~~ → ~~动手改 core~~ —— **已完成**（见 D3 结论）。`exec_pause` 不再等，
+   `WorkflowParked` 哨兵就位，21 个测试改写，145 个测试全绿。
+   - **LocalDub 侧未同步**：`engine.rs:282` 的 `other =>` 仍需加 `Paused`。这是一处
+     破坏性的接口变更——LocalDub 下次升级依赖时会踩到。
 4. **拍板 D2 / D4**（D1 已定）：
    - D2（lease 位置）—— 倾向 store，前提是不塞进 `RunStore`
    - D4（sweep 边界）—— 倾向保留 `max_*` / `maxDurationMs`
 5. **并行编排（D5 附二）可以独立推进**：它只依赖 core 的 `try_join!`，与
    runtime 层的决策无关。如果想让 LocalDub 先有收益，这条可以并行开工。
 
-**次序**：D3 先落地（它反向决定 core 的形状），再 D2 / D4 的细节。
+**次序**：D3 已落地（它反向决定了 core 的形状），接下来是 D2 / D4 的细节。**
+
+### 顺带暴露的一个设计缺口
+
+`WorkflowExecutionStore` 目前没有「查所有到期的 timer」这种入口，而 D3 之后
+`deadline` 是**绝对时间戳**（见 D3 结论的影响表）——这正是 sweep 索引需要的形状。
+实现 runtime 的 timer 认领时，`waiting_for.deadline` 加上按时间排序的查询就是
+`claim_due_timers` 的雏形。这一点在 D4 里一并定。

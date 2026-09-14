@@ -254,9 +254,9 @@ store 必须报 `StoreError::Io`，不许静默 no-op。
   `.middleware::<PExt>()` 决定 `Ext`。
 - schema 即 serde 类型，没有 zod schema 实例对象。
 - 本地一等公民（TS 没有）：`continue_from`、`target_step`、`resource` 门、`up_to_date`。
-- 挂起**当前**是阻塞式（`exec_pause` 25ms 轮询自投递 timer）——这是与上游的
-  **语义偏离**，已定性、待改：上游是「写到挂起点就返回 `paused`」。见
-  `docs/runtime-design.md` D3。
+- 挂起是**「写到挂起点就返回 `Paused`」**，引擎不阻塞等待（对齐上游）。唤醒由
+  外部投递：`signal_run` / `signal_event` 追加 `StepResume`，或 timer 驱动器
+  认领 `waiting_for.deadline`。见 `docs/runtime-design.md` D3。
 
 ## 仓库结构
 
@@ -264,33 +264,42 @@ store 必须报 `StoreError::Io`，不许静默 no-op。
 packages/workflow-core/     引擎本体
   src/define/mod.rs         handler 运行时：BaseCtx / StepCtx / StepOptions / Workflow
   src/define/define_workflow.rs  声明入口：create_workflow / WorkflowBuilder
+  src/define/state_handle.rs  共享可变 state（对齐 TS 的 live 引用语义）
   src/middleware/create_middleware.rs  Middleware（produce + wrap）
   src/engine/mod.rs         EngineRuntime、exec_step / exec_pause、signal_*
   src/engine/run_workflow.rs  单次 drive 的顶层编排、RunOptions
+  src/engine/state_diff.rs  RFC 6902 state delta（对齐上游 engine/state-diff.ts）
+  src/registry/select_version.rs  版本路由（匹配不上不回退）
   src/error.rs              StoreError / WorkflowError / RunError / RunErrorCode
   src/event.rs              WorkflowEvent / RunStatus / fold_step_states
   src/run_store/mod.rs      RunStore trait + RunState 信封
   src/run_store/in_memory.rs  InMemoryStore
   src/resource.rs           容量-1 的资源门
+packages/workflow-runtime/  执行所有权层（lease / sweep / timer / schedule）
+  src/types.rs              19 个方法的结构体 + WorkflowExecutionStatus
+  src/run_store_adapter.rs  WorkflowRunStoreAdapterStore + 降格适配器
+  src/in_memory_store.rs    InMemoryExecutionStore
+  src/runtime_driver.rs     start_run / deliver_signal / deliver_approval / sweep
+  src/define_runtime.rs     cron / every 规格构造器
+  src/schedule_materializer.rs  spec → next_fire_at
 examples/shared/            host 无关示例层（10 个 workflow + FileRunStore + drive 薄壳）
 docs/tanstack-alignment.md  对齐决策记录（含推翻第一轮的论证）
+docs/runtime-design.md      runtime 层决策记录（D1-D6）
 ```
 
 示例层强约束：只依赖 `workflow-core` + tokio，**不依赖 LocalDub**。
 
 ## 已知边界
 
-对标范围止于 TanStack 的 core engine。**它对等的 `@tanstack/workflow-runtime`
-层我们还没有**，即以下能力全部缺失：
+`workflow-runtime` 层已移植（存储契约 / in-memory 实现 / driver / schedule
+materializer / 规格构造器），**但还没有被任何真实 host 用过**——以下是尚未验证
+或缺失的部分：
 
-- **多 worker 协调**：只有 CAS 原语，没有 lease / 心跳 / 抢占 / 陈旧 run 恢复。
-  两个 worker 同时 drive 同一 run_id 会同时重放（日志不会坏，但不保证只有一个人在跑）。
-- **sweep**：没有统一的后台单元做崩溃恢复扫描、到期定时器投递、调度桶启动。
-  sleep 目前靠引擎自己在挂起点轮询自投递——**这是偏离上游的**（上游挂起即返回，
-  由外部投递），已定性待改，见 `docs/runtime-design.md` D3。
-- **schedules / cron**：没有 schedule 定义与分桶。
-- **timer 索引**：`waiting_for.deadline` 有投影，但没有按时间索引的唤醒面，host
-  只能轮询。
+- **多 worker 协调**：lease / 心跳 / 抢占的接口都在 `WorkflowExecutionStore` 上，
+  但只有 `InMemoryExecutionStore` 一个实现，**没有生产级 store 验证过它**。
+- **timer 索引**：`waiting_for.deadline` 是**绝对时间戳**（D3 之后一律如此），
+  形状已适合索引；缺的是 `ExecutionStore` 上「查到期 timer」的入口。
+- **schedules / cron**：已有 spec → `next_fire_at` 的换算，缺分桶调度接进 true host。
 
 这一层在上游也是**后补的**：core 的 0.0.1 之后六天，才由 `5d05fa8` 一次性带出
 runtime + 各 host/store adapter。所以这是阶段性缺位而非设计缺陷；补的时候应照
@@ -301,8 +310,6 @@ runtime + 各 host/store adapter。所以这是阶段性缺位而非设计缺陷
 
 - **没有生产级 store**：core 只有 `InMemoryStore`；`FileRunStore` 的 `append_event`
   是全量读 + 全量重写（O(n²)），且 `Mutex` 只在单进程内有效。
-- **性能是平方级**：挂起期间 25ms 轮询 × 每次全量反序列化日志 × 全量线性扫。
-  这条随 D3 的落地一并消失（轮询循环整段删除）。
 - **确定性契约未强制**：引擎不检测 handler 的非确定性写法（TanStack 同样不检测）。
 - **无 observability 集成**：`publisher` 是裸 `Arc<dyn Fn(&WorkflowEvent)>`，core 不依赖
   tracing，接入要自己搭桥。

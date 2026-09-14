@@ -703,18 +703,77 @@ mod tests {
             .expect("应有 StepFinished")
     }
 
-    /// 轮询直到 run 在 `step_id` 挂起（外部 signal 投递前的等待点）。
-    async fn wait_paused<S: RunStore + ?Sized>(store: &Arc<S>, run_id: &str, step_id: &str) {
-        for _ in 0..2000 {
-            let evs = store.get_events(run_id).unwrap();
-            if evs.iter().any(
-                |e| matches!(e, WorkflowEvent::StepPaused { step_id: id, .. } if id == step_id),
-            ) {
-                return;
+    /// 驱动到**挂起**并返回：`run_workflow` 在挂起点立刻返回 `Paused`（不等外部
+    /// 投递）。这就是运行时（runtime）要替我们做的事——core 只负责「跑到挂起点
+    /// 就撒手」。
+    ///
+    /// `opts` 是构造 per-invocation 选项的闭包——每个 drive 都要新建一份
+    /// （`RunOptions` 里有 deadline / yield_resume_at 这类 per-drive 字段）。
+    async fn drive_to_pause(
+        store: &Arc<dyn RunStore>,
+        wf: &Workflow,
+        opts: impl Fn() -> RunOptions,
+    ) -> RunStatus {
+        run_workflow(wf, store.clone(), &opts(), None)
+            .await
+            .unwrap()
+            .status
+    }
+
+    /// 投递外部 signal 后再驱动一次，返回最终结果。
+    async fn drive_after_signal(
+        store: &Arc<dyn RunStore>,
+        wf: &Workflow,
+        opts: impl Fn() -> RunOptions,
+        step_id: &str,
+        payload: serde_json::Value,
+    ) -> workflow_core::RunOutcome {
+        let run_id = opts().run_id.clone().expect("测试应显式指定 run_id");
+        signal_run(store.as_ref(), &run_id, step_id, payload).unwrap();
+        run_workflow(wf, store.clone(), &opts(), None)
+            .await
+            .unwrap()
+    }
+
+    /// 反复 drive，替**计时器**投递（睡到 `deadline` 再投），直到 run 不再挂在
+    /// `__timer` 上。等价于 runtime 的 `sweep` 里的 timer 认领逻辑——放在这里
+    /// 是为了让示例测试不必手写「等 sleep → 投递 → 再 drive」的循环。
+    ///
+    /// 非 timer 的挂起（approve / wait_for_event）原样返回，由调用方投递。
+    async fn drive_through_timers(
+        store: &Arc<dyn RunStore>,
+        wf: &Workflow,
+        opts: impl Fn() -> RunOptions,
+    ) -> workflow_core::RunOutcome {
+        loop {
+            let run_id = opts().run_id.clone().expect("测试应显式指定 run_id");
+            let out = run_workflow(wf, store.clone(), &opts(), None).await.unwrap();
+            if out.status != RunStatus::Paused {
+                return out;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            // 挂起投影有两种：signal（含 sleep 的 `__timer`）走 `waiting_for`，
+            // 审批走 `pending_approval`。只有前者是计时器。
+            let st = store.get_run_state(&run_id).unwrap().unwrap();
+            let Some(w) = st.waiting_for else {
+                return out;
+            };
+            if w.signal_name != "__timer" {
+                return out;
+            }
+            // 睡到 deadline（已过期则立即）。
+            if let Some(due) = w.deadline
+                && due > now_ms()
+            {
+                tokio::time::sleep(Duration::from_millis((due - now_ms()) as u64)).await;
+            }
+            signal_run(
+                store.as_ref(),
+                &run_id,
+                w.step_id.as_deref().expect("timer 挂起应有 step_id"),
+                serde_json::Value::Null,
+            )
+            .unwrap();
         }
-        panic!("run {run_id} never paused at {step_id}");
     }
 
     #[tokio::test]
@@ -723,7 +782,7 @@ mod tests {
         payment_gateway::reset();
         payment_gateway::set_fail_first(2);
 
-        let store = Arc::new(InMemoryStore::new());
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let wf = fulfillment_saga();
 
         let out = run_workflow(
@@ -761,7 +820,7 @@ mod tests {
         payment_gateway::reset();
         payment_gateway::set_fail_always(true);
 
-        let store = Arc::new(InMemoryStore::new());
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let wf = fulfillment_saga();
 
         // run 1: charge 在 3 次重试后仍失败 → run Errored
@@ -831,7 +890,7 @@ mod tests {
 
     #[tokio::test]
     async fn email_digest_resume_and_continue_from() {
-        let store = Arc::new(InMemoryStore::new());
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let wf = email_digest();
 
         let input = serde_json::json!({ "days": 7 });
@@ -888,44 +947,24 @@ mod tests {
 
     #[tokio::test]
     async fn approval_pauses_until_signal_then_publishes() {
-        let store = Arc::new(InMemoryStore::new());
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let wf = approval_review();
+        let opts = || RunOptions::new(serde_json::json!({})).run_id("approve:r");
 
-        let store2 = store.clone();
-        let wf2 = wf.clone();
-        let task = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({})).run_id("approve:r"),
-                None,
-            )
-            .await
-        });
-
-        for _ in 0..2000 {
-            let evs = store.get_events("approve:r").unwrap();
-            if evs.iter().any(
-                |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "review"),
-            ) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
         assert_eq!(
-            store.get_run_state("approve:r").unwrap().unwrap().status,
+            drive_to_pause(&store, &wf, opts).await,
             RunStatus::Paused,
             "挂起时 run 状态应为 Paused"
         );
 
-        signal_run(
-            store.as_ref(),
-            "approve:r",
+        let out = drive_after_signal(
+            &store,
+            &wf,
+            opts,
             "review",
             serde_json::json!({ "ok": true }),
         )
-        .unwrap();
-        let out = task.await.unwrap().unwrap();
+        .await;
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output, Some(serde_json::json!({ "ok": true })));
 
@@ -954,33 +993,25 @@ mod tests {
     async fn fulfillment_sleep_gate_then_wait_event() {
         let _guard = GATEWAY_TEST_LOCK.lock().await;
         payment_gateway::reset();
-        let store = Arc::new(InMemoryStore::new());
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let wf = fulfillment();
-        let store2 = store.clone();
-        let wf2 = wf.clone();
-        let task = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({
-                    "orderId": "o-1",
-                    "readyAt": now_ms() + 10,
-                }))
-                .run_id("fulfill:p"),
-                None,
-            )
-            .await
-        });
+        // `ready` 是 sleep（由 drive_through_timers 自动投递），
+        // `payment` 是 approve（人工投递）。
+        let opts = || {
+            RunOptions::new(serde_json::json!({ "orderId": "o-1", "readyAt": now_ms() + 10 }))
+                .run_id("fulfill:p")
+        };
 
-        wait_paused(&store, "fulfill:p", "payment").await;
-        signal_run(
-            store.as_ref(),
-            "fulfill:p",
+        let out = drive_through_timers(&store, &wf, opts).await;
+        assert_eq!(out.status, RunStatus::Paused, "应停在 payment 等审批");
+        let out = drive_after_signal(
+            &store,
+            &wf,
+            opts,
             "payment",
             serde_json::json!({ "ok": true }),
         )
-        .unwrap();
-        let out = task.await.unwrap().unwrap();
+        .await;
         assert_eq!(out.status, RunStatus::Finished);
 
         let events = store.get_events("fulfill:p").unwrap();
@@ -999,7 +1030,7 @@ mod tests {
     async fn approval_order_below_threshold_completes_immediately() {
         let _guard = GATEWAY_TEST_LOCK.lock().await;
         payment_gateway::reset();
-        let store = Arc::new(InMemoryStore::new());
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let out = run_workflow(
             &approval_order(),
             store.clone(),
@@ -1032,30 +1063,22 @@ mod tests {
     async fn approval_order_above_threshold_await_decision() {
         let _guard = GATEWAY_TEST_LOCK.lock().await;
         payment_gateway::reset();
-        let store = Arc::new(InMemoryStore::new());
-        let store2 = store.clone();
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let wf = approval_order();
-        let wf2 = wf.clone();
-        let task = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({ "orderId": "o-2", "amount": 5000 }))
-                    .run_id("approve:o"),
-                None,
-            )
-            .await
-        });
+        let opts = || {
+            RunOptions::new(serde_json::json!({ "orderId": "o-2", "amount": 5000 }))
+                .run_id("approve:o")
+        };
 
-        wait_paused(&store, "approve:o", "review").await;
-        signal_run(
-            store.as_ref(),
-            "approve:o",
+        assert_eq!(drive_to_pause(&store, &wf, opts).await, RunStatus::Paused);
+        let out = drive_after_signal(
+            &store,
+            &wf,
+            opts,
             "review",
             serde_json::json!({ "ok": false, "feedback": "budget overrun" }),
         )
-        .unwrap();
-        let out = task.await.unwrap().unwrap();
+        .await;
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output.clone().unwrap()["status"], "rejected");
         assert_eq!(out.output.clone().unwrap()["reason"], "budget overrun");
@@ -1064,17 +1087,17 @@ mod tests {
         assert_eq!(finished_count(&events, "charge-payment"), 0);
     }
 
+    /// 两处 sleep：run 挂起 → 外部投递 → 挂起 → 外部投递 → Finished。
+    /// 一次 `run_workflow` 不再跑完（D3），所以这里要驱动三次。
     #[tokio::test]
-    async fn invoice_double_sleep_auto_resumes() {
-        let store = Arc::new(InMemoryStore::new());
-        let out = run_workflow(
-            &invoice(),
-            store.clone(),
-            &RunOptions::new(serde_json::json!({ "orderId": "i-1", "t1": 10, "t2": 25 })),
-            None,
-        )
-        .await
-        .unwrap();
+    async fn invoice_double_sleep_resumes_per_delivery() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = invoice();
+        let out = drive_through_timers(&store, &wf, || {
+            RunOptions::new(serde_json::json!({ "orderId": "i-1", "t1": 10, "t2": 25 }))
+                .run_id("invoice:r")
+        })
+        .await;
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output.unwrap()["settled"], true);
 
@@ -1098,39 +1121,34 @@ mod tests {
         }
     }
 
+    /// 两次顺序 wait_for_event：每次挂起都要外部投递后才继续。
     #[tokio::test]
     async fn compliance_two_sequential_events_then_archive() {
-        let store = Arc::new(InMemoryStore::new());
-        let store2 = store.clone();
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let wf = compliance();
-        let wf2 = wf.clone();
-        let task = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({ "subjectId": "s-1" })).run_id("comp:r"),
-                None,
-            )
-            .await
-        });
+        let opts = || {
+            RunOptions::new(serde_json::json!({ "subjectId": "s-1" })).run_id("comp:r")
+        };
 
-        wait_paused(&store, "comp:r", "legal-review").await;
-        signal_run(
-            store.as_ref(),
-            "comp:r",
+        let out = drive_to_pause(&store, &wf, opts).await;
+        assert_eq!(out, RunStatus::Paused);
+        let out = drive_after_signal(
+            &store,
+            &wf,
+            opts,
             "legal-review",
             serde_json::json!({ "ok": true }),
         )
-        .unwrap();
-        wait_paused(&store, "comp:r", "compliance-sign").await;
-        signal_run(
-            store.as_ref(),
-            "comp:r",
+        .await;
+        assert_eq!(out.status, RunStatus::Paused, "应停在第二个事件上");
+        let out = drive_after_signal(
+            &store,
+            &wf,
+            opts,
             "compliance-sign",
             serde_json::json!({ "ok": true }),
         )
-        .unwrap();
-        let out = task.await.unwrap().unwrap();
+        .await;
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output.unwrap()["archived"], true);
 
@@ -1142,38 +1160,32 @@ mod tests {
     async fn refund_declined_on_approval() {
         let _guard = GATEWAY_TEST_LOCK.lock().await;
         payment_gateway::reset();
-        let store = Arc::new(InMemoryStore::new());
-        let store2 = store.clone();
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let wf = refund();
-        let wf2 = wf.clone();
-        let task = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({ "orderId": "r-1", "amount": 200 }))
-                    .run_id("refund:d"),
-                None,
-            )
-            .await
-        });
+        let opts = || {
+            RunOptions::new(serde_json::json!({ "orderId": "r-1", "amount": 200 }))
+                .run_id("refund:d")
+        };
 
-        wait_paused(&store, "refund:d", "chargeback").await;
-        signal_run(
-            store.as_ref(),
-            "refund:d",
+        let out = drive_to_pause(&store, &wf, opts).await;
+        assert_eq!(out, RunStatus::Paused);
+        let out = drive_after_signal(
+            &store,
+            &wf,
+            opts,
             "chargeback",
             serde_json::json!({ "ok": true }),
         )
-        .unwrap();
-        wait_paused(&store, "refund:d", "refund-policy").await;
-        signal_run(
-            store.as_ref(),
-            "refund:d",
+        .await;
+        assert_eq!(out.status, RunStatus::Paused);
+        let out = drive_after_signal(
+            &store,
+            &wf,
+            opts,
             "refund-policy",
             serde_json::json!({ "ok": false }),
         )
-        .unwrap();
-        let out = task.await.unwrap().unwrap();
+        .await;
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output.clone().unwrap()["status"], "declined");
         let events = store.get_events("refund:d").unwrap();
@@ -1184,35 +1196,30 @@ mod tests {
     async fn refund_approved_disburses_after_timer() {
         let _guard = GATEWAY_TEST_LOCK.lock().await;
         payment_gateway::reset();
-        let store = Arc::new(InMemoryStore::new());
-        let store2 = store.clone();
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let wf = refund();
-        let wf2 = wf.clone();
         let refund_at = now_ms() + 500;
-        let task = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({
-                    "orderId": "r-2",
-                    "amount": 200,
-                    "refundAt": refund_at,
-                }))
-                .run_id("refund:q"),
-                None,
-            )
-            .await
-        });
+        let opts = || {
+            RunOptions::new(serde_json::json!({
+                "orderId": "r-2",
+                "amount": 200,
+                "refundAt": refund_at,
+            }))
+            .run_id("refund:q")
+        };
 
-        wait_paused(&store, "refund:q", "chargeback").await;
-        signal_run(
-            store.as_ref(),
-            "refund:q",
+        // 两次 approve → 最后一次 sleep 由 `drive_through_timers` 自动投递。
+        let out = drive_to_pause(&store, &wf, opts).await;
+        assert_eq!(out, RunStatus::Paused);
+        let out = drive_after_signal(
+            &store,
+            &wf,
+            opts,
             "chargeback",
             serde_json::json!({ "ok": true }),
         )
-        .unwrap();
-        wait_paused(&store, "refund:q", "refund-policy").await;
+        .await;
+        assert_eq!(out.status, RunStatus::Paused);
         signal_run(
             store.as_ref(),
             "refund:q",
@@ -1220,7 +1227,7 @@ mod tests {
             serde_json::json!({ "ok": true }),
         )
         .unwrap();
-        let out = task.await.unwrap().unwrap();
+        let out = drive_through_timers(&store, &wf, opts).await;
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output.clone().unwrap()["status"], "refunded");
 
@@ -1247,7 +1254,7 @@ mod tests {
     /// zod 语义：缺失必填字段 → 首次恢复即 schema 错误，run 直接 Errored。
     #[tokio::test]
     async fn typed_input_rejects_missing_field() {
-        let store = Arc::new(InMemoryStore::new());
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let store2 = store.clone();
         let wf = fulfillment().into_workflow();
         let wf2 = wf.clone();
@@ -1271,7 +1278,7 @@ mod tests {
     /// → 每次调用（start/resume）都把 run 标 Errored（与 inputSchema 语义一致）。
     #[tokio::test]
     async fn state_validation_rejects_init_shape() {
-        let store = Arc::new(InMemoryStore::new());
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let wf = Workflow::new("state-bad-shape")
             .state_schema::<CounterState>()
             .initialize(|_input| Ok(serde_json::json!({ "bogus": 1 })))
@@ -1307,7 +1314,7 @@ mod tests {
     /// （`step`）把工作副本 flush 回引擎镜像。
     #[tokio::test]
     async fn state_typed_field_roundtrip() {
-        let store = Arc::new(InMemoryStore::new());
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let wf = create_workflow(
             CreateWorkflowConfig::new("state-roundtrip")
                 .input::<serde_json::Value>()
@@ -1352,72 +1359,43 @@ mod tests {
     async fn state_rebuilt_each_invocation() {
         let inp = || serde_json::json!({ "orderId": "s-1", "amount": 10 });
 
-        // run A：单任务内 pause + resume（gate 由外部信号放行），不重建 state。
-        let signal_gate = |store: &Arc<InMemoryStore>, run_id: &str| {
-            let store = store.clone();
-            let run_id = run_id.to_string();
-            async move {
-                wait_paused(&store, &run_id, "manual-release").await;
-                signal_run(
-                    store.as_ref(),
-                    &run_id,
-                    "manual-release",
-                    serde_json::json!({ "ok": true }),
-                )
-                .unwrap();
-            }
-        };
-        let store_a = Arc::new(InMemoryStore::new());
-        let store_a2 = store_a.clone();
-        let s1 = signal_gate(&store_a, "state:burst");
-        let burst = tokio::spawn(async move {
-            run_workflow(
-                &state_demo().into_workflow(),
-                store_a2,
-                &RunOptions::new(inp()).run_id("state:burst"),
-                None,
-            )
-            .await
-        });
-        s1.await;
-        let out_burst = burst.await.unwrap().unwrap();
-        assert_eq!(out_burst.status, RunStatus::Finished);
-
-        // run B：先挂起在 gate 后 abort（模拟崩溃，state 不落盘），signal 后重跑
-        // 同 run_id → 引擎从头重建 state + 重放 handler，最终输出应与 A 一致。
-        let store_b = Arc::new(InMemoryStore::new());
-        let store_b2 = store_b.clone();
-        let wf = state_demo().into_workflow();
-        let wf2 = wf.clone();
-        let task_b = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store_b2,
-                &RunOptions::new(inp()).run_id("state:gated"),
-                None,
-            )
-            .await
-        });
-        wait_paused(&store_b, "state:gated", "manual-release").await;
-        let paused_b = store_b.get_run_state("state:gated").unwrap().unwrap();
-        assert_eq!(paused_b.status, RunStatus::Paused, "gate 应把 run 挂起");
-        task_b.abort();
-        let _ = task_b.await;
-        signal_run(
-            store_b.as_ref(),
-            "state:gated",
+        // run A：drive 到 gate 挂起 → 投递 → 再 drive（不重建 state）。
+        let store_a: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf_a = state_demo().into_workflow();
+        let opts_a = || RunOptions::new(inp()).run_id("state:burst");
+        assert_eq!(
+            drive_to_pause(&store_a, &wf_a, opts_a).await,
+            RunStatus::Paused
+        );
+        let out_burst = drive_after_signal(
+            &store_a,
+            &wf_a,
+            opts_a,
             "manual-release",
             serde_json::json!({ "ok": true }),
         )
-        .unwrap();
-        let out_b = run_workflow(
+        .await;
+        assert_eq!(out_burst.status, RunStatus::Finished);
+
+        // run B：挂起在 gate（模拟进程退出——挂起时确实没人在跑），投递后重跑
+        // 同 run_id → 引擎从头重建 state + 重放 handler，最终输出应与 A 一致。
+        let store_b: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = state_demo().into_workflow();
+        let opts_b = || RunOptions::new(inp()).run_id("state:gated");
+        assert_eq!(
+            drive_to_pause(&store_b, &wf, opts_b).await,
+            RunStatus::Paused
+        );
+        let paused_b = store_b.get_run_state("state:gated").unwrap().unwrap();
+        assert_eq!(paused_b.status, RunStatus::Paused, "gate 应把 run 挂起");
+        let out_b = drive_after_signal(
+            &store_b,
             &wf,
-            store_b.clone(),
-            &RunOptions::new(inp()).run_id("state:gated"),
-            None,
+            opts_b,
+            "manual-release",
+            serde_json::json!({ "ok": true }),
         )
-        .await
-        .unwrap();
+        .await;
         assert_eq!(out_b.status, RunStatus::Finished);
 
         // 跳过 preparedAt（每次取 now_ms）比较其余全部字段。
@@ -1453,7 +1431,7 @@ mod tests {
     /// `approve` 时 flush 回引擎镜像。
     #[tokio::test]
     async fn state_parallel_steps_snapshot_then_driver_flush() {
-        let store = Arc::new(InMemoryStore::new());
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let wf = Workflow::new("state-concurrency")
             .state_schema::<CounterState>()
             .initialize(|_| Ok(serde_json::json!({ "total": 0, "settleEvents": [] })))
@@ -1493,26 +1471,16 @@ mod tests {
                     .await?;
                 Ok(serde_json::json!({ "total": ctx.state["total"] }))
             });
-        let store2 = store.clone();
-        let wf2 = wf.clone();
-        let task = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({})).run_id("state:flush"),
-                None,
-            )
-            .await
-        });
-        wait_paused(&store, "state:flush", "flush-gate").await;
-        signal_run(
-            store.as_ref(),
-            "state:flush",
+        let opts = || RunOptions::new(serde_json::json!({})).run_id("state:flush");
+        assert_eq!(drive_to_pause(&store, &wf, opts).await, RunStatus::Paused);
+        let out = drive_after_signal(
+            &store,
+            &wf,
+            opts,
             "flush-gate",
             serde_json::json!({ "ok": true }),
         )
-        .unwrap();
-        let out = task.await.unwrap().unwrap();
+        .await;
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output, Some(serde_json::json!({ "total": 1 })));
     }
@@ -1522,7 +1490,7 @@ mod tests {
     /// 修改丢失——只有 step 闭包**之外**的 mutation 才是可重放的。
     #[tokio::test]
     async fn state_step_closure_mutation_lost_on_resume() {
-        let store = Arc::new(InMemoryStore::new());
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let wf = Workflow::new("state-sharp-edge")
             .state_schema::<CounterState>()
             .initialize(|input| {
@@ -1561,21 +1529,14 @@ mod tests {
                 }))
             });
 
-        // 进程 A：跑到 gate 挂起后"崩溃"（abort，不写终态）。
-        let store2 = Arc::clone(&store);
-        let wf2 = wf.clone();
-        let task_a = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({ "amount": 5 })).run_id("state:edge"),
-                None,
-            )
-            .await
-        });
-        wait_paused(&store, "state:edge", "gate").await;
-        task_a.abort();
-        let _ = task_a.await;
+        // 进程 A：跑到 gate 挂起（挂起即没人执行——等价于进程退出，不写终态）。
+        assert_eq!(
+            drive_to_pause(&store, &wf, || {
+                RunOptions::new(serde_json::json!({ "amount": 5 })).run_id("state:edge")
+            })
+            .await,
+            RunStatus::Paused
+        );
 
         // 进程 B：同 run_id 重跑 → state 从 initialize 重建为 5，`bump-inside`
         // 已被 checkpoint 记录 → 闭包跳过（+1 丢失），只剩闭包之外的 mutation。
@@ -1610,30 +1571,31 @@ mod tests {
 
     /// Typed ctx 的完整基元组合：emit（publisher 可见、日志无）→ wait_for_event
     /// （按名挂起 + signal_event 按名投递）→ sleep_until（绝对时间点）。
+    /// `emit` → `wait_for_event` 挂起 → 投递 → `sleep_until`（过去时间戳）。
     #[tokio::test]
     async fn event_gate_emit_wait_then_sleep_until() {
-        let store = Arc::new(InMemoryStore::new());
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = seen.clone();
         let wf = event_gate().into_workflow();
-        let wf2 = wf.clone();
-        let store2 = store.clone();
-        let task = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({
-                    "market": "btc",
-                    "predictedAt": 0, // 过去 → sleep_until 立即放行
-                }))
-                .run_id("event:gate"),
-                Some(Arc::new(move |e: &WorkflowEvent| {
-                    sink.lock().unwrap().push(e.clone())
-                })),
-            )
-            .await
-        });
-        wait_paused(&store, "event:gate", "price-wait").await;
+        // 过去的时间戳 → `sleep_until` 挂了之后由 timer 立刻认领。
+        let opts = || {
+            RunOptions::new(serde_json::json!({ "market": "btc", "predictedAt": 0 }))
+                .run_id("event:gate")
+        };
+
+        // Drive #1：挂起在 price-wait。
+        let first = run_workflow(
+            &wf,
+            store.clone(),
+            &opts(),
+            Some(Arc::new(move |e: &WorkflowEvent| {
+                sink.lock().unwrap().push(e.clone())
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.status, RunStatus::Paused);
 
         // 挂起投影：waiting_for.signal_name = 事件通道（≠ pause key）。
         let st = store.get_run_state("event:gate").unwrap().unwrap();
@@ -1650,7 +1612,8 @@ mod tests {
             serde_json::json!({ "px": 62000 }),
         )
         .unwrap();
-        let out = task.await.unwrap().unwrap();
+        // Drive #2 起：`sleep_until(0)` 会挂起，由 timer 投递推进。
+        let out = drive_through_timers(&store, &wf, opts).await;
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(
             out.output.clone().unwrap()["settlement"],
@@ -1675,30 +1638,17 @@ mod tests {
         );
     }
 
-    /// wait_for_event 后崩溃 → 同 run_id 重跑：StepResume 已在日志，按名信号
-    /// 重放即可完成，不重新挂起。
+    /// wait_for_event 挂起（等价于崩溃——挂起时进程确实没在跑）→ 投递后同
+    /// run_id 重跑：StepResume 已在日志，按名信号重放即可完成，不重新挂起。
     #[tokio::test]
     async fn event_gate_named_signal_replays_after_crash() {
-        let store = Arc::new(InMemoryStore::new());
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let wf = event_gate().into_workflow();
-        let store2 = store.clone();
-        let wf2 = wf.clone();
-        let task_a = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({
-                    "market": "eth",
-                    "predictedAt": 0, // 过去 → sleep_until 重放时立即放行
-                }))
-                .run_id("event:crash"),
-                None,
-            )
-            .await
-        });
-        wait_paused(&store, "event:crash", "price-wait").await;
-        task_a.abort();
-        let _ = task_a.await;
+        let opts = || {
+            RunOptions::new(serde_json::json!({ "market": "eth", "predictedAt": 0 }))
+                .run_id("event:crash")
+        };
+        assert_eq!(drive_to_pause(&store, &wf, opts).await, RunStatus::Paused);
 
         signal_event(
             store.as_ref(),
@@ -1707,18 +1657,8 @@ mod tests {
             serde_json::json!({ "px": 3000 }),
         )
         .unwrap();
-        let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({
-                "market": "eth",
-                "predictedAt": 0,
-            }))
-            .run_id("event:crash"),
-            None,
-        )
-        .await
-        .unwrap();
+        // `sleep_until(0)` 也会挂起，由 timer 投递推进。
+        let out = drive_through_timers(&store, &wf, opts).await;
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(
             out.output.clone().unwrap()["settlement"],

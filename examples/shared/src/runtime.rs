@@ -68,21 +68,7 @@ mod tests {
     use crate::file_run_store::FileRunStore;
     use crate::workflows::email_digest;
     use std::time::Duration;
-    use workflow_core::RunStatus;
-
-    /// 轮询直到 run 在 `step_id` 挂起。
-    async fn wait_paused<S: RunStore + ?Sized>(store: &Arc<S>, run_id: &str, step_id: &str) {
-        for _ in 0..2000 {
-            let evs = store.get_events(run_id).unwrap();
-            if evs.iter().any(
-                |e| matches!(e, WorkflowEvent::StepPaused { step_id: id, .. } if id == step_id),
-            ) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("run {run_id} never paused at {step_id}");
-    }
+    use workflow_core::{RunStatus, signal_run};
 
     fn finished_count(events: &[WorkflowEvent], step: &str) -> usize {
         events
@@ -261,6 +247,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// 进程 A 挂起在 sleep → 进程退出（挂起时本来就没人在跑）→ 进程 B 用全新
+    /// `FileRunStore` 打开同一 base，投递 timer 后跑完。
+    ///
+    /// D3 之后这就是**常态**：挂起即返回，本来就没有「同一个进程等着」这回事。
     #[tokio::test]
     async fn invoice_double_sleep_survives_restart() {
         let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -268,34 +258,15 @@ mod tests {
             .join(format!("invoice_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
 
-        // 进程 A：跑到第一个 sleep 挂起后"崩溃"（abort，不写终态）。
+        let input = serde_json::json!({ "orderId": "i:r", "t1": 10, "t2": 20 });
+
+        // 进程 A：跑到第一个 sleep 挂起（挂起 = 结束，进程可以退）。
         let store: Arc<dyn RunStore> = Arc::new(FileRunStore::new(&base));
         let wf = crate::workflows::invoice();
-        let store2 = store.clone();
-        let wf2 = wf.clone();
-        let t1 = tokio::spawn(async move {
-            drive(
-                &wf2,
-                store2,
-                serde_json::json!({ "orderId": "i:r", "t1": 400, "t2": 700 }),
-                DriveOpts {
-                    run_id: Some("invoice:r"),
-                    ..DriveOpts::default()
-                },
-            )
-            .await
-        });
-        wait_paused(&store, "invoice:r", "settle-due-1").await;
-        t1.abort();
-        let _ = t1.await;
-
-        // 进程 B：全新 FileRunStore 打开同一 base 续跑。sleep 的 deadline 从日志
-        // 恢复——不再重复 append `StepPaused`，两次定时器各自到期后收尾。
-        let store2: Arc<dyn RunStore> = Arc::new(FileRunStore::new(&base));
-        let out = drive(
+        let first = drive(
             &wf,
-            store2.clone(),
-            serde_json::json!({ "orderId": "i:r", "t1": 400, "t2": 700 }),
+            store.clone(),
+            input.clone(),
             DriveOpts {
                 run_id: Some("invoice:r"),
                 ..DriveOpts::default()
@@ -303,6 +274,54 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(first.status, RunStatus::Paused);
+        assert_eq!(
+            store
+                .get_run_state("invoice:r")
+                .unwrap()
+                .unwrap()
+                .waiting_for
+                .unwrap()
+                .step_id
+                .as_deref(),
+            Some("settle-due-1"),
+            "应停在第一个 sleep"
+        );
+        drop(store); // 进程 A 退出
+
+        // 进程 B：全新 FileRunStore 打开同一 base 续跑。逐个投递 timer 推进。
+        let store2: Arc<dyn RunStore> = Arc::new(FileRunStore::new(&base));
+        let mut out = None;
+        for _ in 0..4 {
+            let st = store2.get_run_state("invoice:r").unwrap().unwrap();
+            if st.status != RunStatus::Paused {
+                break;
+            }
+            let w = st.waiting_for.expect("sleep 挂起应投影 waiting_for");
+            assert_eq!(w.signal_name, "__timer");
+            let step_id = w.step_id.expect("timer 挂起应有 step_id");
+            signal_run(
+                store2.as_ref(),
+                "invoice:r",
+                &step_id,
+                serde_json::Value::Null,
+            )
+            .unwrap();
+            out = Some(
+                drive(
+                    &wf,
+                    store2.clone(),
+                    input.clone(),
+                    DriveOpts {
+                        run_id: Some("invoice:r"),
+                        ..DriveOpts::default()
+                    },
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let out = out.expect("应至少驱动一次");
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output.unwrap()["settled"], true);
 

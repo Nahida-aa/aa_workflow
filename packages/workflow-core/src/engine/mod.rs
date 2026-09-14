@@ -43,10 +43,28 @@ impl std::fmt::Display for StepHalt {
 
 impl std::error::Error for StepHalt {}
 
+/// Internal sentinel: the engine parked the run at a durable wait point
+/// ([`exec_pause`]). The pause checkpoint and the `Paused` projection were
+/// already written; this only unwinds the handler so the drive can end
+/// `Paused` without appending a terminal event. Never `Errored`.
+///
+/// Mirrors TanStack's `engine.paused` flag + `throw new WorkflowPaused()`
+/// (`run-workflow.ts:970`), whose catch does `if (engine.paused) return`.
+#[derive(Debug)]
+pub struct WorkflowParked;
+
+impl std::fmt::Display for WorkflowParked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "workflow parked at a durable wait point")
+    }
+}
+
+impl std::error::Error for WorkflowParked {}
+
 /// Internal sentinel: [`cancel_run`] set the run to `Aborted` while the
 /// handler was driving. Step closures are not interruptible mid-`await`,
 /// so the error surfaces at the next engine boundary (step entry / attempt
-/// boundary / pause loop tick). Becomes an `Aborted` run, never `Errored`.
+/// boundary). Becomes an `Aborted` run, never `Errored`.
 #[derive(Debug)]
 pub struct WorkflowCancelled;
 
@@ -59,7 +77,7 @@ impl std::fmt::Display for WorkflowCancelled {
 impl std::error::Error for WorkflowCancelled {}
 
 /// True when `run_id`'s run state was set to `Aborted` by [`cancel_run`].
-/// Polled at step entry and inside the pause loop; store-agnostic (works for
+/// Checked at step entry and at attempt boundaries; store-agnostic (works for
 /// any [`RunStore`], including filesystem stores without a notification
 /// channel).
 fn is_cancelled(store: &Arc<dyn RunStore>, run_id: &str) -> bool {
@@ -72,10 +90,12 @@ fn is_cancelled(store: &Arc<dyn RunStore>, run_id: &str) -> bool {
 }
 
 /// Cancels a live or parked run: flips its state to terminal `Aborted`. The
-/// engine spots it on its next poll (≤ `RESUME_POLL_MS` when parked, at the
-/// next step/attempt boundary when running) and returns
+/// engine spots it on its next step/attempt boundary and returns
 /// [`WorkflowCancelled`], so the drive ends `Aborted` rather than `Errored`.
-/// A second cancel on an already-terminal run is a no-op `Ok(())`.
+/// A **parked** run is not running at all, so nothing is watching: the flag is
+/// only observed when a driver re-invokes `run_workflow`, which then ends the
+/// run `Aborted` at its first boundary. A second cancel on an already-terminal
+/// run is a no-op `Ok(())`.
 pub fn cancel_run(store: &dyn RunStore, run_id: &str) -> Result<(), WorkflowError> {
     let Some(mut st) = store.get_run_state(run_id)? else {
         return Err(WorkflowError::RunNotFound(run_id.to_string()));
@@ -425,11 +445,6 @@ where
     unreachable!("retry loop always returns")
 }
 
-/// How often the engine re-reads the log to notice an external signal.
-/// Polling (rather than a subscription) keeps pause/resume working against any
-/// [`RunStore`], including LocalDub's `FsRunStore` which has no `subscribe`.
-const RESUME_POLL_MS: Duration = Duration::from_millis(25);
-
 /// Default `minYieldRemainingMs` (TanStack): `should_yield()` turns true once
 /// fewer than this many ms of the runtime budget remain.
 pub const DEFAULT_MIN_YIELD_REMAINING_MS: u64 = 1000;
@@ -497,27 +512,35 @@ pub fn exec_uuid(inner: &Arc<EngineRuntime>) -> anyhow::Result<String> {
 /// `step_id` is the pause key == signal id; it must not collide with any step
 /// id. `signal_name` is the channel the run parks on (`"__approval"` for
 /// approvals, `"__timer"` for sleeps, a user event name for named waits).
+/// `deadline` is an **absolute** UTC ms timestamp, stored verbatim (it is what
+/// a timer sweep indexes on) — `None` for waits with no time bound.
 ///
 /// Replay fast path: a `StepResume` already in the log resolves immediately,
 /// so a crashed-paused run re-waits exactly once and never re-appends its
-/// `StepPaused`. Otherwise the pause checkpoint is persisted (idempotently),
-/// the run state flips to `Paused`, and the handler parks:
-/// - approvals wait until an external [`signal_run`] appends `StepResume`;
-/// - named waits wait until an external [`signal_event`] appends `StepResume`;
-/// - sleeps also arm a `tokio` timer that auto-delivers the resume.
+/// `StepPaused`. Otherwise the pause checkpoint is persisted (idempotently)
+/// and the run state flips to `Paused` + `waiting_for` / `pending_approval`.
+///
+/// **Then it parks**: the function returns [`WorkflowParked`] immediately — it
+/// does NOT block. The drive ends `Paused`, the process is free to exit, and an
+/// external driver is what delivers the wake-up (a `StepResume` via
+/// [`signal_run`] / [`signal_event`], or a timer sweep noticing `deadline`).
+/// Mirrors TanStack, where the awaited primitive throws `WorkflowPaused` and
+/// the drive returns (`run-workflow.ts:970` / `:529`).
 pub async fn exec_pause(
     inner: &Arc<EngineRuntime>,
     step_id: &str,
     signal_name: &str,
     reason: &str,
-    dur: Option<Duration>,
+    deadline: Option<i64>,
 ) -> anyhow::Result<serde_json::Value> {
     if let Some(payload) = find_resume(&inner.store, &inner.run_id, step_id) {
-        clear_run_wait(&inner.store, &inner.run_id);
         return Ok(payload);
     }
-
-    let due_at = dur.map(|d| now_ms() + d.as_millis() as i64);
+    // 被取消的 run 不该再挂起——直接以 Aborted 展开（原来由轮询循环里的检查
+    // 负责，轮询删掉后移到这里：挂起是最后一个还能观察 flag 的边界）。
+    if is_cancelled(&inner.store, &inner.run_id) {
+        return Err(WorkflowCancelled.into());
+    }
 
     let already_paused = {
         let events = inner.store.get_events(&inner.run_id)?;
@@ -531,7 +554,7 @@ pub async fn exec_pause(
             run_id: inner.run_id.clone(),
             step_id: step_id.to_string(),
             signal_name: signal_name.to_string(),
-            due_at,
+            due_at: deadline,
             reason: reason.to_string(),
         };
         inner.append(&ev)?;
@@ -552,47 +575,14 @@ pub async fn exec_pause(
             WaitKind::Signal {
                 step_id: step_id.to_string(),
                 signal_name: signal_name.to_string(),
-                deadline: due_at,
+                deadline,
             }
         },
     );
 
-    // Sleeps: poll until `due_at` passes, then deliver the resume ourselves.
-    // Approvals: poll until an external `signal_run` appends the resume.
-    loop {
-        if let Some(payload) = find_resume(&inner.store, &inner.run_id, step_id) {
-            clear_run_wait(&inner.store, &inner.run_id);
-            return Ok(payload);
-        }
-        if is_cancelled(&inner.store, &inner.run_id) {
-            return Err(WorkflowCancelled.into());
-        }
-        let wait = match due_at {
-            Some(due) => {
-                // `i64::saturating_sub` does NOT clamp negatives to 0 — the
-                // difference fits an i64 and comes back negative, which would
-                // wrap to a huge u64 under `as u64`. Branch explicitly.
-                let rem_ms = if due > now_ms() {
-                    (due - now_ms()) as u64
-                } else {
-                    0
-                };
-                let remaining = Duration::from_millis(rem_ms);
-                if remaining.is_zero() {
-                    signal_run(
-                        inner.store.as_ref(),
-                        &inner.run_id,
-                        step_id,
-                        serde_json::Value::Null,
-                    )?;
-                    continue;
-                }
-                remaining.min(RESUME_POLL_MS)
-            }
-            None => RESUME_POLL_MS,
-        };
-        tokio::time::sleep(wait).await;
-    }
+    // Park: hand control back to the drive. Everything the outside world needs
+    // (checkpoint, `deadline`, RunState projection) is already durable.
+    Err(WorkflowParked.into())
 }
 
 /// Last delivered signal payload for `step_id`, if any.
@@ -674,27 +664,15 @@ fn project_run_wait(store: &Arc<dyn RunStore>, run_id: &str, kind: WaitKind) {
     }
 }
 
-/// 恢复时清除 wait 投影并回到 `Running`。best-effort。
-fn clear_run_wait(store: &Arc<dyn RunStore>, run_id: &str) {
-    if let Ok(Some(mut st)) = store.get_run_state(run_id) {
-        st.status = RunStatus::Running;
-        st.updated_at = now_ms();
-        st.waiting_for = None;
-        st.pending_approval = None;
-        let _ = store.set_run_state(run_id, &st);
-    }
-}
-
-/// Appends a `StepResume` for a paused run — the external side of
+/// Appends a `StepResume` for a parked run — the external side of
 /// [`WorkflowCtx::approve`](crate::define::WorkflowCtx::approve). Safe to call
-/// any time: a parked drive observes it via `exec_pause`'s poll loop, and a
-/// later replay resolves from the log without re-waiting. The first append per
-/// `(run_id, step_id)` wins; duplicates drop via the store's CAS append.
-/// `payload` is what the parked `approve` call returns.
-///
-/// **待改**：`exec_pause` 的轮询循环将被删除（对齐上游「挂起即返回」），
-/// 届时「a parked drive observes it」不再成立——投递只对**下一次 drive**
-/// 生效，由外部驱动器负责发起。见 `docs/runtime-design.md` D3。
+/// any time: nothing is parked *watching* the log (the drive already returned),
+/// so this takes effect on the **next** `run_workflow` invocation, which
+/// resolves the wait from the log and never re-appends its `StepPaused`.
+/// Delivering the resume is the caller's job — that is the runtime driver's
+/// whole reason to exist (see `workflow-runtime`'s `deliver_signal`). The first
+/// append per `(run_id, step_id)` wins; duplicates drop via the store's CAS
+/// append. `payload` is what `approve` returns on the resumed drive.
 pub fn signal_run(
     store: &dyn RunStore,
     run_id: &str,
@@ -788,8 +766,7 @@ mod tests {
         Backoff, BaseCtx, CreateWorkflowConfig, RetryPolicy, Workflow, WorkflowCtx, create_workflow,
     };
     use crate::engine::testkit::{TestLog, idx};
-    use crate::error::RunErrorCode;
-    use crate::run_store::{InMemoryStore, RunState};
+    use crate::run_store::InMemoryStore;
     use std::sync::atomic::AtomicBool;
     use tokio::try_join;
 
@@ -1438,23 +1415,25 @@ mod tests {
                 Ok(d)
             }
         });
-        let store2 = store.clone();
-        let wf2 = wf.clone();
-        let task = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({})).run_id("r1"),
-                None,
-            )
-            .await
-        });
-        wait_until(
-            &store,
-            "r1",
-            |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "release"),
+
+        // Drive #1 —— 跑到挂起点就**返回**（不阻塞）。对齐上游：写 checkpoint
+        // 后 `throw WorkflowPaused`，drive 直接结束。
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("r1"),
+            None,
         )
-        .await;
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Paused);
+        assert!(out.error.is_none(), "挂起不是失败");
+        assert!(out.output.is_none());
+        assert_eq!(count_events(&store, "r1", |e| matches!(
+            e,
+            WorkflowEvent::RunFinished { .. } | WorkflowEvent::RunErrored { .. }
+        )), 0, "挂起不得写终态事件");
+
         let st = store.get_run_state("r1").unwrap().unwrap();
         assert_eq!(st.status, RunStatus::Paused);
         let pa = st
@@ -1464,7 +1443,9 @@ mod tests {
         assert_eq!(pa.step_id.as_deref(), Some("release"));
         assert_eq!(pa.title, "Approve the release?");
         assert!(st.waiting_for.is_none());
+        assert!(decided.lock().unwrap().is_none(), "挂起时 handler 未继续");
 
+        // 外部投递（这是 runtime 的 `deliver_approval` 做的事）。
         signal_run(
             store.as_ref(),
             "r1",
@@ -1472,7 +1453,16 @@ mod tests {
             serde_json::json!({ "approved": true }),
         )
         .unwrap();
-        let out = task.await.unwrap().unwrap();
+
+        // Drive #2 —— 从日志短路 `charge`，pause 有 resume 直接放行。
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("r1"),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output, Some(serde_json::json!({ "approved": true })));
         let st = store.get_run_state("r1").unwrap().unwrap();
@@ -1598,8 +1588,10 @@ mod tests {
         );
     }
 
+    /// sleep 挂起后**返回**，由外部（runtime 的 timer sweep）在 `due_at` 投递
+    /// `StepResume` 唤醒。core 自己不投递——这是 D3 定案。
     #[tokio::test]
-    async fn sleep_pauses_then_auto_resumes() {
+    async fn sleep_parks_then_external_timer_resumes() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let wf = Workflow::new("sleeper").handler(|ctx: WorkflowCtx| async move {
             ctx.sleep("cooldown", Duration::from_millis(250)).await?;
@@ -1609,51 +1601,56 @@ mod tests {
             .await?;
             Ok(serde_json::Value::Null)
         });
-        let store2 = store.clone();
-        let wf2 = wf.clone();
-        let task = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({})).run_id("s1"),
-                None,
-            )
-            .await
-        });
 
-        // 等待进入 sleep：status=Paused + waiting_for{signal_name,deadline}
-        let mut paused: Option<RunState> = None;
-        for _ in 0..2000 {
-            if let Some(st) = store.get_run_state("s1").unwrap() {
-                if st.status == RunStatus::Paused && st.waiting_for.is_some() {
-                    paused = Some(st);
-                    break;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        let paused = paused.expect("sleep 中应投影 status=Paused + waiting_for");
-        let wf2_state = paused.waiting_for.as_ref().unwrap();
-        assert_eq!(
-            wf2_state.step_id.as_deref(),
-            Some("cooldown"),
-            "sleep 的 step_id 是 pause key"
-        );
-        assert_eq!(
-            wf2_state.signal_name, "__timer",
-            "sleep 的通道是内部 __timer"
-        );
+        // Drive #1：立刻返回 `Paused`（不阻塞 250ms）。
+        let started = std::time::Instant::now();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("s1"),
+            None,
+        )
+        .await
+        .unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(out.status, RunStatus::Paused);
         assert!(
-            wf2_state.deadline.is_some(),
-            "sleep 的 due_at 应投影为 deadline"
+            elapsed < Duration::from_millis(200),
+            "挂起应立刻返回，而不是等满 250ms（实际 {elapsed:?}）"
         );
+        assert_eq!(count_events(&store, "s1", |e| matches!(
+            e,
+            WorkflowEvent::RunFinished { .. } | WorkflowEvent::RunErrored { .. }
+        )), 0, "挂起不得写终态事件");
 
-        let out = task.await.unwrap().unwrap();
+        // sleep 的投影：status=Paused + waiting_for{signal_name:"__timer", deadline}
+        let st = store.get_run_state("s1").unwrap().unwrap();
+        assert_eq!(st.status, RunStatus::Paused);
+        let w = st
+            .waiting_for
+            .as_ref()
+            .expect("sleep 中应投影 waiting_for");
+        assert_eq!(w.step_id.as_deref(), Some("cooldown"), "step_id 是 pause key");
+        assert_eq!(w.signal_name, "__timer", "sleep 的通道是内部 __timer");
+        assert!(w.deadline.is_some(), "sleep 的 due_at 应投影为 deadline");
+
+        // 外部投递（runtime sweep 在 deadline 到点后做的事）。
+        signal_run(store.as_ref(), "s1", "cooldown", serde_json::Value::Null).unwrap();
+
+        // Drive #2：放行。
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("s1"),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let st = store.get_run_state("s1").unwrap().unwrap();
         assert!(
             st.waiting_for.is_none() && st.pending_approval.is_none(),
-            "autoresume 后投影应清除"
+            "恢复后投影应清除"
         );
 
         let evs = store.get_events("s1").unwrap();
@@ -1682,24 +1679,16 @@ mod tests {
             Ok(d)
         });
 
-        // Run 1: pause, signal, finish.
-        let store2 = store.clone();
-        let wf2 = wf.clone();
-        let t = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({})).run_id("r3"),
-                None,
-            )
-            .await
-        });
-        wait_until(
-            &store,
-            "r3",
-            |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "gate"),
+        // Run 1: park, signal, finish.
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("r3"),
+            None,
         )
-        .await;
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Paused);
         signal_run(
             store.as_ref(),
             "r3",
@@ -1707,17 +1696,22 @@ mod tests {
             serde_json::json!({ "yes": 1 }),
         )
         .unwrap();
-        let out = t.await.unwrap().unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("r3"),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output, Some(serde_json::json!({ "yes": 1 })));
 
         // Run 2, same run_id: the StepResume is already in the log, so
         // approve resolves from the log — no new checkpoints appended.
-        let store3 = store.clone();
-        let wf3 = wf.clone();
         let out2 = run_workflow(
-            &wf3,
-            store3,
+            &wf,
+            store.clone(),
             &RunOptions::new(serde_json::json!({})).run_id("r3"),
             None,
         )
@@ -1754,23 +1748,16 @@ mod tests {
                 Ok(v)
             }
         });
-        let store2 = store.clone();
-        let wf2 = wf.clone();
-        let task = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({})).run_id("ne1"),
-                None,
-            )
-            .await
-        });
-        wait_until(
-            &store,
-            "ne1",
-            |e| matches!(e, WorkflowEvent::StepPaused { signal_name, .. } if signal_name == "review-approved"),
+        // Drive #1：跑到挂起点返回 `Paused`（不阻塞）。
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("ne1"),
+            None,
         )
-        .await;
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Paused);
         let st = store.get_run_state("ne1").unwrap().unwrap();
         assert_eq!(st.status, RunStatus::Paused);
         let w = st
@@ -1781,6 +1768,7 @@ mod tests {
         assert_eq!(w.step_id.as_deref(), Some("review"));
         assert!(st.pending_approval.is_none(), "named event 不是 approval");
 
+        // 外部投递 → Drive #2 放行。
         signal_event(
             store.as_ref(),
             "ne1",
@@ -1788,7 +1776,14 @@ mod tests {
             serde_json::json!({ "ok": true }),
         )
         .unwrap();
-        let out = task.await.unwrap().unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("ne1"),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output, Some(serde_json::json!({ "ok": true })));
         assert_eq!(
@@ -1807,25 +1802,24 @@ mod tests {
                 .await?;
             Ok(out)
         });
-        let store2 = store.clone();
-        let wf2 = wf.clone();
-        let t = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({})).run_id("ne2"),
-                None,
-            )
-            .await
-        });
-        wait_until(
-            &store,
-            "ne2",
-            |e| matches!(e, WorkflowEvent::StepPaused { signal_name, .. } if signal_name == "go"),
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("ne2"),
+            None,
         )
-        .await;
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Paused);
         signal_event(store.as_ref(), "ne2", "go", serde_json::json!(42)).unwrap();
-        let out = t.await.unwrap().unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("ne2"),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output, Some(serde_json::json!(42)));
 
@@ -1851,12 +1845,14 @@ mod tests {
         );
     }
 
+    /// 过去的时间戳：第一次 drive 就挂起（deadline 已过期），外部投递后放行。
+    /// 「已过期」这个事实体现在 `due_at` 上，供 timer sweep 立刻认领。
     #[tokio::test]
-    async fn sleep_until_past_resolves_immediately() {
+    async fn sleep_until_past_parks_with_past_deadline() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("sleeper").handler(|ctx: WorkflowCtx| async move {
-            let ts = crate::engine::now_ms() - 5000;
-            ctx.sleep_until("cooldown", ts).await?;
+        let past = crate::engine::now_ms() - 5000;
+        let wf = Workflow::new("sleeper").handler(move |ctx: WorkflowCtx| async move {
+            ctx.sleep_until("cooldown", past).await?;
             ctx.step("after", move |_sc: StepCtx| async move {
                 Ok(serde_json::json!({ "done": true }))
             })
@@ -1871,13 +1867,30 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(out.status, RunStatus::Paused);
+        let st = store.get_run_state(&out.run_id).unwrap().unwrap();
+        let w = st.waiting_for.as_ref().expect("应投影 waiting_for");
+        assert_eq!(
+            w.deadline,
+            Some(past),
+            "过期的 due_at 照实投影——由 sweep 判断「已到点」"
+        );
+
+        signal_run(store.as_ref(), &out.run_id, "cooldown", serde_json::Value::Null).unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id(out.run_id),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let evs = store.get_events(&out.run_id).unwrap();
         assert!(evs.iter().any(|e| matches!(
             e,
             WorkflowEvent::StepFinished { step_id, .. } if step_id == "after"
         )));
-        // 过去时间点 → 引擎自我投递 "__timer" resume，立即放行
         assert!(evs.iter().any(|e| matches!(
             e,
             WorkflowEvent::StepResume { step_id, .. } if step_id == "cooldown"
@@ -1887,37 +1900,36 @@ mod tests {
     #[tokio::test]
     async fn sleep_until_schedules_timer() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("sleeper").handler(|ctx: WorkflowCtx| async move {
-            let ts = crate::engine::now_ms() + 300;
-            ctx.sleep_until("cooldown", ts).await?;
+        let due = crate::engine::now_ms() + 300;
+        let wf = Workflow::new("sleeper").handler(move |ctx: WorkflowCtx| async move {
+            ctx.sleep_until("cooldown", due).await?;
             Ok(serde_json::Value::Null)
         });
-        let store2 = store.clone();
-        let wf2 = wf.clone();
-        let task = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({})).run_id("stu1"),
-                None,
-            )
-            .await
-        });
-        let mut saw_deadline = false;
-        for _ in 0..2000 {
-            if let Some(st) = store.get_run_state("stu1").unwrap()
-                && let Some(w) = &st.waiting_for
-                && w.step_id.as_deref() == Some("cooldown")
-                && w.signal_name == "__timer"
-                && w.deadline.is_some()
-            {
-                saw_deadline = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        assert!(saw_deadline, "sleep_until 应投影 waiting_for + deadline");
-        let out = task.await.unwrap().unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("stu1"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Paused);
+
+        let st = store.get_run_state("stu1").unwrap().unwrap();
+        let w = st.waiting_for.as_ref().expect("sleep_until 应投影 waiting_for");
+        assert_eq!(w.step_id.as_deref(), Some("cooldown"));
+        assert_eq!(w.signal_name, "__timer");
+        assert_eq!(w.deadline, Some(due), "deadline 应是调用方给的时间戳");
+
+        signal_run(store.as_ref(), "stu1", "cooldown", serde_json::Value::Null).unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("stu1"),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
     }
 
@@ -1984,34 +1996,33 @@ mod tests {
             let u2 = ctx.uuid()?;
             Ok(serde_json::json!({ "now": t1, "uuid": u1, "now2": t2, "uuid2": u2 }))
         });
-        let store2 = store.clone();
-        let wf2 = wf.clone();
-        let t = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({})).run_id("det1"),
-                None,
-            )
-            .await
-        });
-        wait_until(
-            &store,
-            "det1",
-            |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "gate"),
+        // Drive #1：跑到 approve 挂起就返回。
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("det1"),
+            None,
         )
-        .await;
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Paused);
         signal_run(store.as_ref(), "det1", "gate", serde_json::json!(true)).unwrap();
-        let out = t.await.unwrap().unwrap();
+        // Drive #2：`__now-0` / `__uuid-0` 从日志缓存取（deterministic replay）。
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("det1"),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let o1 = out.output.clone().unwrap();
 
         // 重跑（崩溃恢复模拟）：now/uuid 全部从日志缓存值取，输出逐字节一致。
-        let store3 = store.clone();
-        let wf3 = wf.clone();
         let out2 = run_workflow(
-            &wf3,
-            store3,
+            &wf,
+            store.clone(),
             &RunOptions::new(serde_json::json!({})).run_id("det1"),
             None,
         )
@@ -2111,6 +2122,9 @@ mod tests {
         );
     }
 
+    /// cancel 一个挂起的 approval：挂起时没人在跑，所以 `Aborted` 落在
+    /// RunState 上，等**下次 drive** 在第一个边界收尾（上游同理——挂起后
+    /// 进程已退出，没有「立刻」响应 cancel 的实体）。
     #[tokio::test]
     async fn cancel_parked_approval_aborts() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
@@ -2122,28 +2136,36 @@ mod tests {
             .await?;
             Ok(serde_json::Value::Null)
         });
-        let store2 = store.clone();
-        let wf2 = wf.clone();
-        let task = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({})).run_id("ca1"),
-                None,
-            )
-            .await
-        });
-        wait_until(
-            &store,
-            "ca1",
-            |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "release"),
+
+        // Drive #1：挂起即返回。
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("ca1"),
+            None,
         )
-        .await;
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Paused);
         let st = store.get_run_state("ca1").unwrap().unwrap();
         assert_eq!(st.status, RunStatus::Paused);
 
         cancel_run(store.as_ref(), "ca1").unwrap();
-        let out = task.await.unwrap().unwrap();
+        assert_eq!(
+            store.get_run_state("ca1").unwrap().unwrap().status,
+            RunStatus::Aborted,
+            "cancel 只翻 RunState——挂起中没人执行"
+        );
+
+        // Drive #2：引擎拾取 `Aborted`，以 Aborted 收尾。
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("ca1"),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             out.status,
             RunStatus::Aborted,
@@ -2160,17 +2182,18 @@ mod tests {
             Some("Aborted"),
             "RunState.error 应带上结构化错误名"
         );
-        let code = store
-            .get_events("ca1")
-            .unwrap()
-            .iter()
-            .find_map(|e| match e {
-                WorkflowEvent::RunErrored { code, .. } => Some(*code),
-                _ => None,
-            })
-            .expect("终局事件应为 RunErrored");
-        assert_eq!(code, RunErrorCode::Aborted, "RUN_ERRORED.code 应是 aborted");
         assert!(st.waiting_for.is_none() && st.pending_approval.is_none());
+
+        // 已 cancel 的 run 不能再被 drive 复活。
+        let again = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("ca1"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(again.status, RunStatus::Aborted, "Aborted 是锁存的终态");
 
         // 日志没有 Finished 终态，也不应落在 running/paused（cancel 后不再驱动）
         let evs = store.get_events("ca1").unwrap();
@@ -2234,6 +2257,9 @@ mod tests {
         assert_eq!(v["cancelled"], true);
     }
 
+    /// cancel 对**已挂起**的 run：没有人在跑，所以 flag 只能等下次 drive 才被
+    /// 观察到——那时 run 在第一个边界以 `Aborted` 收尾。这也是上游的语义
+    /// （挂起即进程退出，没人「立刻」响应 cancel）。
     #[tokio::test]
     async fn cancel_sleeping_run_aborts_and_is_recoverable() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
@@ -2241,26 +2267,37 @@ mod tests {
             ctx.sleep("hold", Duration::from_secs(1)).await?;
             Ok(serde_json::json!({ "done": true }))
         });
-        let store2 = store.clone();
-        let wf2 = wf.clone();
-        let task = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({})).run_id("ca2"),
-                None,
-            )
-            .await
-        });
-        wait_until(
-            &store,
-            "ca2",
-            |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "hold"),
+
+        // Drive #1：挂起即返回（不等那 1 秒）。
+        let started = std::time::Instant::now();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("ca2"),
+            None,
         )
-        .await;
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Paused);
+        assert!(started.elapsed() < Duration::from_millis(500));
+
+        // 挂起期间 cancel：只翻 RunState，没人「立刻」响应。
         cancel_run(store.as_ref(), "ca2").unwrap();
-        let out = task.await.unwrap().unwrap();
-        assert_eq!(out.status, RunStatus::Aborted);
+        assert_eq!(
+            store.get_run_state("ca2").unwrap().unwrap().status,
+            RunStatus::Aborted
+        );
+
+        // Drive #2：引擎拾取到 Aborted，在第一个边界以 Aborted 收尾。
+        let out2 = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("ca2"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out2.status, RunStatus::Aborted);
 
         // 重复 cancel：已终局 → no-op Ok
         cancel_run(store.as_ref(), "ca2").unwrap();
@@ -2268,19 +2305,18 @@ mod tests {
         let err = cancel_run(store.as_ref(), "missing").unwrap_err();
         assert!(matches!(err, crate::error::WorkflowError::RunNotFound(_)));
 
-        // 取消的 run 可再次驱动：sleep 重新计时（1s）后自动放行 → Finished。
-        let store3 = store.clone();
-        let wf3 = wf.clone();
-        let out2 = run_workflow(
-            &wf3,
-            store3,
+        // `Aborted` 是锁存终态：投递 resume 也唤不回来（上游 `resumeRun`
+        // 对 aborted 直接 route 到 attach，`run-workflow.ts:275-282`）。
+        signal_run(store.as_ref(), "ca2", "hold", serde_json::Value::Null).unwrap();
+        let out3 = run_workflow(
+            &wf,
+            store.clone(),
             &RunOptions::new(serde_json::json!({})).run_id("ca2"),
             None,
         )
         .await
         .unwrap();
-        assert_eq!(out2.status, RunStatus::Finished, "cancel 后重跑可恢复");
-        assert_eq!(out2.output, Some(serde_json::json!({ "done": true })));
+        assert_eq!(out3.status, RunStatus::Aborted, "cancel 的 run 不会被唤醒");
     }
 
     #[tokio::test]
@@ -2359,37 +2395,42 @@ mod tests {
             .await?;
             Ok(serde_json::json!({ "ok": true }))
         });
-        let store2 = store.clone();
-        let wf2 = wf.clone();
-        let task = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({})).run_id("y1"),
-                None,
-            )
-            .await
-        });
-        // 第一个 yield 会 park（default 到期 ≈ now+1ms，非常快）；等待其 StepPaused。
-        wait_until(
-            &store,
-            "y1",
-            |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id.starts_with("__yield-")),
+
+        // Drive #1：停在 `__yield-0`，立刻返回。
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("y1"),
+            None,
         )
-        .await;
-        // 到期自动 resume（timer 自动投递）→ 继续跑完
-        let out = task.await.unwrap().unwrap();
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Paused);
+        let st = store.get_run_state("y1").unwrap().unwrap();
+        let w = st.waiting_for.as_ref().expect("yield 应投影 waiting_for");
+        assert!(w.step_id.as_deref().unwrap().starts_with("__yield-"));
+        assert_eq!(w.signal_name, "__timer");
+        assert!(w.deadline.is_some(), "yield 的 target 应投影为 deadline");
+
+        // host 重新唤起（延期预算）→ 投递 timer。
+        signal_run(store.as_ref(), "y1", "__yield-0", serde_json::Value::Null).unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("y1"),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert!(store.get_events("y1").unwrap().iter().any(
             |e| matches!(e, WorkflowEvent::StepFinished { step_id, .. } if step_id == "after")
         ));
 
         // replay：yield 的 StepResume 已在日志 → 短路径立即放行，不新增 checkpoint
-        let store3 = store.clone();
-        let wf3 = wf.clone();
         let out2 = run_workflow(
-            &wf3,
-            store3,
+            &wf,
+            store.clone(),
             &RunOptions::new(serde_json::json!({})).run_id("y1"),
             None,
         )
@@ -2407,39 +2448,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn yield_waits_until_yield_resume_at() {
+    async fn yield_parks_until_yield_resume_at() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let wf = Workflow::new("yielder").handler(|ctx: WorkflowCtx| async move {
             ctx.yield_().await?;
             Ok(serde_json::json!({ "ok": true }))
         });
         let resume_at = crate::engine::now_ms() + 250;
-        let store2 = store.clone();
-        let wf2 = wf.clone();
-        let start = crate::engine::now_ms();
-        let task = tokio::spawn(async move {
-            run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({}))
-                    .run_id("y2")
-                    .yield_resume_at(resume_at),
-                None,
-            )
-            .await
-        });
-        wait_until(
-            &store,
-            "y2",
-            |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id.starts_with("__yield-")),
+
+        // Drive #1：`yield_resume_at` 原样落到 deadline 上——由外部 timer 认领，
+        // 引擎自己不等（这正是 upstream `yieldResumeAt` 的用途）。
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({}))
+                .run_id("y2")
+                .yield_resume_at(resume_at),
+            None,
         )
-        .await;
-        let out = task.await.unwrap().unwrap();
-        assert_eq!(out.status, RunStatus::Finished);
-        assert!(
-            crate::engine::now_ms() - start >= 200,
-            "yield 应睡到 yield_resume_at 才放行"
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Paused);
+        let st = store.get_run_state("y2").unwrap().unwrap();
+        assert_eq!(
+            st.waiting_for.as_ref().unwrap().deadline,
+            Some(resume_at),
+            "yield_resume_at 应原样成为 deadline"
         );
+
+        signal_run(store.as_ref(), "y2", "__yield-0", serde_json::Value::Null).unwrap();
+        let out = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("y2"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
     }
 
     // ====================================================================

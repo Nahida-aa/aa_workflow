@@ -212,9 +212,10 @@ impl<In, St, Ext> BaseCtx<In, St, Ext> {
     }
 
     /// Durable sleep: pauses the run until `dur` elapses. `key` is the
-    /// deterministic pause identity; the engine auto-delivers the resume via
-    /// [`signal_run`](crate::engine::signal_run) when the timer fires. On replay
-    /// a previously delivered resume short-circuits immediately.
+    /// deterministic pause identity. An external timer (the runtime's sweep,
+    /// indexing on `RunState.waiting_for.deadline`) delivers the resume via
+    /// [`signal_run`](crate::engine::signal_run) once the deadline passes; on
+    /// replay, a previously delivered resume short-circuits immediately.
     pub async fn sleep(
         &self,
         key: impl Into<String>,
@@ -223,13 +224,17 @@ impl<In, St, Ext> BaseCtx<In, St, Ext> {
     where
         St: serde::Serialize,
     {
-        self.flush_state()?;
-        crate::engine::exec_pause(&self.engine, &key.into(), "__timer", "sleep", Some(dur)).await
+        // 与上游同构：`sleep(ms)` 就是 `sleepUntil(now + ms)`
+        // （`run-workflow.ts:992`）。deadline 一律**绝对时间戳**。
+        let due = crate::engine::now_ms() + dur.as_millis() as i64;
+        self.sleep_until(key, due).await
     }
 
     /// Durable absolute-time wait: pauses until wall-clock `ts_ms` (equivalent
-    /// to TanStack's `sleepUntil`). A timestamp in the past resolves
-    /// immediately. `key` is the deterministic pause identity.
+    /// to TanStack's `sleepUntil`). The timestamp is stored **verbatim** —
+    /// a timestamp already in the past parks with an expired deadline, which a
+    /// timer sweep claims on its next pass. `key` is the deterministic pause
+    /// identity.
     pub async fn sleep_until(
         &self,
         key: impl Into<String>,
@@ -238,10 +243,8 @@ impl<In, St, Ext> BaseCtx<In, St, Ext> {
     where
         St: serde::Serialize,
     {
-        let rem = Duration::from_millis(
-            i64::saturating_sub(ts_ms, crate::engine::now_ms()).max(0) as u64
-        );
-        self.sleep(key, rem).await
+        self.flush_state()?;
+        crate::engine::exec_pause(&self.engine, &key.into(), "__timer", "sleep", Some(ts_ms)).await
     }
 
     /// Durable named wait: pauses the run until [`signal_event`](crate::engine::signal_event)
@@ -340,10 +343,7 @@ impl<In, St, Ext> BaseCtx<In, St, Ext> {
             .engine
             .yield_resume_at
             .unwrap_or_else(|| crate::engine::now_ms() + 1);
-        let dur = std::time::Duration::from_millis(
-            i64::saturating_sub(target, crate::engine::now_ms()).max(0) as u64,
-        );
-        crate::engine::exec_pause(&self.engine, &step_id, "__timer", "yield", Some(dur)).await
+        crate::engine::exec_pause(&self.engine, &step_id, "__timer", "yield", Some(target)).await
     }
 
     /// [`step`](Self::step) with per-step options (retry policy, timeout,

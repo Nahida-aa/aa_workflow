@@ -110,13 +110,14 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
    stale 时仍重新执行——TanStack 没有这个钩子，是续跑定语的本地扩展。
 5. **signals / pause**：TanStack 用 `ctx.approve` + `__timer`（sleep）内建；
    我们按同一语义落地：`ctx.approve(key, reason)` / `ctx.sleep(key, dur)` 在
-   handler 内挂起，引擎持久化 `STEP_PAUSED` checkpoint（`due_at` 供 timer
-   host），外部 `signal_run(run_id, step_id, payload)` 追加 `STEP_RESUME`
-   唤醒；重放时已交付的 `STEP_RESUME` 从日志短路，挂起点幂等（绝无重复 append）。
-   **⚠️ 已知偏离**：上游挂起是「写 checkpoint 后**立即返回** `paused`」，
-   我们是「阻塞在挂起点 25ms 轮询、sleep 到期由引擎自 deliver」。这不只是
-   实现差异——我们的挂起要求进程存活，上游不要求。已定性待改，见
-   `docs/runtime-design.md` D3。
+   handler 内挂起，引擎持久化 `STEP_PAUSED` checkpoint（`deadline` 是**绝对
+   时间戳**，供 timer 驱动器索引），外部 `signal_run(run_id, step_id, payload)`
+   追加 `STEP_RESUME` 唤醒；重放时已交付的 `STEP_RESUME` 从日志短路，挂起点
+   幂等（绝无重复 append）。
+   **挂起即返回**：写到挂起点就抛 `WorkflowParked`，drive 以 `Paused` 收尾，
+   不阻塞——与上游 `throw new WorkflowPaused()` / `if (engine.paused) return`
+   同形。唤醒一律来自外部（runtime 的 `sweep` / `deliver_signal`）。
+   见 `docs/runtime-design.md` D3。
 
 ## 换了模型仍没变的硬设计
 

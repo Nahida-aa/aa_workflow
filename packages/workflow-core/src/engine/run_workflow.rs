@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use crate::define::Workflow;
 use crate::engine::{
-    DEFAULT_MIN_YIELD_REMAINING_MS, EngineRuntime, StepHalt, WorkflowCancelled, now_ms,
+    DEFAULT_MIN_YIELD_REMAINING_MS, EngineRuntime, StepHalt, WorkflowCancelled, WorkflowParked,
+    now_ms,
 };
 use crate::error::{RunError, RunErrorCode, WorkflowError};
 use crate::event::{RunStatus, StepStatus, WorkflowEvent, fold_step_states};
@@ -137,10 +138,36 @@ pub async fn run_workflow(
         store.truncate_runs(&run_id, cf)?;
     }
 
+    // A run that was cancelled while parked must not be resurrected by a drive:
+    // `cancel_run` flipped `status` to `Aborted` and nothing is watching a
+    // parked run, so this is the first place it can be observed. Report it
+    // instead of resetting the run to `Running`.
+    //
+    // (`Finished` / `Errored` are likewise terminal — re-driving those replays
+    // from the log, which is how `resumed_run_replays_from_log_without_rewaiting`
+    // asserts replay-safety; only `Aborted` is latched here, because a cancelled
+    // run's handler has unfinished business and must not run again.)
+    if let Some(st) = store.get_run_state(&run_id)?
+        && st.status == RunStatus::Aborted
+    {
+        return Ok(RunOutcome {
+            run_id,
+            status: RunStatus::Aborted,
+            output: None,
+            error: st.error,
+        });
+    }
+
     let run_state = match store.get_run_state(&run_id)? {
         Some(mut st) => {
             st.status = RunStatus::Running;
             st.error = None;
+            // 清除上一次 drive 留下的等待投影（上游 `run-workflow.ts:336-342`
+            // 在 resume 前导里做同一件事）。挂起由 `exec_pause` 写、
+            // **在下次 drive 开头清**——不是在被唤醒的那一刻清，因为挂起后
+            // 进程已经退出，没有「那一刻」。
+            st.waiting_for = None;
+            st.pending_approval = None;
             st.updated_at = ts;
             st
         }
@@ -242,9 +269,22 @@ pub async fn run_workflow(
 
     // `failure` 是结构化的（`RunState.error`、`RUN_ERRORED`、`RunOutcome.error`
     // 三处同类型）。
+    //
+    // `WorkflowParked` 走**单独一条路**：它不是失败，也不是正常结束——run
+    // 停在挂起点，等外部驱动器投递。`exec_pause` 已经把 checkpoint 与 RunState
+    // 投影写好了，这里**不 append 终态事件、不覆盖 RunState**，直接以 `Paused`
+    // 返回（对齐上游 `if (engine.paused) return`，`run-workflow.ts:529`）。
     let (status, output, failure) = match handler_result {
         Ok(output) => (RunStatus::Finished, Some(output), None),
         Err(e) if e.downcast_ref::<StepHalt>().is_some() => (RunStatus::Finished, None, None),
+        Err(e) if e.downcast_ref::<WorkflowParked>().is_some() => {
+            return Ok(RunOutcome {
+                run_id,
+                status: RunStatus::Paused,
+                output: None,
+                error: None,
+            });
+        }
         Err(e) if e.downcast_ref::<WorkflowCancelled>().is_some() => (
             RunStatus::Aborted,
             None,
