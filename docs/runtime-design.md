@@ -1,9 +1,15 @@
 # workflow-runtime 设计意图
 
 > **状态**：D1 已定（supertrait，不设中间层）。D2 / D4 有倾向待确认。
-> **结论：runtime 层必需**——判据是通用形态（serverless / 多 worker），而不是
-> 单个应用。LocalDub 现有的 queue 是「常驻进程」形态的专用解决，与通用层不是
-> 替代关系。详见 D5 及其两个附录。
+>
+> **结论：runtime 层必需**——判据是**「有没有常驻的驱动者」**（不是「有没有
+> 持久存储」，两者正交；见 D5）。LocalDub 有常驻 worker，属形态 A，**只用
+> `workflow-core` 是正确取舍**；但要支持形态 B（单次执行有时长上限的托管
+> 进程 / serverless），lease / sweep / timer 投递全部必需。详见 D5 及其两个
+> 附录。
+>
+> 实现进度：runtime 层已全部移植（存储契约 / in-memory 实现 / driver /
+> materializer / 规格构造器）。
 
 > 本文只写**意图与取舍**，不写 API 签名——签名会随设计变化，写在意图之前
 > 只会造成文档与实现不一致。
@@ -402,29 +408,66 @@ run state / timers / signal 与 approval 投递 / schedules / 原子 claim 与 l
 所以判据是「Rust 的 serverless / 多 worker 形态需不需要」，而不是「LocalDub
 需不需要」。
 
-#### 形态 A：常驻进程（LocalDub 现在这样）
+#### 先澄清两个正交的维度（容易混淆）
 
-LocalDub 已有等价实现，见下节。这个形态下 lease / sweep 边界 / timer 投递
-都不是刚需。
+| 维度 | 问题 | 是否决定 runtime 要不要 |
+| ---- | ---- | ---------------------- |
+| **有没有持久存储** | 数据跨进程重启还在吗？ | ❌ 不决定。两种形态**都需要**（runtime 的 `ExecutionStore` 也是持久层） |
+| **有没有常驻的驱动者** | 挂起后**谁**去把它捡起来接着跑？ | ✅ **这才是判据** |
 
-#### 形态 B：serverless / 无进程常驻（cloudflare-d1 这样）
+LocalDub 是「有持久存储 + 有常驻驱动者」——`FsRunStore` 保证数据不丢，
+`packages/server/` 的 `run_worker` 常驻循环保证有人接着跑。两者都满足，
+所以不需要 runtime 的 sweep / lease。
+
+**关键短语是「常驻」= 进程能无限期活着并轮询**，不是「有持久化」。
+
+#### 形态 A：常驻驱动者（本地自有进程 / 本地服务器 / 传统服务器）
+
+一个能长期活着的进程一直在跑（`run_worker` 那类循环），随时能把挂起的 run
+接着跑。LocalDub 属此类。
+
+这个形态下 **lease / 有界 sweep / timer 投递都不是刚需**——因为「谁接着跑」
+这个问题已经被常驻循环回答了。LocalDub 已有等价实现，见下节。
+
+#### 形态 B：单次执行有时长上限的托管进程（serverless）
+
+serverless 的限制不是「没有进程」，而是**单个进程有硬性执行时长上限**
+（Vercel 函数超时、Cloudflare `maxDurationMs`、Netlify Scheduled Function 等），
+所以**它不可能常驻**，也就不可能有「一直等在那儿捡活」的循环。
+
+每次调用都是**一次性短命进程**，只做一件有界的事然后退出。
 
 这个形态下**每一项都是刚需**。以 `cloudflare-d1/src/worker.ts` 为证：
 
-| 上游 runtime 能力 | serverless 形态下为何必需 | 例证 |
+| 上游 runtime 能力 | 形态 B 下为何必需 | 例证 |
 | --- | --- | --- |
-| **有界 sweep** | 一次 host 执行有超时，必须切分 | `maxDurationMs: 25_000` / `maxTimers: 25` |
+| **有界 sweep** | 一次 host 执行有超时，必须切成有界单元 | `maxDurationMs: 25_000` / `maxTimers: 25` |
 | **lease** | 每次调用都是新进程，必须防止两个 worker 同时跑同一个 run | `leaseOwner: 'http:start'` / `'http:payment'` |
-| **timer 投递** | **没有进程常驻，timer 必须由外部认领** | `readyAt` + `ctx.sleepUntil`，靠 `scheduled` handler 唤醒 |
+| **timer 投递** | **没有常驻进程，timer 必须由外部唤起者认领** | `readyAt` + `ctx.sleepUntil`，靠 `scheduled` handler 唤醒 |
 | **list / timeline API** | 无进程内状态可查，全部走 store | `runtime.store.listRuns` / `getRunTimeline` |
 | **host adapter** | 把平台入口（`scheduled()` / cron）接到 `sweep()` | `createCloudflareWorkflowScheduledHandler` |
 | **幂等投递** | webhook 会重试 | `signalId` |
 
-**关键**：serverless 下**没有常驻进程**，所以 `ctx.sleep` 那种「挂起后等引擎
-自己投递」的 B 方案根本不可行——这正是 D3 里那个问题的实例。
+**关键**：形态 B 下没有常驻进程，所以 `ctx.sleep` 那种「挂起后等引擎自己
+投递」的方案根本不可行——每个挂起的 run 都得等下一次外部调用**把唤醒条件
+查出来再投递**。这正是 D3 里那个问题的实例，也是 `sweep` 存在的理由。
 
 **结论：要做 `cloudflare-d1` 这类例子，runtime 层（lease / sweep / timer 投递 /
 list）全部必需，D2 与 D4 不能作废。**
+
+#### 对 LocalDub 的意义
+
+它**属于形态 A**，所以「只用 `workflow-core`、不接 runtime」是**正确取舍**，
+不是「可控性不足」：
+
+- 上游 `quick-start.md` 的「a workflow that does one thing」正是形态 A 的最小
+  场景——一次 `runWorkflow` 跑完，core 足够
+- LocalDub 更进一步：它有常驻 worker，连「挂起后谁恢复」都自己解决了
+- runtime 层对它没有增量价值（除非哪天它要做成「跑一次就退」的 CLI 形态，
+  那才会掉进形态 B）
+
+**反过来**：如果只做 core 但**没有**常驻驱动者（例如「CLI 跑一次就退」），
+挂起的 run 就没人捡——那时 core 就不够了，必须有外部 cron 调 `sweep`。
 
 ### D5 附一：LocalDub 已自有 queue，但那是形态 A 的解法
 
