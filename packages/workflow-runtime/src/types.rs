@@ -489,6 +489,26 @@ pub enum WorkflowScheduleSpec {
     },
 }
 
+/// 注册期声明的 schedule（对齐 `types.ts:204` 的 `WorkflowScheduleDefinition`）。
+///
+/// 挂在 [`WorkflowRegistration`](crate::WorkflowRegistration) 上；由
+/// [`materialize_workflow_schedules`](crate::schedule_materializer::materialize_workflow_schedules)
+/// 换算成 [`UpsertScheduleArgs`] 后登记进 store。
+///
+/// 与上游的差异：`input` 在 TS 可以是**函数**（延迟求值，每轮物化时调用一次），
+/// Rust 是纯值——需要动态 input 的宿主可在调用物化前自行构造定义。
+#[derive(Debug, Clone)]
+pub struct WorkflowScheduleDefinition {
+    /// 缺省时由物化器按 `{workflowId}:{index}` 推导（对齐上游 `getScheduleId`）。
+    pub id: Option<ScheduleId>,
+    pub schedule: WorkflowScheduleSpec,
+    /// 缺省 `Skip`（对齐上游 `overlapPolicy ?? 'skip'`）。
+    pub overlap_policy: Option<WorkflowOverlapPolicy>,
+    pub input: Option<serde_json::Value>,
+    /// `Some(false)` = 登记为停用（对齐上游 `enabled === false` 的分支）。
+    pub enabled: Option<bool>,
+}
+
 /// 对齐 `types.ts:212`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

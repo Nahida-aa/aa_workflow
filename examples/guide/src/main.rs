@@ -112,6 +112,7 @@ fn define_runtime() -> (WorkflowRuntime, Arc<InMemoryExecutionStore>) {
             workflow: fulfillment_workflow().into_workflow(),
             previous_versions: vec![],
             version_override: None,
+            schedules: vec![],
         },
     );
 

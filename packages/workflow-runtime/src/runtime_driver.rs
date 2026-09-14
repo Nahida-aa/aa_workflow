@@ -63,6 +63,11 @@ pub struct WorkflowRegistration {
     pub previous_versions: Vec<Workflow>,
     /// 覆盖 workflow 自身的 version（对齐上游 `version?`）。
     pub version_override: Option<String>,
+    /// 注册期声明的 schedule（对齐上游 `schedules?`）。
+    ///
+    /// 由 [`materialize_workflow_schedules`](crate::schedule_materializer::materialize_workflow_schedules)
+    /// 换算成 store 里的 schedule 记录——那一步之前它们只是声明。
+    pub schedules: Vec<WorkflowScheduleDefinition>,
 }
 
 /// runtime 配置（对齐上游 `WorkflowRuntimeConfig`）。
@@ -978,6 +983,7 @@ mod driver_tests {
                 workflow,
                 previous_versions: vec![],
                 version_override: None,
+                schedules: vec![],
             },
         );
         Fixture {

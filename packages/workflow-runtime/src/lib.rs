@@ -43,6 +43,7 @@ pub mod define_runtime;
 pub mod in_memory_store;
 pub mod run_store_adapter;
 pub mod runtime_driver;
+pub mod schedule_materializer;
 pub mod types;
 
 pub use define_runtime::{cron, every};
@@ -57,11 +58,16 @@ pub use runtime_driver::{
     WorkflowRuntimeStartRunArgs, WorkflowRuntimeSweepArgs, WorkflowRuntimeSweepResult,
     define_workflow_runtime,
 };
+pub use schedule_materializer::{
+    DEFAULT_CRON_LOOKBACK_MS, MaterializeWorkflowSchedulesOptions, MaterializedWorkflowSchedule,
+    materialize_workflow_schedules,
+};
 pub use types::{
     AppendEventsArgs, AppendEventsResult, ClaimDueTimersArgs, ClaimRunArgs, ClaimRunResult,
     ClaimStaleRunsArgs, CreateRunArgs, CreateRunResult, HeartbeatRunLeaseArgs, LeaseOwner,
     LoadedExecution, MarkRunErroredArgs, MarkRunFinishedArgs, MarkRunPausedArgs, ReadEventsArgs,
     ReleaseRunLeaseArgs, RunClaim, RunId, RunSummary, RunTimeline, SaveRunStateArgs,
     ScheduleTimerArgs, StoredWorkflowEvent, TimerWakeup, WorkflowExecution,
-    WorkflowExecutionStatus, WorkflowId, WorkflowLease, WorkflowVersion,
+    WorkflowExecutionStatus, WorkflowId, WorkflowLease, WorkflowScheduleDefinition,
+    WorkflowVersion,
 };
