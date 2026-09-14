@@ -2,7 +2,7 @@
 
 > **状态**：D1 已定（supertrait，不设中间层）。**D3 已落地**（core 挂起即返回）、
 > **D7 已落地**（drive 收尾登记 timer，serverless 路径打通）、**D8 已落地**
-> （resume 带持久化 input）。D2 / D4 有倾向待确认。
+> （resume 带持久化 input）、**D9 已落地**（store 契约套件）。D2 / D4 有倾向待确认。
 >
 > **结论：runtime 层必需**——判据是**「有没有常驻的驱动者」**（不是「有没有
 > 持久存储」，两者正交；见 D5）。LocalDub 有常驻 worker，属形态 A，**只用
@@ -728,3 +728,72 @@ resume 路径」的地方。而它：
 `signal_id` 恰好就是存储键（`timer:...`）。普通信号投递传的是调用方自己的 id，
 这句删不到任何东西。无害（上游同样如此，属既有的不成文约定），但如果将来有
 第二种 timer 投递路径，这里会成为一个坑。
+
+### D9. 怎么保证 store 实现是对的？—— **已落地：可执行的契约套件**
+
+上游的做法是**一份契约套件被 N 个 store 复用**
+（`tests/contracts/workflow-execution-store.contract.ts`，657 行 / 17 个用例）：
+
+```text
+in-memory-store.test.ts         → runWorkflowExecutionStoreContractTests({ name: 'in-memory', ... })
+workflow-store-cloudflare-d1    → 同一个函数 + ensureSchema()
+workflow-store-drizzle-postgres → 同一个函数
+```
+
+其中 `in-memory-store.test.ts` **整个文件只有 8 行**——没有自己的用例，纯粹把
+契约跑在内存实现上。第二、第三个 store 之所以写得出来，就是因为有这份可执行规格。
+
+我们移植为 [`store_contract::run_store_contract`](../packages/workflow-runtime/src/store_contract.rs)，
+15 条（对照上游 17 条，去掉了 2 条与我们未实现的 `awaiting` 投影相关的）：
+
+| 组 | 条款 |
+| --- | --- |
+| run 生命周期 | 幂等创建（重复不覆盖 input）；CAS append + 有序 replay |
+| lease | 认领 / 阻塞 / 重认领；陈旧认领；心跳续租；**按 owner 释放** |
+| timer | 到期认领，且**每个 lease 窗口只认领一次** |
+| 投递 | signal 幂等 + 回到 Queued；名字不符 → NotWaiting；approval 幂等同理 |
+| schedule | 桶确定性（`runId = wf:schedule:bucket`）；已启动的桶不再被认领 |
+| 查询 | `listRuns` 过滤；timeline 带事件 |
+| 适配 | 降格到 core `RunStore` 后 CAS 冲突原样透传 |
+
+#### 「冲突」怎么测（关键手法）
+
+**不靠并发线程，靠显式时间戳**（与上游同一手法）：
+
+```text
+claim_run({ owner: "a", lease_ms: 100, now: 10 })   // 拿到，lease 到 110
+claim_run({ owner: "b", lease_ms: 100, now: 20 })   // 被挡
+claim_run({ owner: "b", lease_ms: 100, now: 111 })  // 重认领成功
+```
+
+所以绝大多数用例**不真睡觉、不会 flaky**。这也是我们的 `ClaimRunArgs` 等类型
+里 `now` 是一等字段的意义——它不是装饰，是让契约可测的前提。
+
+#### 落地过程
+
+跑在 `InMemoryExecutionStore` 上一次通过（除了两处**我自己写错**的断言：
+把「非持有者续租」写成应当报错，而上游是**静默 no-op**；以及一条没算清前面
+步骤留下的 lease 状态）。修的是测试不是实现——这提醒我们：**契约测试本身也会
+写偏，要先查上游再改实现**。
+
+套件有效性用「破坏-观察-还原」验证过两次：把 `heartbeat_run_lease` 的 owner
+校验去掉、把 `claim_due_timers` 的 lease 跳过去掉，两次都被当场抓到，失败信息
+带实现名与条款名：
+
+```text
+[in-memory] 契约不满足: claims due timers once per active lease window
+```
+
+#### 它为什么现在特别重要
+
+目前只有 `InMemoryExecutionStore` 一个实现，而它**不实现任何真实并发语义**
+（`claim` 永远成功）。所以 lease / sweep / timer 这些路径的信心，此前完全建立在
+一个不会冲突的存储上。契约测试把「规格」固化下来，也正是 **D2（lease 位置）的
+判据来源**：接口够不够用，要看规格写不写得出来。下一步的第二个 store 实现应当
+**照着这份规格写**，而不是先写实现再想该测什么。
+
+#### 与上游的差异
+
+- 上游 17 条含 `awaiting`（fan-out 预留的数组投影）相关 2 条，我们刻意不做该投影，故略去；
+- 上游用 vitest 的参数化套件；Rust 侧是普通函数 + `fn(&StoreFactory)` 表，
+  失败信息自建（`[name] 契约不满足: 条款`）。

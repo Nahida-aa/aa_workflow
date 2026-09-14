@@ -1299,13 +1299,30 @@ mod in_memory_tests {
                     step_id: None,
                     name: "payment".into(),
                     payload: serde_json::json!({}),
-                },
-                now: 3,
-            })
-            .unwrap();
+            },
+            now: 3,
+        })
+        .unwrap();
         assert!(
             matches!(result, DeliverSignalResult::Delivered { .. }),
             "删除 run 应连带清投递记录，否则新 run 收不到同名信号"
         );
+    }
+}
+
+/// 把 [`store_contract::run_store_contract`] 跑在 in-memory 实现上。
+///
+/// 对齐上游 `in-memory-store.test.ts`——那边整个文件就 8 行，纯粹把契约套件
+/// 跑在内存实现上，没有自己的用例。
+#[cfg(test)]
+mod contract {
+    use super::*;
+    use crate::store_contract::run_store_contract;
+
+    #[test]
+    fn in_memory_satisfies_execution_store_contract() {
+        run_store_contract("in-memory", || {
+            Arc::new(InMemoryExecutionStore::default())
+        });
     }
 }

@@ -282,10 +282,12 @@ packages/workflow-runtime/  执行所有权层（lease / sweep / timer / schedul
   src/runtime_driver.rs     start_run / deliver_signal / deliver_approval / sweep
   src/define_runtime.rs     cron / every 规格构造器
   src/schedule_materializer.rs  spec → next_fire_at
+  src/store_contract.rs     store 契约套件（N 个实现共用，对齐上游 contracts/）
+  src/store_contract.rs     store 契约套件（N 个实现共用，对齐上游 contracts/）
 examples/shared/            host 无关示例层（10 个 workflow + FileRunStore + drive 薄壳）
 examples/guide/             TanStack guide 的可运行移植（唯一跑通 core+runtime 端到端的地方）
 docs/tanstack-alignment.md  对齐决策记录（含推翻第一轮的论证）
-docs/runtime-design.md      runtime 层决策记录（D1-D8）
+docs/runtime-design.md      runtime 层决策记录（D1-D9）
 ```
 
 示例层强约束：只依赖 `workflow-core` + tokio，**不依赖 LocalDub**。

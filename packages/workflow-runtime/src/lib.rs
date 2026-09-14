@@ -23,9 +23,14 @@
 //!
 //! # 当前状态
 //!
-//! 基础契约（[`WorkflowRunStoreAdapterStore`]）与类型已立，[`WorkflowExecutionStore`]
-//! 的扩展方法**尚未定义**——它们依赖 `docs/runtime-design.md` 的 D2（lease
-//! 位置）与 D4（sweep 边界）敲定。
+//! 契约（[`WorkflowRunStoreAdapterStore`] / [`WorkflowExecutionStore`]）、
+//! in-memory 实现、driver（`start_run` / `deliver_signal` / `deliver_approval` /
+//! `sweep`）、schedule materializer 均已就位。
+//!
+//! **尚缺的是第二个 store 实现**——目前只有 [`InMemoryExecutionStore`]，
+//! 而它不实现任何真实的并发语义（`claim` 永远成功）。所以 lease / sweep /
+//! timer 这些路径虽然在 [`store_contract`] 的规格下通过了，但**没有在真会冲突的
+//! 存储上验证过**。D2（lease 位置）等的就是这一步。
 //!
 //! # 层次
 //!
@@ -38,12 +43,15 @@
 //!
 //! 后两个 trait 都在 [`run_store_adapter`] 里（与上游把两个 interface 放在同一个
 //! `types.ts` 一致），本模块只做声明与再导出。
+//!
+//! 新 store 实现要宣告自己兼容，跑 [`store_contract::run_store_contract`]。
 
 pub mod define_runtime;
 pub mod in_memory_store;
 pub mod run_store_adapter;
 pub mod runtime_driver;
 pub mod schedule_materializer;
+pub mod store_contract;
 pub mod types;
 
 pub use define_runtime::{cron, every};
