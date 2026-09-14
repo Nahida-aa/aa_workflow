@@ -1,7 +1,7 @@
 # workflow-runtime 设计意图
 
-> **状态**：D1 已定（supertrait，不设中间层）。**D3 已定且已落地**（core 不自轮询，
-> 挂起即返回）。D2 / D4 有倾向待确认。
+> **状态**：D1 已定（supertrait，不设中间层）。**D3 已落地**（core 挂起即返回）、
+> **D7 已落地**（drive 收尾登记 timer，serverless 路径打通）。D2 / D4 有倾向待确认。
 >
 > **结论：runtime 层必需**——判据是**「有没有常驻的驱动者」**（不是「有没有
 > 持久存储」，两者正交；见 D5）。LocalDub 有常驻 worker，属形态 A，**只用
@@ -635,17 +635,54 @@ separate → separate_after → sf_ocr_pre → sf_ocr → sf_ocr_fix
    `WorkflowParked` 哨兵就位，21 个测试改写，145 个测试全绿。
    - **LocalDub 侧未同步**：`engine.rs:282` 的 `other =>` 仍需加 `Paused`。这是一处
      破坏性的接口变更——LocalDub 下次升级依赖时会踩到。
-4. **拍板 D2 / D4**（D1 已定）：
+4. ~~补 timer 登记~~ —— **已完成**，见 D7。这是 D3 的必然后续：core 不再自投递，
+   runtime 就必须把 `waiting_for.deadline` 登记成 sweep 认得的记录。
+5. **拍板 D2 / D4**（D1 已定）：
    - D2（lease 位置）—— 倾向 store，前提是不塞进 `RunStore`
    - D4（sweep 边界）—— 倾向保留 `max_*` / `maxDurationMs`
-5. **并行编排（D5 附二）可以独立推进**：它只依赖 core 的 `try_join!`，与
+6. **并行编排（D5 附二）可以独立推进**：它只依赖 core 的 `try_join!`，与
    runtime 层的决策无关。如果想让 LocalDub 先有收益，这条可以并行开工。
 
-**次序**：D3 已落地（它反向决定了 core 的形状），接下来是 D2 / D4 的细节。**
+**次序**：D3 已落地（它反向决定了 core 的形状），接下来是 D2 / D4 的细节。
 
-### 顺带暴露的一个设计缺口
+### D7. timer 登记：谁把 `waiting_for.deadline` 变成 sweep 能认领的记录？—— **已定且已落地**
 
-`WorkflowExecutionStore` 目前没有「查所有到期的 timer」这种入口，而 D3 之后
-`deadline` 是**绝对时间戳**（见 D3 结论的影响表）——这正是 sweep 索引需要的形状。
-实现 runtime 的 timer 认领时，`waiting_for.deadline` 加上按时间排序的查询就是
-`claim_due_timers` 的雏形。这一点在 D4 里一并定。
+D3 之后 core 不再自己投递 timer，`waiting_for.deadline` 只是**投影**。要让
+sweep 能认领，必须有人把它登记成 `WorkflowExecutionStore::schedule_timer` 记录。
+这个「谁」当时是缺的——**整个 serverless 路径是断的**：含 `sleep` 的 run 挂起后
+永远等不到唤醒。
+
+对齐上游 `syncTimerFromRunState`（`runtime-driver.ts:815`）：
+
+| 点 | 做法 |
+| --- | --- |
+| 时机 | **每次 drive 收尾**（`drive_claimed_run`），在释放 lease 之前——与上游 `runtime-driver.ts:756` 同序 |
+| 条件 | 仅当 `waiting_for.signal_name == "__timer"` 且 `deadline` 存在 |
+| `wake_at` | 就是 core 投影的 `deadline`（绝对时间戳） |
+| `signal_id` | `timer:{run_id}:{step_id}:{deadline}` —— **幂等键**，抵消「每次 drive 都跑一遍」 |
+| 覆盖面 | `start_run` / `deliver_signal` / `deliver_approval` / sweep 的 recover **都走 `drive_claimed_run`**，所以一处修全通 |
+
+#### 为什么原来的测试没发现
+
+原来那个 `sweep_delivers_due_timer_and_completes` 测试**手工构造**了 Paused 信封、
+`StepPaused` 事件和 timer 记录——正好把「drive 收尾登记 timer」这一步跳过去了。
+所以它一直是绿的，掩盖了整条链路是断的。
+
+补了三个端到端测试（都不碰 store 原语，从 `start_run` 开始）：
+
+| 测试 | 覆盖 |
+| --- | --- |
+| `start_run_then_sweep_completes_a_sleeping_workflow` | 单次 sleep：挂起 → sweep 认领 → 完成 |
+| `sweep_chains_across_two_sleeps` | 两次 sleep：验证**每次** drive 收尾都重新登记（第二次的 timer 也要在） |
+| `timer_registration_is_idempotent` | 重复同步不堆出第二条 timer |
+
+**教训**：手工构造状态的测试测不出「生产者缺失」——它把被测环节的输入直接摆好了。
+一个环节有两端（生产者/消费者），只测消费者等于没测。
+
+#### 顺带发现（未改）
+
+`InMemoryExecutionStore::deliver_signal` 里那句 `timers.remove(signal_key(run_id, delivery.signal_id))`
+（对齐上游 `in-memory-store.ts:331`）**只对 sweep 的 timer 投递有效**——sweep 传的
+`signal_id` 恰好就是存储键（`timer:...`）。普通信号投递传的是调用方自己的 id，
+这句删不到任何东西。无害（上游同样如此，属既有的不成文约定），但如果将来有
+第二种 timer 投递路径，这里会成为一个坑。

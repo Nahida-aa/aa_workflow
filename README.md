@@ -284,7 +284,7 @@ packages/workflow-runtime/  执行所有权层（lease / sweep / timer / schedul
   src/schedule_materializer.rs  spec → next_fire_at
 examples/shared/            host 无关示例层（10 个 workflow + FileRunStore + drive 薄壳）
 docs/tanstack-alignment.md  对齐决策记录（含推翻第一轮的论证）
-docs/runtime-design.md      runtime 层决策记录（D1-D6）
+docs/runtime-design.md      runtime 层决策记录（D1-D7）
 ```
 
 示例层强约束：只依赖 `workflow-core` + tokio，**不依赖 LocalDub**。
@@ -297,9 +297,10 @@ materializer / 规格构造器），**但还没有被任何真实 host 用过**�
 
 - **多 worker 协调**：lease / 心跳 / 抢占的接口都在 `WorkflowExecutionStore` 上，
   但只有 `InMemoryExecutionStore` 一个实现，**没有生产级 store 验证过它**。
-- **timer 索引**：`waiting_for.deadline` 是**绝对时间戳**（D3 之后一律如此），
-  形状已适合索引；缺的是 `ExecutionStore` 上「查到期 timer」的入口。
-- **schedules / cron**：已有 spec → `next_fire_at` 的换算，缺分桶调度接进 true host。
+- **schedules / cron**：已有 spec → `next_fire_at` 的换算，缺分桶调度接进真实 host。
+- **timer**：`drive_claimed_run` 收尾会把 `waiting_for.deadline` 登记成 timer
+  （`sync_timer_from_run_state`，对齐上游 `syncTimerFromRunState`），`sweep`
+  认领到期项并投递 `__timer`。端到端已有测试覆盖，同样**没有生产级 store 验证过**。
 
 这一层在上游也是**后补的**：core 的 0.0.1 之后六天，才由 `5d05fa8` 一次性带出
 runtime + 各 host/store adapter。所以这是阶段性缺位而非设计缺陷；补的时候应照

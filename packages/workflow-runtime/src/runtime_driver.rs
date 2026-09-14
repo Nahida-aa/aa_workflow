@@ -831,11 +831,23 @@ impl WorkflowRuntime {
 
         // 心跳停止 + 释放 lease（无论 drive 成败）。
         let heartbeat_error = heartbeat.stop().await;
+
+        // drive 收尾：run 若停在 `__timer` 上，把它的 deadline 登记成 timer 记录。
+        // **必须在这里做**——core 的挂起是「写到挂起点就返回」，它自己不登记
+        // 定时器（D3）；不登记的话这个 run 永远等不到唤醒。放在释放 lease 之前，
+        // 与上游 `runtime-driver.ts:756`（`syncTimerFromRunState` 在 finally 的
+        // releaseRunLease 之前）同序。
+        //
+        // 失败不致命：timer 登记不上，sweep 下一轮还会从 `waiting_for` 恢复，
+        // 但这一轮先如实报错。
+        let sync_result = sync_timer_from_run_state(&self.config, args.run_id, args.workflow_id);
+
         self.config.store.release_run_lease(ReleaseRunLeaseArgs {
             run_id: args.run_id.to_string(),
             lease_owner: args.lease_owner.clone(),
         })?;
         heartbeat_error?;
+        sync_result?;
 
         // drive 出错（step 终局失败等）→ Errored 结果。run_workflow 的错误
         // 详情已经落在事件日志（StepFailed / RunErrored）里，快照里也有。
@@ -886,6 +898,45 @@ struct DriveArgs<'a> {
 /// 每次调用建一个新 adapter（轻量 struct + Arc，与上游每次 drive 建一次一致）。
 fn run_store_for_core(config: &WorkflowRuntimeConfig) -> Arc<dyn workflow_core::RunStore> {
     create_run_store_adapter(Arc::clone(&config.store))
+}
+
+/// drive 收尾后，若 run 正挂在 `__timer` 上，把它的 deadline 登记成一条 timer
+/// 记录，供后续 `sweep` 认领投递。
+///
+/// 对齐上游 `syncTimerFromRunState`（`runtime-driver.ts:815`）：
+///
+/// - 只在 `waiting_for.signal_name == "__timer"` **且** `deadline` 存在时登记；
+/// - `wake_at` 就是 core 投影出来的 `deadline`（D3 之后它是**绝对**时间戳，
+///   与上游 `sleepUntil` 同形）；
+/// - `signal_id` 形如 `timer:{run_id}:{step_id}:{deadline}`，**幂等键**——同一次
+///   挂起重复登记无副作用，正好抵消「每次 drive 收尾都跑一遍」。
+fn sync_timer_from_run_state(
+    config: &WorkflowRuntimeConfig,
+    run_id: &str,
+    workflow_id: &str,
+) -> anyhow::Result<()> {
+    let Some(state) = config.store.load_run_state(run_id)? else {
+        return Ok(());
+    };
+    let Some(w) = state.waiting_for else {
+        return Ok(());
+    };
+    if w.signal_name != "__timer" {
+        return Ok(());
+    }
+    let Some(deadline) = w.deadline else {
+        return Ok(());
+    };
+    let step_id = w.step_id.unwrap_or_default();
+
+    config.store.schedule_timer(ScheduleTimerArgs {
+        run_id: run_id.to_string(),
+        workflow_id: workflow_id.to_string(),
+        workflow_version: state.workflow_version.clone(),
+        wake_at: deadline,
+        signal_id: format!("timer:{run_id}:{step_id}:{deadline}"),
+        now: now_ms(),
+    })
 }
 
 /// 心跳任务：每 `lease_ms / 3` 续租，直到 stop。错误在 `stop().await` 时回传。
@@ -1044,8 +1095,25 @@ mod driver_tests {
             .into_workflow()
     }
 
-    fn long_step_workflow() -> Workflow {
-        create_workflow(CreateWorkflowConfig::new("long").input::<serde_json::Value>())
+    /// 短 sleep（80ms），用于端到端验证 sweep 认领 timer。
+    fn short_sleep_workflow() -> Workflow {
+        create_workflow(CreateWorkflowConfig::new("sleeper").input::<serde_json::Value>())
+            .handler(|ctx: WorkflowCtx| async move {
+                ctx.sleep("hold", std::time::Duration::from_millis(80))
+                    .await?;
+                ctx.step(
+                    "after",
+                    move |_sc: workflow_core::StepCtx| async move {
+                        Ok(serde_json::json!({ "after": true }))
+                    },
+                )
+                .await?;
+                Ok(serde_json::json!({ "woke": true, "after": true }))
+            })
+            .into_workflow()
+    }
+
+    fn long_step_workflow() -> Workflow {        create_workflow(CreateWorkflowConfig::new("long").input::<serde_json::Value>())
             .handler(|ctx: WorkflowCtx| async move {
                 ctx.step("slow", move |_sc: workflow_core::StepCtx| async move {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -1160,6 +1228,149 @@ mod driver_tests {
         );
     }
 
+    /// **两次 sleep 的端到端**：每次挂起 → sweep 认领 timer 投递 → 再挂起 → …
+    /// 直到 Finished。验证「每次 drive 收尾都重新登记 timer」是累积有效的
+    /// （第二次 sleep 的 timer 也必须被登记）。
+    #[tokio::test]
+    async fn sweep_chains_across_two_sleeps() {
+        let fx = runtime_with(
+            "sleeper",
+            create_workflow(CreateWorkflowConfig::new("sleeper").input::<serde_json::Value>())
+                .handler(|ctx: WorkflowCtx| async move {
+                    ctx.sleep("s1", std::time::Duration::from_millis(40))
+                        .await?;
+                    ctx_step_once(&ctx, "mid").await?;
+                    ctx.sleep("s2", std::time::Duration::from_millis(40))
+                        .await?;
+                    Ok(serde_json::json!({ "done": true }))
+                })
+                .into_workflow(),
+        );
+
+        let started = fx
+            .rt
+            .start_run(WorkflowRuntimeStartRunArgs {
+                workflow_id: "sleeper".into(),
+                run_id: "chain:1".into(),
+                input: serde_json::json!({}),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(started.kind, RunResultKind::Paused);
+
+        // 反复 sleep 到点 + sweep，最多 4 轮。
+        let mut finished = false;
+        for _ in 0..4 {
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            fx.rt
+                .sweep(WorkflowRuntimeSweepArgs {
+                    max_timers: Some(5),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            if fx.mem.load_run("chain:1").unwrap().unwrap().status
+                == WorkflowExecutionStatus::Finished
+            {
+                finished = true;
+                break;
+            }
+        }
+        assert!(finished, "两次 sleep 应都能被 sweep 唤醒");
+        assert_eq!(
+            fx.mem.load_run("chain:1").unwrap().unwrap().output,
+            Some(serde_json::json!({ "done": true }))
+        );
+    }
+
+    /// timer 登记是**幂等**的：同一挂起点被 drive 收尾重复同步，不能堆出多条
+    /// timer（否则 sweep 会重复投递同一信号）。`signal_id` 里编了
+    /// `run_id:step_id:deadline`，正好当幂等键。
+    ///
+    /// 这里用「投一个名字对不上的信号」逼出第二次 drive 收尾：`deliver_signal`
+    /// 会 claim + drive（收尾再次同步 timer），但 `NotWaiting` 不会唤醒 run，
+    /// 正好隔离出「只测同步幂等」。
+    #[tokio::test]
+    async fn timer_registration_is_idempotent() {
+        let fx = runtime_with("sleeper", sleeping_workflow());
+
+        // 起一次，停在 sleep（60s，测试期间不会到期）。
+        fx.rt
+            .start_run(WorkflowRuntimeStartRunArgs {
+                workflow_id: "sleeper".into(),
+                run_id: "idem:1".into(),
+                input: serde_json::json!({}),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let run = fx.mem.load_run("idem:1").unwrap().unwrap();
+        assert_eq!(run.status, WorkflowExecutionStatus::Paused);
+        let deadline = run.waiting_for.as_ref().unwrap().deadline.unwrap();
+        let signal_id = format!("timer:idem:1:hold:{deadline}");
+
+        // 第一次 drive 收尾已经登记过一条（用很短的 lease，认领完就过期，
+        // 免得挡住后面的探测）。
+        let after_first = fx
+            .mem
+            .claim_due_timers(ClaimDueTimersArgs {
+                now: deadline + 1,
+                limit: 10,
+                lease_owner: "probe1".into(),
+                lease_ms: 1,
+            })
+            .unwrap();
+        assert_eq!(after_first.len(), 1, "第一次 drive 收尾应登记一条 timer");
+        assert_eq!(after_first[0].signal_id, signal_id);
+
+        // 投一个名字对不上的信号 → 逼出第二次 drive 收尾（run 不被唤醒）。
+        let delivered = fx
+            .rt
+            .deliver_signal(WorkflowRuntimeDeliverSignalArgs {
+                run_id: "idem:1".into(),
+                signal_id: "noise".into(),
+                name: "unrelated".into(),
+                payload: serde_json::Value::Null,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            delivered.kind,
+            RunResultKind::NotWaiting,
+            "投的不是它在等的信号"
+        );
+
+        // 认领应**仍然只有一条**：第二次同步是同键覆盖，不是新增；且非 timer 的
+        // 投递不该把它删掉。
+        let after_second = fx
+            .mem
+            .claim_due_timers(ClaimDueTimersArgs {
+                now: deadline + 2,
+                limit: 10,
+                lease_owner: "probe2".into(),
+                lease_ms: 1,
+            })
+            .unwrap();
+        assert_eq!(
+            after_second.len(),
+            1,
+            "第二次 drive 收尾不该堆出第二条 timer，也不该把原有的删掉"
+        );
+        assert_eq!(after_second[0].signal_id, signal_id);
+    }
+
+    async fn ctx_step_once(ctx: &WorkflowCtx, id: &str) -> anyhow::Result<()> {
+        let id = id.to_string();
+        ctx.step(&id, move |_sc: workflow_core::StepCtx| async move {
+            Ok(serde_json::Value::Null)
+        })
+        .await?;
+        Ok(())
+    }
+
     /// 模拟「上一个 worker 刚 claim 就死了」：create + claim（短 lease），不驱动。
     async fn setup_dead_run(fx: &Fixture, run_id: &str) {
         fx.mem
@@ -1198,6 +1409,59 @@ mod driver_tests {
         assert_eq!(sweep.recovered[0].kind, RunResultKind::Completed);
         assert!(!sweep.deadline_reached);
         assert!(!sweep.remaining_may_exist);
+    }
+
+    /// **端到端**：真跑一个含 `sleep` 的 workflow，只靠 sweep 收尾。
+    ///
+    /// 上面那个测试手工构造了 Paused 状态与 timer 记录，绕过了 driver 的
+    /// 「drive 后登记 timer」这一步——所以它**测不出**那一步缺失。这个测试从
+    /// `start_run` 开始，不碰任何 store 原语。
+    #[tokio::test]
+    async fn start_run_then_sweep_completes_a_sleeping_workflow() {
+        let fx = runtime_with("sleeper", short_sleep_workflow());
+
+        // 短 sleep（80ms）——start_run 挂起即返回，run 停在 Paused。
+        let started = fx
+            .rt
+            .start_run(WorkflowRuntimeStartRunArgs {
+                workflow_id: "sleeper".into(),
+                run_id: "sleep:e2e".into(),
+                input: serde_json::json!({}),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(started.kind, RunResultKind::Paused);
+
+        let run = fx.mem.load_run("sleep:e2e").unwrap().unwrap();
+        assert_eq!(run.status, WorkflowExecutionStatus::Paused);
+        let w = run.waiting_for.as_ref().expect("应投影 waiting_for");
+        assert_eq!(w.signal_name, "__timer", "sleep 走 __timer 通道");
+        assert!(w.deadline.is_some(), "sleep 应投影 deadline");
+
+        // 等 timer 到期，然后 sweep——**不手工 schedule_timer**：driver 应该在
+        // drive 收尾时自己登记。
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        let sweep = fx
+            .rt
+            .sweep(WorkflowRuntimeSweepArgs {
+                max_timers: Some(5),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sweep.timers.len(),
+            1,
+            "drive 收尾时应登记 timer，sweep 才有得投递"
+        );
+        let run = fx.mem.load_run("sleep:e2e").unwrap().unwrap();
+        assert_eq!(run.status, WorkflowExecutionStatus::Finished);
+        assert_eq!(
+            run.output,
+            Some(serde_json::json!({ "woke": true, "after": true }))
+        );
     }
 
     /// sweep 投递到期 timer：run 挂在 `__timer` 上、持有者已死 → 投递 →
