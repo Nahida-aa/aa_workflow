@@ -92,11 +92,25 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunOptions.runtime�
     `.safeParse` 一致，但无 schema 实例对象（差异 #10）。
 11. **`previousVersions` + `selectWorkflowVersion` 内建**：resume 时引擎自动
     按 `RunState.workflow_version` 在 `[current, ...previous_versions]` 中
-    路由到正确的 handler（`select_workflow_version`），工作流定义用
-    `.previous_versions(vec![v1])` 声明；TS 同理，Rust 实现可互操作（差异
-    #11）。`defaultStepRetry` 由 `CreateWorkflowConfig::default_step_retry()`
-    或 `Workflow::default_step_retry()` 设置（步骤级 `StepOptions::retry`
+    路由到正确的 handler（`select_workflow_version`，在 `registry/`
+    目录，对齐上游 `registry/select-version.ts` 的文件组织），工作流定义用
+    `.previous_versions(vec![v1])` 声明。`defaultStepRetry` 由
+    `CreateWorkflowConfig::default_step_retry()` 或
+    `Workflow::default_step_retry()` 设置（步骤级 `StepOptions::retry`
     优先）。
+
+    **匹配不上的语义（与上游对齐，2026-09-14 修正）**：版本化 run 的
+    `workflow_version` 既不是当前版本、也不在 `previous_versions` 里时，
+    **报错而非回退**——回退会把 v1 的 run 路由进当前版本的代码，
+    是确定性违规（上游 `select-version.ts` 注释原话）。错误码
+    `RunErrorCode::WorkflowVersionMismatch`（对齐上游
+    `workflow_version_mismatch`）。无版本的老 run（版本机制引入前）仍回退
+    到当前定义——它跑的本就是无版本代码，是语义正确的兼容路径。
+
+    与上游的签名差异：上游是 `selectWorkflowVersion(versions[], runId, store)`
+    （显式数组 + 读 store），我们是 `select_workflow_version(workflow,
+    persisted_version)`（从 `.previous_versions` 取候选 + 版本由调用方传入，
+    因为 `run_workflow` 已经读过 `RunState`）。
 
 ## `createWorkflow` / `WorkflowBuilder` / `WorkflowDefinition` 对等矩阵
 

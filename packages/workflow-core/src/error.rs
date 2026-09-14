@@ -113,6 +113,10 @@ pub enum RunErrorCode {
     Aborted,
     /// `initialize` 失败或 state 形状校验不过（对应他们 zod `.safeParse` 失败）。
     Validation,
+    /// 版本化 run 的 `workflow_version` 既不是当前版本、也不在
+    /// `previous_versions` 里（对齐上游 `workflow_version_mismatch`
+    /// 错误码）。**不回退**——那会把旧版 run 路由进新版代码，是确定性违规。
+    WorkflowVersionMismatch,
 }
 
 impl RunErrorCode {
@@ -121,6 +125,7 @@ impl RunErrorCode {
             RunErrorCode::Error => "error",
             RunErrorCode::Aborted => "aborted",
             RunErrorCode::Validation => "validation_error",
+            RunErrorCode::WorkflowVersionMismatch => "workflow_version_mismatch",
         }
     }
 }

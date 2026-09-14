@@ -100,24 +100,11 @@ pub struct RunOutcome {
     pub error: Option<RunError>,
 }
 
-/// Resolves which workflow definition drives a run, mirroring TanStack's
-/// `selectWorkflowVersion` (registry/select-version.ts): the persisted
-/// `workflow_version` picks among `[workflow] + workflow.previous_versions`.
-/// Unknown / absent persisted versions fall back to the current workflow
-/// (legacy runs started before versioning, or versions that were dropped).
-pub fn select_workflow_version<'a>(
-    workflow: &'a Workflow,
-    persisted: Option<&str>,
-) -> &'a Workflow {
-    match persisted {
-        Some(v) => workflow
-            .previous_versions
-            .iter()
-            .find(|w| w.version.as_deref() == Some(v))
-            .unwrap_or(workflow),
-        None => workflow,
-    }
-}
+/// Resolves which workflow definition drives a run.
+///
+/// 真正的实现在 [`crate::registry::select_workflow_version`]（对齐上游
+/// `registry/select-version.ts` 的文件组织）；此处仅再导出。
+pub use crate::registry::select_workflow_version;
 
 /// Runs (or resumes) a workflow by driving its async handler.
 ///
@@ -174,13 +161,20 @@ pub async fn run_workflow(
     store.set_run_state(&run_id, &run_state)?;
 
     // Version routing: resume against the definition whose `version` the run
-    // persisted (workflow or one of its `previous_versions`); first runs use
-    // the current workflow. Mirrors `selectWorkflowVersion`.
+    // persisted (workflow or one of its `previous_versions`). 版本化 run 匹配
+    // 不上时**不回退**——那会把 v1 的 run 路由进当前版本的代码，是确定性违规
+    // （上游 `select-version.ts` 注释原话）。这里以终局错误结束。
     let persisted_version = run_state
         .workflow_version
         .as_deref()
         .or(workflow.version.as_deref());
-    let active = select_workflow_version(workflow, persisted_version);
+    let Some(active) = select_workflow_version(workflow, persisted_version) else {
+        return Err(WorkflowError::Validation(format!(
+            "workflow version mismatch: run `{run_id}` was started under version \
+             {persisted_version:?}, which is not the current version nor in \
+             `previous_versions`"
+        )));
+    };
 
     // Per-invocation state: re-derived from `initialize(input)` on every
     // start and resume (mirrors TanStack, where state is rebuilt from
@@ -625,30 +619,59 @@ mod tests {
         assert_eq!(from_outcome.to_string(), from_outcome.message);
     }
 
-    #[test]
-    fn select_workflow_version_routes_and_falls_back() {
-        let v1 = Workflow::new("wf").version("v1");
-        let v2 = Workflow::new("wf")
+    /// 版本化 run 的 `workflow_version` 匹配不上 → 终局错误，**不回退**。
+    /// 回退会把旧版 run 路由进新版代码（确定性违规，见 registry 模块文档）。
+    #[tokio::test]
+    async fn version_mismatch_errors_instead_of_falling_back() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+
+        // 先以 v1 起一个 run（挂起在 approve，保持非终态以便后续 resume）。
+        let v1 = Workflow::new("ver")
+            .version("v1")
+            .handler(|ctx: WorkflowCtx| async move {
+                ctx.approve("gate", "hold").await?;
+                Ok(serde_json::Value::Null)
+            });
+        let task = tokio::spawn({
+            let store = store.clone();
+            let v1 = v1.clone();
+            async move {
+                run_workflow(
+                    &v1,
+                    store,
+                    &RunOptions::new(serde_json::json!({})).run_id("ver:mismatch"),
+                    None,
+                )
+                .await
+            }
+        });
+        // 等挂起（run.json 写入 workflow_version = "v1"）。
+        for _ in 0..500 {
+            if let Some(st) = store.get_run_state("ver:mismatch").unwrap()
+                && st.status == RunStatus::Paused
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        task.abort();
+        let _ = task.await;
+
+        // v2 **不带** v1 作 previous_versions → resume 应报错而非回退到 v2。
+        let v2 = Workflow::new("ver")
             .version("v2")
-            .previous_versions(vec![v1.clone()]);
-        assert_eq!(
-            select_workflow_version(&v2, Some("v1")).version.as_deref(),
-            Some("v1"),
-            "路由到 previous version"
-        );
-        assert_eq!(
-            select_workflow_version(&v2, Some("v2")).version.as_deref(),
-            Some("v2")
-        );
-        assert_eq!(
-            select_workflow_version(&v2, None).version.as_deref(),
-            Some("v2"),
-            "无持久化版本 → 当前"
-        );
-        assert_eq!(
-            select_workflow_version(&v2, Some("v9")).version.as_deref(),
-            Some("v2"),
-            "未知版本 → 当前"
+            .handler(|_ctx: WorkflowCtx| async move { Ok(serde_json::Value::Null) });
+        let err = run_workflow(
+            &v2,
+            store.clone(),
+            &RunOptions::new(serde_json::json!({})).run_id("ver:mismatch"),
+            None,
+        )
+        .await
+        .expect_err("版本不匹配应报错");
+        assert!(
+            matches!(err, WorkflowError::Validation(ref m) if m.contains("version mismatch")),
+            "应为版本不匹配错误，实际 {err:?}"
         );
     }
 

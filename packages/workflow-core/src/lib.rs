@@ -45,6 +45,7 @@ pub mod engine;
 pub mod error;
 pub mod event;
 pub mod middleware;
+pub mod registry;
 pub mod resource;
 pub mod run_store;
 
