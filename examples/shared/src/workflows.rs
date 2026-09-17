@@ -684,7 +684,7 @@ pub fn event_gate() -> WorkflowDefinition<EventGateInput, serde_json::Value> {
 // 这正是「并行 durable step」能不能成立的验证点。
 // ========================================================================
 
-/// dub-sf-ocr 输入：只对 `videoDir` 取路径，示例层不落盘。
+/// dub-sf-ocr 输入：示例层不落盘，`videoDir` 只用于拼产物路径。
 ///
 /// 派生 `Clone` 是**并行分支所需**：`BaseCtx<TInput>: Clone` 要求 `TInput: Clone`，
 /// 两条 `try_join!` 分支要各持一份 `ctx.clone()`。
@@ -692,6 +692,35 @@ pub fn event_gate() -> WorkflowDefinition<EventGateInput, serde_json::Value> {
 #[serde(rename_all = "camelCase")]
 pub struct DubSfOcrInput {
     pub video_dir: String,
+    /// 目标语言；缺省由 `initialize` 兜成 `"zh"`。
+    #[serde(default)]
+    pub target_lang: Option<String>,
+}
+
+/// dub-sf-ocr 的 **typed state**（Rust 版 zod `stateSchema`）。
+///
+/// 这是本示例要演示的重点：每个 step 都**读带类型的 state**，而不是从
+/// `serde_json::Value` 里 `.get()` 链取值。`.state::<T>()` 声明契约后，handler
+/// 的 `ctx.state` 就是 `DubSfOcrState`，字段直接访问、编译期校验。
+///
+/// state **不落盘**：每次 start / resume 都由 `initialize(input)` 重建，handler
+/// 从头重跑（与 TanStack 一致）。
+///
+/// ## 与并行分支的交互（重要）
+///
+/// `ctx.clone()` 是**快照分裂**——两条 `try_join!` 分支各持一份 state 副本，
+/// 互不共享（见 `state_parallel_steps_snapshot_then_driver_flush`）。本示例的
+/// step 只**读** state，所以分裂无害；若要在 step 闭包里**写** state，那条修改
+/// 既对另一分支不可见，也会在 replay 时随闭包短路而丢失（见
+/// `state_step_closure_mutation_lost_on_resume`）。需要跨分支可见的可变状态，
+/// 只能走 step 的**返回值**（durable 结果），不能走 state。
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DubSfOcrState {
+    pub video_dir: String,
+    pub target_lang: String,
+    pub output_mode: String,
+    pub subtitle_source: String,
 }
 
 /// 并发探针（测试用）：记录同时在飞的 step 数峰值。
@@ -727,16 +756,34 @@ pub mod dub_probe {
     }
 }
 
-/// 桩 step：记录执行 → 计并发 → 模拟耗时，返回它「产出」的产物路径。
+/// 桩 step：**从 typed state 读** `video_dir` / `target_lang` 等字段，拼出它
+/// 「产出」的产物路径 → 记录 → 计并发 → 模拟耗时。
 ///
-/// 产物路径是**字符串字面量**，镜像 LocalDub `paths` 模块的约定拼法，仅作标记
-/// ——不落盘、不读 LocalDub（示例层强约束）。
-async fn fake_step(artifact: &'static str, millis: u64) -> anyhow::Result<serde_json::Value> {
+/// 产物路径**由 state 派生**（而不是硬编码字面量），这正是「每个 step 都读带类型
+/// 的 state」的落点：换个 `videoDir` / `targetLang`，10 个 step 的产物路径全变。
+///
+/// 不落盘、不读 LocalDub（示例层强约束）。
+async fn dub_step(
+    st: DubSfOcrState,
+    artifact: &str,
+    millis: u64,
+) -> anyhow::Result<serde_json::Value> {
     dub_probe::enter();
-    tracing::info!(target: "examples", "dub-sf-ocr: {artifact}");
+    let path = format!("{}/{}", st.video_dir, artifact);
+    tracing::info!(
+        target: "examples",
+        "dub-sf-ocr: {path} (mode={}, source={}, lang={})",
+        st.output_mode,
+        st.subtitle_source,
+        st.target_lang
+    );
     tokio::time::sleep(Duration::from_millis(millis)).await;
     dub_probe::leave();
-    Ok(serde_json::json!({ "artifact": artifact }))
+    Ok(serde_json::json!({
+        "artifact": path,
+        "targetLang": st.target_lang,
+        "outputMode": st.output_mode,
+    }))
 }
 
 /// 每个桩 step 的模拟耗时。两分支并行跑完的总时长 ≈ `max(A, B) + 尾部`，
@@ -759,74 +806,122 @@ const DUB_STEP_MS: u64 = 50;
 /// 所以 `try_join!` 是安全的；分支内部仍是词法 `.await` 串行（`separate_after`
 /// 要 `separate` 的 stems）。
 ///
-/// 分支各持 `ctx.clone()`——`step(&self)`  borrows ctx，两个 async 块不能同时
-/// move 同一个 ctx。
-pub fn dub_sf_ocr() -> WorkflowDefinition<DubSfOcrInput, serde_json::Value> {
-    create_workflow(CreateWorkflowConfig::new("dub-sf-ocr").input::<DubSfOcrInput>()).handler(
-        |ctx: BaseCtx<DubSfOcrInput>| async move {
-            let video_dir = ctx.input.video_dir.clone();
+/// 分支各持 `ctx.clone()`——`step(&self)` borrows ctx，两个 async 块不能同时
+/// move 同一个 ctx。注意 clone 会**连带分裂 state 快照**（见 [`DubSfOcrState`]），
+/// 本示例 step 只读 state，故无影响。
+pub fn dub_sf_ocr(
+) -> WorkflowDefinition<DubSfOcrInput, serde_json::Value, DubSfOcrState> {
+    create_workflow(
+        CreateWorkflowConfig::new("dub-sf-ocr")
+            .input::<DubSfOcrInput>()
+            .state::<DubSfOcrState>()
+            // state 不落盘：每次 start / resume 都从这里重建。
+            .initialize(|input| {
+                let video_dir = input["videoDir"].as_str().unwrap_or_default().to_string();
+                let target_lang = input["targetLang"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("zh")
+                    .to_string();
+                Ok(serde_json::json!({
+                    "videoDir": video_dir,
+                    "targetLang": target_lang,
+                    "outputMode": "dub",
+                    "subtitleSource": "sf_ocr",
+                }))
+            }),
+    )
+    .handler(|ctx: BaseCtx<DubSfOcrInput, DubSfOcrState>| async move {
+        let video_dir = ctx.input.video_dir.clone();
 
-            let ctx_a = ctx.clone(); // 分支 A：音源分离
-            let ctx_b = ctx.clone(); // 分支 B：OCR 提字 + 翻译
+        let ctx_a = ctx.clone(); // 分支 A：音源分离
+        let ctx_b = ctx.clone(); // 分支 B：OCR 提字 + 翻译
 
-            let (branch_a, branch_b) = tokio::try_join!(
-                async move {
-                    let vocals = ctx_a
-                        .step("separate", move |_sc: StepCtx| async move {
-                            fake_step("separate/target_3_vocals.wav", DUB_STEP_MS).await
-                        })
-                        .await?;
-                    let bgm = ctx_a
-                        .step("separate_after", move |_sc: StepCtx| async move {
-                            fake_step("separate_after/target_bgm.wav", DUB_STEP_MS).await
-                        })
-                        .await?;
-                    Ok::<_, anyhow::Error>(serde_json::json!({ "vocals": vocals, "bgm": bgm }))
-                },
-                async move {
-                    ctx_b.step("sf_ocr_pre", move |_sc: StepCtx| async move {
-                        fake_step("sf_ocr_pre/frames", DUB_STEP_MS).await
+        let (branch_a, branch_b) = tokio::try_join!(
+            async move {
+                let st: DubSfOcrState = (*ctx_a.state).clone();
+                let vocals = ctx_a
+                    .step("separate", move |_sc: StepCtx| {
+                        let st = st.clone();
+                        async move { dub_step(st, "separate/target_3_vocals.wav", DUB_STEP_MS).await }
                     })
                     .await?;
-                    ctx_b.step("sf_ocr", move |_sc: StepCtx| async move {
-                        fake_step("sf_ocr/frames.json", DUB_STEP_MS).await
+                let st: DubSfOcrState = (*ctx_a.state).clone();
+                let bgm = ctx_a
+                    .step("separate_after", move |_sc: StepCtx| {
+                        let st = st.clone();
+                        async move { dub_step(st, "separate_after/target_bgm.wav", DUB_STEP_MS).await }
                     })
                     .await?;
-                    ctx_b.step("sf_ocr_fix", move |_sc: StepCtx| async move {
-                        fake_step("sf_ocr_fix/srt.json", DUB_STEP_MS).await
+                Ok::<_, anyhow::Error>(serde_json::json!({ "vocals": vocals, "bgm": bgm }))
+            },
+            async move {
+                let st: DubSfOcrState = (*ctx_b.state).clone();
+                ctx_b
+                    .step("sf_ocr_pre", move |_sc: StepCtx| {
+                        let st = st.clone();
+                        async move { dub_step(st, "sf_ocr_pre/frames", DUB_STEP_MS).await }
                     })
                     .await?;
-                    let translated = ctx_b
-                        .step("translate", move |_sc: StepCtx| async move {
-                            fake_step("translate/{lang}.json", DUB_STEP_MS).await
-                        })
-                        .await?;
-                    Ok::<_, anyhow::Error>(translated)
-                },
-            )?;
+                let st: DubSfOcrState = (*ctx_b.state).clone();
+                ctx_b
+                    .step("sf_ocr", move |_sc: StepCtx| {
+                        let st = st.clone();
+                        async move { dub_step(st, "sf_ocr/frames.json", DUB_STEP_MS).await }
+                    })
+                    .await?;
+                let st: DubSfOcrState = (*ctx_b.state).clone();
+                ctx_b
+                    .step("sf_ocr_fix", move |_sc: StepCtx| {
+                        let st = st.clone();
+                        async move { dub_step(st, "sf_ocr_fix/srt.json", DUB_STEP_MS).await }
+                    })
+                    .await?;
+                let st: DubSfOcrState = (*ctx_b.state).clone();
+                let translated = ctx_b
+                    .step("translate", move |_sc: StepCtx| {
+                        let st = st.clone();
+                        // 译文文件名带 state 里的目标语言——typed state 真的被用到。
+                        async move {
+                            let name = format!("translate/{}.json", st.target_lang);
+                            dub_step(st, &name, DUB_STEP_MS).await
+                        }
+                    })
+                    .await?;
+                Ok::<_, anyhow::Error>(translated)
+            },
+        )?;
 
-            // 汇聚：split_audio 吃 A 的人声 + B 的译文。
-            let split = ctx
-                .step("split_audio", move |_sc: StepCtx| async move {
-                    fake_step("split_audio/timings.json", DUB_STEP_MS).await
-                })
-                .await?;
-            let tts = ctx
-                .step("tts", move |_sc: StepCtx| async move {
-                    fake_step("tts/wavs", DUB_STEP_MS).await
-                })
-                .await?;
-            let mix_audio = ctx
-                .step("mix_audio", move |_sc: StepCtx| async move {
-                    fake_step("mix_audio/audio_dubbing.wav", DUB_STEP_MS).await
-                })
-                .await?;
-            let mix_video = ctx
-                .step("mix_video", move |_sc: StepCtx| async move {
-                    // 这里才用上分支 A 的 bgm。
-                    fake_step("mix_video/dub_sf_ocr/{id}.mp4", DUB_STEP_MS).await
-                })
-                .await?;
+        // 汇聚：split_audio 吃 A 的人声 + B 的译文。
+        let st: DubSfOcrState = (*ctx.state).clone();
+        let split = ctx
+            .step("split_audio", move |_sc: StepCtx| {
+                let st = st.clone();
+                async move { dub_step(st, "split_audio/timings.json", DUB_STEP_MS).await }
+            })
+            .await?;
+        let st: DubSfOcrState = (*ctx.state).clone();
+        let tts = ctx
+            .step("tts", move |_sc: StepCtx| {
+                let st = st.clone();
+                async move { dub_step(st, "tts/wavs", DUB_STEP_MS).await }
+            })
+            .await?;
+        let st: DubSfOcrState = (*ctx.state).clone();
+        let mix_audio = ctx
+            .step("mix_audio", move |_sc: StepCtx| {
+                let st = st.clone();
+                async move { dub_step(st, "mix_audio/audio_dubbing.wav", DUB_STEP_MS).await }
+            })
+            .await?;
+        let st: DubSfOcrState = (*ctx.state).clone();
+        let mix_video = ctx
+            .step("mix_video", move |_sc: StepCtx| {
+                // 这里才用上分支 A 的 bgm。
+                let st = st.clone();
+                async move { dub_step(st, "mix_video/dub_sf_ocr/{id}.mp4", DUB_STEP_MS).await }
+            })
+            .await?;
 
             Ok(serde_json::json!({
                 "videoDir": video_dir,
@@ -839,8 +934,7 @@ pub fn dub_sf_ocr() -> WorkflowDefinition<DubSfOcrInput, serde_json::Value> {
                 "mixAudio": mix_audio,
                 "mixVideo": mix_video,
             }))
-        },
-    )
+    })
 }
 
 #[cfg(test)]
@@ -852,6 +946,19 @@ mod tests {
         InMemoryStore, RunOptions, RunStatus, RunStore, WorkflowEvent, run_workflow, signal_event,
         signal_run,
     };
+
+    /// 某 step 的 `StepFinished.result`（durable 结果）。
+    fn step_output(events: &[WorkflowEvent], step: &str) -> serde_json::Value {
+        events
+            .iter()
+            .find_map(|e| match e {
+                WorkflowEvent::StepFinished {
+                    step_id, result, ..
+                } if step_id == step => result.clone(),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
 
     /// 序列化共享全局网关状态的测试（tokio 各 test 默认并行跑）。
     static GATEWAY_TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
@@ -1955,6 +2062,66 @@ mod tests {
         for step in DUB_ALL_STEPS {
             assert_eq!(finished_count(&events, step), 1, "{step} 重跑不应重记");
         }
+    }
+
+    /// 每个 step 都**读 typed state**：产物路径由 `state.video_dir` 派生，译文文件名
+    /// 带 `state.target_lang`。换个输入，10 个 step 的产物路径应全变——若哪天有人
+    /// 把路径写死成字面量，这条会红。
+    #[tokio::test]
+    async fn dub_sf_ocr_steps_read_typed_state() {
+        let _guard = DUB_PROBE_LOCK.lock().await;
+        dub_probe::reset();
+
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let out = run_workflow(
+            &dub_sf_ocr(),
+            store.clone(),
+            &RunOptions::new(serde_json::json!({ "videoDir": "/w/1", "targetLang": "vi" })),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+
+        let events = store.get_events(&out.run_id).unwrap();
+        for step in DUB_ALL_STEPS {
+            let out = step_output(&events, step);
+            let artifact = out["artifact"].as_str().unwrap_or_default();
+            assert!(
+                artifact.starts_with("/w/1/"),
+                "{step} 的产物路径应由 state.video_dir 派生，实际 {artifact}"
+            );
+            assert_eq!(
+                out["targetLang"], "vi",
+                "{step} 应读到 typed state 的 target_lang"
+            );
+        }
+
+        // translate 的译文文件名带目标语言。
+        let tr = step_output(&events, "translate");
+        assert_eq!(tr["artifact"], "/w/1/translate/vi.json");
+    }
+
+    /// `targetLang` 缺省时由 `initialize` 兜成 `"zh"`——state 是**重建**的，
+    /// 不是从上次落盘读的。
+    #[tokio::test]
+    async fn dub_sf_ocr_state_defaults_target_lang() {
+        let _guard = DUB_PROBE_LOCK.lock().await;
+        dub_probe::reset();
+
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let out = run_workflow(
+            &dub_sf_ocr(),
+            store.clone(),
+            &RunOptions::new(serde_json::json!({ "videoDir": "/w/2" })),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+
+        let events = store.get_events(&out.run_id).unwrap();
+        assert_eq!(step_output(&events, "translate")["artifact"], "/w/2/translate/zh.json");
     }
 
     /// `continue_from("tts")`：前缀（两分支 + split_audio）短路，只重跑 tts 起的尾部。
