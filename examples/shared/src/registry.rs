@@ -3,7 +3,7 @@
 use workflow_core::Workflow;
 
 use crate::workflows::{
-    approval_order, approval_review, compliance, email_digest, event_gate, fulfillment,
+    approval_order, approval_review, compliance, dub_sf_ocr, email_digest, event_gate, fulfillment,
     fulfillment_saga, invoice, refund, state_demo,
 };
 
@@ -20,6 +20,7 @@ pub fn all() -> Vec<Workflow> {
         refund().into_workflow(),
         state_demo().into_workflow(),
         event_gate().into_workflow(),
+        dub_sf_ocr().into_workflow(),
     ]
 }
 
@@ -49,6 +50,7 @@ mod tests {
                 "refund",
                 "state-demo",
                 "event-gate",
+                "dub-sf-ocr",
             ]
         );
         for id in [

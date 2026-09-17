@@ -672,6 +672,177 @@ pub fn event_gate() -> WorkflowDefinition<EventGateInput, serde_json::Value> {
     )
 }
 
+// ========================================================================
+// dub-sf-ocr（LocalDub pipeline 的形状模型）
+//
+// 不是 LocalDub 的接线，只是把它的 `dub_sf_ocr` 依赖图形状搬过来：
+// OutputMode=Dub × SubtitleSource=SfOcr 的 10 个 step，两分支并行。
+//
+// **为什么值得单独做一个示例**：LocalDub 现在是串行 for 循环派发，两分支
+// 只能排队；而这里 `tokio::try_join!` 让两条零耦合的分支真的同时在飞。
+// 引擎侧 `append_event` 的 CAS 冲突由 `engine` 自己 rebase+retry 吸收——
+// 这正是「并行 durable step」能不能成立的验证点。
+// ========================================================================
+
+/// dub-sf-ocr 输入：只对 `videoDir` 取路径，示例层不落盘。
+///
+/// 派生 `Clone` 是**并行分支所需**：`BaseCtx<TInput>: Clone` 要求 `TInput: Clone`，
+/// 两条 `try_join!` 分支要各持一份 `ctx.clone()`。
+#[derive(serde::Deserialize, serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DubSfOcrInput {
+    pub video_dir: String,
+}
+
+/// 并发探针（测试用）：记录同时在飞的 step 数峰值。
+///
+/// 放在模块级是因为 step 闭包要 `Clone + Send + 'static`，没法把可变引用
+/// 借进去；与 [`payment_gateway`] 同样的取舍（workflow 不注入依赖）。
+pub mod dub_probe {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+    static PEAK: AtomicUsize = AtomicUsize::new(0);
+
+    /// 进入一个 step。
+    pub fn enter() {
+        let n = IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
+        PEAK.fetch_max(n, Ordering::SeqCst);
+    }
+
+    /// 离开一个 step。
+    pub fn leave() {
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// 峰值并发数（两分支并行时应 ≥ 2）。
+    pub fn peak() -> usize {
+        PEAK.load(Ordering::SeqCst)
+    }
+
+    /// 复位（测试用）。
+    pub fn reset() {
+        IN_FLIGHT.store(0, Ordering::SeqCst);
+        PEAK.store(0, Ordering::SeqCst);
+    }
+}
+
+/// 桩 step：记录执行 → 计并发 → 模拟耗时，返回它「产出」的产物路径。
+///
+/// 产物路径是**字符串字面量**，镜像 LocalDub `paths` 模块的约定拼法，仅作标记
+/// ——不落盘、不读 LocalDub（示例层强约束）。
+async fn fake_step(artifact: &'static str, millis: u64) -> anyhow::Result<serde_json::Value> {
+    dub_probe::enter();
+    tracing::info!(target: "examples", "dub-sf-ocr: {artifact}");
+    tokio::time::sleep(Duration::from_millis(millis)).await;
+    dub_probe::leave();
+    Ok(serde_json::json!({ "artifact": artifact }))
+}
+
+/// 每个桩 step 的模拟耗时。两分支并行跑完的总时长 ≈ `max(A, B) + 尾部`，
+/// 明显短于 10 步串行。
+const DUB_STEP_MS: u64 = 50;
+
+/// LocalDub `dub_sf_ocr` pipeline 的形状：**两分支并行 → split_audio 汇聚**。
+///
+/// ```text
+///              ┌─ separate ──► separate_after ─────────────────► (bgm)
+/// import ──────┤                                                   │
+///              └─ sf_ocr_pre ► sf_ocr ► sf_ocr_fix ► translate ─┐  │
+///                                                               ▼  ▼
+///                                split_audio ◄──────────────────┘  │
+///                                    │                             │
+///                                tts ► mix_audio ► mix_video ◄─────┘
+/// ```
+///
+/// 两分支**零跨分支读**（A 只吃 `audio_source.wav`，B 只吃 `video_source.mp4`），
+/// 所以 `try_join!` 是安全的；分支内部仍是词法 `.await` 串行（`separate_after`
+/// 要 `separate` 的 stems）。
+///
+/// 分支各持 `ctx.clone()`——`step(&self)`  borrows ctx，两个 async 块不能同时
+/// move 同一个 ctx。
+pub fn dub_sf_ocr() -> WorkflowDefinition<DubSfOcrInput, serde_json::Value> {
+    create_workflow(CreateWorkflowConfig::new("dub-sf-ocr").input::<DubSfOcrInput>()).handler(
+        |ctx: BaseCtx<DubSfOcrInput>| async move {
+            let video_dir = ctx.input.video_dir.clone();
+
+            let ctx_a = ctx.clone(); // 分支 A：音源分离
+            let ctx_b = ctx.clone(); // 分支 B：OCR 提字 + 翻译
+
+            let (branch_a, branch_b) = tokio::try_join!(
+                async move {
+                    let vocals = ctx_a
+                        .step("separate", move |_sc: StepCtx| async move {
+                            fake_step("separate/target_3_vocals.wav", DUB_STEP_MS).await
+                        })
+                        .await?;
+                    let bgm = ctx_a
+                        .step("separate_after", move |_sc: StepCtx| async move {
+                            fake_step("separate_after/target_bgm.wav", DUB_STEP_MS).await
+                        })
+                        .await?;
+                    Ok::<_, anyhow::Error>(serde_json::json!({ "vocals": vocals, "bgm": bgm }))
+                },
+                async move {
+                    ctx_b.step("sf_ocr_pre", move |_sc: StepCtx| async move {
+                        fake_step("sf_ocr_pre/frames", DUB_STEP_MS).await
+                    })
+                    .await?;
+                    ctx_b.step("sf_ocr", move |_sc: StepCtx| async move {
+                        fake_step("sf_ocr/frames.json", DUB_STEP_MS).await
+                    })
+                    .await?;
+                    ctx_b.step("sf_ocr_fix", move |_sc: StepCtx| async move {
+                        fake_step("sf_ocr_fix/srt.json", DUB_STEP_MS).await
+                    })
+                    .await?;
+                    let translated = ctx_b
+                        .step("translate", move |_sc: StepCtx| async move {
+                            fake_step("translate/{lang}.json", DUB_STEP_MS).await
+                        })
+                        .await?;
+                    Ok::<_, anyhow::Error>(translated)
+                },
+            )?;
+
+            // 汇聚：split_audio 吃 A 的人声 + B 的译文。
+            let split = ctx
+                .step("split_audio", move |_sc: StepCtx| async move {
+                    fake_step("split_audio/timings.json", DUB_STEP_MS).await
+                })
+                .await?;
+            let tts = ctx
+                .step("tts", move |_sc: StepCtx| async move {
+                    fake_step("tts/wavs", DUB_STEP_MS).await
+                })
+                .await?;
+            let mix_audio = ctx
+                .step("mix_audio", move |_sc: StepCtx| async move {
+                    fake_step("mix_audio/audio_dubbing.wav", DUB_STEP_MS).await
+                })
+                .await?;
+            let mix_video = ctx
+                .step("mix_video", move |_sc: StepCtx| async move {
+                    // 这里才用上分支 A 的 bgm。
+                    fake_step("mix_video/dub_sf_ocr/{id}.mp4", DUB_STEP_MS).await
+                })
+                .await?;
+
+            Ok(serde_json::json!({
+                "videoDir": video_dir,
+                "pipeline": "dub_sf_ocr",
+                "vocals": branch_a["vocals"],
+                "bgm": branch_a["bgm"],
+                "translated": branch_b,
+                "splitAudio": split,
+                "tts": tts,
+                "mixAudio": mix_audio,
+                "mixVideo": mix_video,
+            }))
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1676,5 +1847,150 @@ mod tests {
             1,
             "重跑不重 append pause checkpoint"
         );
+    }
+
+    /// 序列化共享并发探针的测试（tokio 各 test 默认并行跑，探针是全局的）。
+    static DUB_PROBE_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    fn dub_input() -> serde_json::Value {
+        serde_json::json!({ "videoDir": "/w/1" })
+    }
+
+    /// `dub_sf_ocr` 的 10 个 step（顺序 = `DUB_SF_OCR_STEPS`）。
+    const DUB_ALL_STEPS: [&str; 10] = [
+        "separate",
+        "separate_after",
+        "sf_ocr_pre",
+        "sf_ocr",
+        "sf_ocr_fix",
+        "translate",
+        "split_audio",
+        "tts",
+        "mix_audio",
+        "mix_video",
+    ];
+
+    #[tokio::test]
+    async fn dub_sf_ocr_runs_all_ten_steps_once() {
+        let _guard = DUB_PROBE_LOCK.lock().await;
+        dub_probe::reset();
+
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let out = run_workflow(
+            &dub_sf_ocr(),
+            store.clone(),
+            &RunOptions::new(dub_input()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+
+        let events = store.get_events(&out.run_id).unwrap();
+        for step in DUB_ALL_STEPS {
+            assert_eq!(
+                finished_count(&events, step),
+                1,
+                "{step} 应恰好 StepFinished 一次"
+            );
+        }
+    }
+
+    /// 两分支真的同时在飞：并发峰值 ≥ 2。
+    ///
+    /// 这条同时把引擎的**并发路径**逼出来——两个 durable step 并发
+    /// `append_event` 必然撞 CAS 冲突，靠引擎 rebase+retry 吸收。峰值到 2
+    /// 说明冲突被吸收；若卡在 1，说明 step 执行被串行化了（那就是本次实验
+    /// 最重要的发现）。
+    #[tokio::test]
+    async fn dub_sf_ocr_branches_run_concurrently() {
+        let _guard = DUB_PROBE_LOCK.lock().await;
+        dub_probe::reset();
+
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let out = run_workflow(
+            &dub_sf_ocr(),
+            store.clone(),
+            &RunOptions::new(dub_input()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        let peak = dub_probe::peak();
+        assert!(
+            peak >= 2,
+            "两分支应并行（并发峰值 {peak} < 2）——若失败，说明并发 append 未被引擎吸收 \
+             或 step 执行被串行化"
+        );
+    }
+
+    /// 同 `run_id` 重跑：全部短路，不产生新的 `StepFinished`。
+    #[tokio::test]
+    async fn dub_sf_ocr_replay_short_circuits() {
+        let _guard = DUB_PROBE_LOCK.lock().await;
+        dub_probe::reset();
+
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = dub_sf_ocr();
+        let out = run_workflow(&wf, store.clone(), &RunOptions::new(dub_input()), None)
+            .await
+            .unwrap();
+        let run_id = out.run_id.clone();
+        let ts_1 = sf_ts(&store.get_events(&run_id).unwrap(), "separate");
+
+        let again = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(dub_input()).run_id(run_id.clone()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(again.status, RunStatus::Finished);
+
+        let events = store.get_events(&run_id).unwrap();
+        assert_eq!(sf_ts(&events, "separate"), ts_1, "checkpoint 未被触碰");
+        for step in DUB_ALL_STEPS {
+            assert_eq!(finished_count(&events, step), 1, "{step} 重跑不应重记");
+        }
+    }
+
+    /// `continue_from("tts")`：前缀（两分支 + split_audio）短路，只重跑 tts 起的尾部。
+    #[tokio::test]
+    async fn dub_sf_ocr_continue_from_tail() {
+        let _guard = DUB_PROBE_LOCK.lock().await;
+        dub_probe::reset();
+
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = dub_sf_ocr();
+        let out = run_workflow(&wf, store.clone(), &RunOptions::new(dub_input()), None)
+            .await
+            .unwrap();
+        let run_id = out.run_id.clone();
+        let ts_1 = sf_ts(&store.get_events(&run_id).unwrap(), "translate");
+
+        let resumed = run_workflow(
+            &wf,
+            store.clone(),
+            &RunOptions::new(dub_input())
+                .run_id(run_id.clone())
+                .continue_from("tts"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resumed.status, RunStatus::Finished);
+
+        let events = store.get_events(&run_id).unwrap();
+        assert_eq!(
+            sf_ts(&events, "translate"),
+            ts_1,
+            "前缀（含两分支与 translate）不重跑"
+        );
+        for step in ["tts", "mix_audio", "mix_video"] {
+            assert_eq!(finished_count(&events, step), 1, "{step} 重记一条终态");
+        }
     }
 }

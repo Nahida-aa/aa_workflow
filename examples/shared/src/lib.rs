@@ -37,6 +37,6 @@ pub use file_run_store::FileRunStore;
 pub use registry::{all as all_workflows, get as get_workflow};
 pub use runtime::{drive, tracing_publisher};
 pub use workflows::{
-    approval_order, approval_review, compliance, email_digest, fulfillment, fulfillment_saga,
-    invoice, payment_gateway, refund,
+    approval_order, approval_review, compliance, dub_sf_ocr, email_digest, fulfillment,
+    fulfillment_saga, invoice, payment_gateway, refund,
 };
