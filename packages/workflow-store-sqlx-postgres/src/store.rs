@@ -12,6 +12,28 @@
 //! 保证锁行存在，再 `select ... for update` 把它锁住——**同一 run 的并发
 //! append 由此排队**，然后才读 `count(*)` 比对。这是整个 store 的立身之本，
 //! 也是「并发 step 不会写坏日志」的保证（见 `AGENTS.md` 的 adapter 清单）。
+//!
+//! # 两张长得像的表：`workflow_runs` vs `workflow_run_states`
+//!
+//! 不是冗余，是**两个接口面各自的存储**：
+//!
+//! | | `workflow_runs` | `workflow_run_states` |
+//! | --- | --- | --- |
+//! | 服务 | runtime 面 `WorkflowExecutionStore` | core 面 `WorkflowRunStoreAdapterStore` |
+//! | 类型 | [`WorkflowExecution`] | [`RunState`] |
+//! | 独有列 | **`lease_owner` / `lease_expires_at` / `wake_at`** | — |
+//!
+//! `lease_*` / `wake_at` 是 runtime 的「执行所有权」概念，core 的 `RunState`
+//! 里根本没有这些字段——所以不能合成一张表。
+//!
+//! 同步点是 [`WorkflowRunStoreAdapterStore::save_run_state`]：它写
+//! `workflow_run_states` 的同时**也 upsert 到 `workflow_runs`**，否则 core 侧的
+//! 状态变化 runtime 看不到。但那次 upsert **故意不覆盖 lease 列**——lease 由
+//! `claim_run` / `heartbeat_run_lease` / `release_run_lease` 独占管理。
+//!
+//! ⚠️ 顺带记一个同名坑：**这两张表存的都是 `RunState` 那一族，都不存
+//! `ctx.state`（handler 的业务状态）**。`ctx.state` 不持久化，靠 replay 重建；
+//! 详见 [`RunState`] 的文档与 `AGENTS.md`。
 
 use std::sync::Arc;
 
@@ -30,8 +52,8 @@ use workflow_runtime::types::*;
 /// 契约套件（`store_contract.rs`）与 core 的 `RunStore`（同样同步）都能直接调用，
 /// 不需要先建 runtime。上游 TS 侧是 `async`——那是 JS 的语言特性，不是契约差异。
 ///
-/// 而 sqlx 是 async 的，所以内部要把 future 驱动到完成。见 [`Self::block`] 的两条
-/// 路径与它们各自的前提。
+/// 而 sqlx 是 async 的，所以内部要把 future 驱动到完成（私有方法 `block`：
+/// 在 runtime 里走 `block_in_place`，否则临时建一个）。
 ///
 /// 克隆廉价（内部是连接池的 `Arc`）。
 #[derive(Clone)]
@@ -42,7 +64,7 @@ pub struct SqlxPostgresStore {
 impl SqlxPostgresStore {
     /// 构造：**不**自建 runtime。
     ///
-    /// 同步桥 [`Self::block`] 优先用调用方所处的 runtime（`block_in_place`）；
+    /// 同步桥 `block` 优先用调用方所处的 runtime（`block_in_place`）；
     /// 只有在**没有** runtime 时（`#[test]` / CLI）才临时建一个。
     ///
     /// 这样也避免了「在异步上下文里 drop runtime」——`new` 不再持有 runtime，
