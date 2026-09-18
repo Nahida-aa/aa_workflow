@@ -75,6 +75,67 @@ WorkflowRunStoreAdapterStore       本仓 runtime 的存储基础：元数据信
    `ctx.clone()` 各持快照、互不可见**（见 `state_parallel_steps_snapshot_then_driver_flush`）。
    要跨分支传递可变数据，走 **step 的返回值**（durable 结果），不要走 state。
 
+## `ctx.state` 的写入位置准则（并行编排必读）
+
+**串行时随手改 `ctx.state` 是自然行为，一旦并行就必须显式设计。** 这个不对称是坑的
+来源，所以给一条可机械套用的准则：
+
+> **`ctx.state.x = ...` 必须出现在「执行顺序由词法决定」的位置。**
+> 写并行编排时只需自问：**这个赋值在 `try_join!` 的哪一侧？**
+>
+> - 在 join **之内**（分支闭包内部）→ **违规**，改成把值 `return` 出去
+> - 在 join **之后**（汇合点）→ **安全**
+
+### 为什么不是「加锁就好」
+
+并行分支对 `ctx.state` 的两次写入之间**没有确定的先后**（由调度器决定），于是
+**同一份日志重放两次可能得到不同的 state**——replay 地基直接塌掉。锁能消除竞写，
+但消除不了不确定性（谁先谁后变成「谁先拿到锁」，仍依赖调度）。
+
+更彻底的是：`ctx.state` **没有任何持久化形态**（见上面第 2 条），所以连「事后按日志
+合并」这条退路都没有。
+
+两边的语言差异会让症状不同，但都不安全：
+
+- **TS**：`ctx.state` 是同一个对象引用（`run-workflow.ts:480`），并行写**会互相看见**
+  → 真竞写，last-write-wins、非确定
+- **Rust**：`StateHandle::clone` 是快照分裂（`state_handle.rs:37-40`），并行写**不会被
+  对方看见** → 静默丢弃
+
+### 两种需求的正确写法
+
+**A. 各产出、最后合成** —— 合成放在汇合点：
+
+```rust
+let (ra, rb) = tokio::try_join!(branch_a, branch_b)?;   // 分支内只 return
+ctx.state.merged = merge(ra, rb);                        // 汇合点：词法顺序，安全
+```
+
+**B. 累积（计数 / 集合）** —— 把「改 state」换成「产出增量」：
+
+```rust
+// 分支内：只产出增量，不碰 state
+let delta_a = ctx_a.step("count_a", ..).await?;   // -> 3
+let delta_b = ctx_b.step("count_b", ..).await?;   // -> 5
+
+// 汇合点：统一归并（串行、确定性）
+ctx.state.total += delta_a + delta_b;
+```
+
+B 的关键不只是「避免竞写」：**增量作为 step 返回值进了日志、参与 replay**，所以归并
+逻辑可重放。这是它比「并行写 state」强的地方。
+
+### `ctx.state` 该用来干什么
+
+它是**串行的 handler 内部工作区**（跨迭代累积的临时数据），不是跨分支/跨步骤的数据
+通道。上游 `docs/concepts/primitives.md` 列了 step / sleep / waitForEvent / approve /
+now / emit / signal / runtime 各节，**唯独没有 `ctx.state`**——它没被当成推荐原语来教。
+参考用法见上游 `engine.smoke.test.ts:37`（最小）与 `examples.kyle-durable-agent.test.ts:100`
+（agent 的虚拟 FS，跨迭代累积）。
+
+本仓示例 `dub_sf_ocr`（`examples/shared/src/workflows.rs`）是正例：两个并行分支的 step
+**只读** state，一处都不写。
+
 ## 参考实现
 
 - 上游 TS：`learn_ls/workflow/packages/workflow-store-drizzle-postgres`（全量实现 19 个方法，
