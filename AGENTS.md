@@ -26,20 +26,24 @@ WorkflowRunStoreAdapterStore       本仓 runtime 的存储基础：元数据信
 `RunStore` 是**旧的那一层**：core 还在用它，但对外发布 / 新增的 adapter 不再是它。
 判断依据是上游自己也在迁移——`createRunStoreAdapter` 的存在就是为了把新形状降格成旧的。
 
-### ⚠️ 新契约**没有** `truncate_runs`，所以 `continue_from` 用不了
+### ⚠️ 新契约**没有** `truncate_log_at_step`，所以 `continue_from` 用不了
+
+先说清来源：**这个方法上游 TanStack 没有**。上游 `RunStore`
+（`types.ts:600-627`）只有 6 个方法，**既没有它，也没有 `continueFrom`**——
+两者都是本仓的本地扩展（见 `docs/tanstack-alignment.md` 的「保留了分歧」）。
+上游整个 monorepo 里跟 "truncate" 有关的只有 `tanstack.workflow.events_truncated`
+这个**遥测属性名**，不是能力。
 
 两个契约**不是包含关系，是各有各的**：
 
 | 能力 | core 的 `RunStore`（旧） | `WorkflowExecutionStore`（新） |
 | --- | --- | --- |
-| `truncate_runs` | ✅ 有 —— `continue_from` 靠它 | ❌ **没有** |
+| `truncate_log_at_step`（**本地扩展**） | ✅ 有 —— `continue_from` 靠它 | ❌ **没有**（它对齐上游，上游没有） |
 | lease / timer / schedule / 查询 | ❌ 没有 | ✅ 有 |
 
-上游 TS 的 `createRunStoreAdapter` **也没有**实现 `truncateRuns`（已核实：上游
-runtime 无此方法）。所以**走新契约的 store，`continue_from` 一定失败**。
-
-适配器如实报错而非静默 no-op（`run_store_adapter.rs:451`），失败信息指向
-`truncate_runs`。实测见 `examples/store-file/tests/dub_sf_ocr.rs` 的
+所以**走新契约的 store，`continue_from` 一定失败**。适配器如实报错而非静默 no-op
+（`run_store_adapter.rs:451`），失败信息指向 `truncate_log_at_step`。实测见
+`examples/store-file/tests/dub_sf_ocr.rs` 的
 `dub_sf_ocr_continue_from_is_unsupported_on_new_contract`。
 
 **要 `continue_from` 就得**：继续用 core 的 `RunStore`（但拿不到 lease/timer），
@@ -51,10 +55,10 @@ runtime 无此方法）。所以**走新契约的 store，`continue_from` 一定
 
 `continue_from` 做两件事（`engine/run_workflow.rs:135-139`）：
 
-1. **跑 handler 之前**，调 `store.truncate_runs(run_id, step_id)`；
+1. **跑 handler 之前**，调 `store.truncate_log_at_step(run_id, step_id)`；
 2. 然后照常**从头重放 handler**。
 
-`truncate_runs` 本身极简（`run_store/in_memory.rs:106-124`）：
+`truncate_log_at_step` 本身极简（`run_store/in_memory.rs:106-124`）：
 
 ```rust
 // 找该 step 的**最后一个**终态 checkpoint（StepFinished 或 StepFailed）

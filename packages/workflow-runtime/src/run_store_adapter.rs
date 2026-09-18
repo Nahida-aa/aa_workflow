@@ -448,12 +448,12 @@ impl RunStore for RunStoreAdapter {
             .map_err(to_store_error)
     }
 
-    fn truncate_runs(&self, _run_id: &str, _step_id: &str) -> Result<(), StoreError> {
+    fn truncate_log_at_step(&self, _run_id: &str, _step_id: &str) -> Result<(), StoreError> {
         // 基础层没有对应方法（上游的 `createRunStoreAdapter` 也没有实现
         // `truncateRuns` —— 那不在 `WorkflowRunStoreAdapterStore` 上）。
         // core 的 `continue_from` 走这里，故对 runtime store 暂不支持。
         Err(StoreError::Io(
-            "truncate_runs 不在 WorkflowRunStoreAdapterStore 契约里；\
+            "truncate_log_at_step 不在 WorkflowRunStoreAdapterStore 契约里；\
              经适配器暴露给 core 的 store 暂不支持 continue_from"
                 .into(),
         ))
@@ -567,11 +567,11 @@ mod adapter_tests {
         );
     }
 
-    /// `truncate_runs` 不在基础层契约里，适配器如实报错而非静默 no-op。
+    /// `truncate_log_at_step` 不在基础层契约里，适配器如实报错而非静默 no-op。
     #[test]
-    fn truncate_runs_reports_unsupported() {
+    fn truncate_log_at_step_reports_unsupported() {
         let (store, _mem) = adapted();
-        assert!(store.truncate_runs("r1", "a").is_err());
+        assert!(store.truncate_log_at_step("r1", "a").is_err());
     }
 
     #[test]

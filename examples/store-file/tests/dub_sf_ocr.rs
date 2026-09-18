@@ -272,7 +272,7 @@ async fn dub_sf_ocr_state_defaults_target_lang() {
 /// `FileExecutionStore`（`WorkflowExecutionStore`）后，这条测试**第一次红了**，
 /// 暴露出一个既成事实：
 ///
-/// | 层 | 有 `truncate_runs` 吗 |
+/// | 层 | 有 `truncate_log_at_step` 吗 |
 /// | --- | --- |
 /// | core 的 `RunStore`（旧） | ✅ 有 —— `continue_from` 靠它 |
 /// | `WorkflowExecutionStore`（新） | ❌ **没有** |
@@ -309,8 +309,8 @@ async fn dub_sf_ocr_continue_from_is_unsupported_on_new_contract() {
     let err = resumed.expect_err("新契约无 truncate，continue_from 应报错");
     let msg = err.to_string();
     assert!(
-        msg.contains("truncate_runs"),
-        "应明确指向缺失的 truncate_runs，实际：{msg}"
+        msg.contains("truncate_log_at_step"),
+        "应明确指向缺失的 truncate_log_at_step，实际：{msg}"
     );
 
     // 报错之后，原有的事件日志应**完好无损**（适配器报错而非静默改坏日志）。

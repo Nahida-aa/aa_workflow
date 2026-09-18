@@ -135,7 +135,7 @@ pub async fn run_workflow(
     // continue_from lives at the store layer: cut the log at the step's latest
     // terminal checkpoint so the replayed handler re-runs that suffix.
     if let Some(cf) = &opts.continue_from {
-        store.truncate_runs(&run_id, cf)?;
+        store.truncate_log_at_step(&run_id, cf)?;
     }
 
     // A run that was cancelled while parked must not be resurrected by a drive:

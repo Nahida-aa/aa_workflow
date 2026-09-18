@@ -103,7 +103,7 @@ impl RunStore for InMemoryStore {
             .unwrap_or_default())
     }
 
-    fn truncate_runs(&self, run_id: &str, step_id: &str) -> Result<(), StoreError> {
+    fn truncate_log_at_step(&self, run_id: &str, step_id: &str) -> Result<(), StoreError> {
         let mut inner = self
             .inner
             .lock()

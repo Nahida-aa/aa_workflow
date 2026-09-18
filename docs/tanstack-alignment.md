@@ -82,7 +82,7 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
 1. **"handler 模型要复现 continue_from，得自己写 truncate（TanStack 不给）"**
    ——结论本身没错：continue_from 确实活在 store/log 层（截断后缀 + 重放），
    handler 引擎和显式图引擎都能承载它。但换 handler 后"自己写 truncate"并没有更贵：
-   引擎只多一个 `truncate_runs` 的 store 方法，换来的是调度器整段删除。
+   引擎只多一个 `truncate_log_at_step` 的 store 方法，换来的是调度器整段删除。
 2. **"二者能力等价，只是代码表达形态区别"** ——等价对，但形态即 API 面。
    `try_join!` 内联并行比 `needs` 图更贴 TanStack 生态，且确定性不变
    （重放短路依赖的一直是事件日志，与表达形态无关）。
@@ -99,7 +99,7 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
 ## 保留了分歧（本地扩展 / 一等公民）
 
 1. **`continue_from`**：TanStack 官方没有（重放短路无条件，无 reset/force 语义）。
-   我们把它做成 `truncate_runs(run_id, step_id)`：事件日志裁到该 step 最新的
+   我们把它做成 `truncate_log_at_step(run_id, step_id)`：事件日志裁到该 step 最新的
    终态 checkpoint（含），重放时前缀短路、后缀从零重跑。LocalDub 的
    `continue_pipeline` / engine 都由此承载。
 2. **`target_step`**：TanStack 用 handler 内 early `return`；我们用引擎参数 +

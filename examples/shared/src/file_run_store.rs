@@ -174,7 +174,7 @@ impl RunStore for FileRunStore {
         self.read_events(run_id)
     }
 
-    fn truncate_runs(&self, run_id: &str, step_id: &str) -> Result<(), StoreError> {
+    fn truncate_log_at_step(&self, run_id: &str, step_id: &str) -> Result<(), StoreError> {
         let _guard = self
             .lock
             .lock()
@@ -291,13 +291,13 @@ mod tests {
                 .append_event("r1", idx, &finished("r1", step))
                 .unwrap();
         }
-        store.truncate_runs("r1", "b").unwrap();
+        store.truncate_log_at_step("r1", "b").unwrap();
         let evs = store.get_events("r1").unwrap();
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].step_id(), Some("a"));
 
         // 无终态 checkpoint → 不动
-        store.truncate_runs("r1", "zzz").unwrap();
+        store.truncate_log_at_step("r1", "zzz").unwrap();
         assert_eq!(store.get_events("r1").unwrap().len(), 1);
 
         let _ = fs::remove_dir_all(&base);

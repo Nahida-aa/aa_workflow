@@ -188,6 +188,20 @@ impl DeleteReason {
 /// 两者是**平行的两套方法**：`load_run_state` vs `get_run_state`、
 /// `append_events` vs `append_event`，没有自动转换关系。
 ///
+/// ## 本 trait 里哪些方法是**本地扩展**（上游没有）
+///
+/// 对照上游时按这张表看，**不必**为下列方法去找对端——找不到是正常的：
+///
+/// | 方法 | 上游有吗 | 说明 |
+/// | ---- | -------- | ---- |
+/// | `get_run_state` / `set_run_state` / `delete_run` | ✅ | 一一对应 |
+/// | `append_event` / `get_events` / `subscribe` | ✅ | 一一对应 |
+/// | [`truncate_log_at_step`](Self::truncate_log_at_step) | ❌ **本地扩展** | 支撑 `continue_from`；上游连 `continueFrom` 都没有 |
+///
+/// 详见 `docs/tanstack-alignment.md` 的「保留了分歧（本地扩展 / 一等公民）」。
+/// 这也是为什么 runtime 的新契约 `WorkflowExecutionStore` 没有截断能力——它对齐的
+/// 是上游，而截断是本仓独有的。
+///
 /// ⚠️ **要喂给 core 的 `run_workflow`，实现者必须额外 `impl RunStore`**：
 /// 该函数的入参是 `Arc<dyn RunStore>`（具体 trait 对象），而 supertrait 只保证
 /// `WorkflowRunStoreAdapterStore` 的父关系，跟本 trait 无关。
@@ -209,14 +223,30 @@ pub trait RunStore: Send + Sync {
     ) -> Result<(), StoreError>;
     fn get_events(&self, run_id: &str) -> Result<Vec<WorkflowEvent>, StoreError>;
 
-    /// Cuts the log at `step_id`'s **latest terminal checkpoint** (inclusive):
-    /// that checkpoint and every later event are dropped, the prefix is kept.
-    /// Used by `continue_from` so a replayed handler re-executes the step's
-    /// suffix from scratch. A step with no terminal checkpoint leaves the log
-    /// untouched (there is nothing to cut — resume would re-run it anyway).
-    /// Stores that cannot truncate must reject this with
-    /// [`StoreError::Io`] rather than silently no-oping.
-    fn truncate_runs(&self, run_id: &str, step_id: &str) -> Result<(), StoreError>;
+    /// 在 `step_id` 的**最新终态 checkpoint** 处截断事件日志（**含**该 checkpoint）：
+    /// 它及其之后的全部事件被丢弃，前缀保留。供 `continue_from` 使用——重放 handler
+    /// 时前缀短路、后缀从零重跑。
+    ///
+    /// # ⚠️ 这是**本地扩展**，上游 TanStack 没有
+    ///
+    /// 上游的 `RunStore`（`types.ts:600-627`）只有 6 个方法
+    /// （`getRunState` / `setRunState` / `deleteRun` / `appendEvent` / `getEvents`
+    /// / `subscribe?`），**既没有本方法，也没有 `continueFrom`**。两者都是本仓的
+    /// 一等公民扩展，动机与论证见 `docs/tanstack-alignment.md` 的
+    /// 「保留了分歧（本地扩展 / 一等公民）」。
+    ///
+    /// 所以对照上游时**不必**去找它的对端——找不到是正常的。这也解释了为什么新契约
+    /// `WorkflowExecutionStore` 没有对等能力：它对齐的是上游，而截断是本仓独有的。
+    ///
+    /// # no-op 语义（有意为之，不是实现偷懒）
+    ///
+    /// **目标 step 没有终态 checkpoint 时，保持日志原样、不报错**。因为没 checkpoint
+    /// 的 step 重放时本来就会真跑（日志里没它的终态 → 短路不命中），无须截断。
+    ///
+    /// 与之相对，**"做不到截断"必须报错**：不支持该能力的 store 要返回
+    /// [`StoreError::Io`]，**不许静默 no-op** —— 否则 `continue_from` 会看起来成功、
+    /// 实际重放时全部短路，用户以为重跑了却没有。
+    fn truncate_log_at_step(&self, run_id: &str, step_id: &str) -> Result<(), StoreError>;
 
     /// Live subscription: a receiver that sees every future event appended to
     /// this run's log. `None` if the store does not support subscriptions.
