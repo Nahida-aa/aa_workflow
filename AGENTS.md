@@ -26,6 +26,84 @@ WorkflowRunStoreAdapterStore       本仓 runtime 的存储基础：元数据信
 `RunStore` 是**旧的那一层**：core 还在用它，但对外发布 / 新增的 adapter 不再是它。
 判断依据是上游自己也在迁移——`createRunStoreAdapter` 的存在就是为了把新形状降格成旧的。
 
+### ⚠️ 新契约**没有** `truncate_runs`，所以 `continue_from` 用不了
+
+两个契约**不是包含关系，是各有各的**：
+
+| 能力 | core 的 `RunStore`（旧） | `WorkflowExecutionStore`（新） |
+| --- | --- | --- |
+| `truncate_runs` | ✅ 有 —— `continue_from` 靠它 | ❌ **没有** |
+| lease / timer / schedule / 查询 | ❌ 没有 | ✅ 有 |
+
+上游 TS 的 `createRunStoreAdapter` **也没有**实现 `truncateRuns`（已核实：上游
+runtime 无此方法）。所以**走新契约的 store，`continue_from` 一定失败**。
+
+适配器如实报错而非静默 no-op（`run_store_adapter.rs:451`），失败信息指向
+`truncate_runs`。实测见 `examples/store-file/tests/dub_sf_ocr.rs` 的
+`dub_sf_ocr_continue_from_is_unsupported_on_new_contract`。
+
+**要 `continue_from` 就得**：继续用 core 的 `RunStore`（但拿不到 lease/timer），
+或者在 store 上**加非契约方法**并自行截断（这等于扩大契约，需明确决定，别默认做）。
+
+## `continue_from` 的机制：日志是「短路索引」
+
+理解这一点，才知道上面那个缺口为什么是结构性的。
+
+`continue_from` 做两件事（`engine/run_workflow.rs:135-139`）：
+
+1. **跑 handler 之前**，调 `store.truncate_runs(run_id, step_id)`；
+2. 然后照常**从头重放 handler**。
+
+`truncate_runs` 本身极简（`run_store/in_memory.rs:106-124`）：
+
+```rust
+// 找该 step 的**最后一个**终态 checkpoint（StepFinished 或 StepFailed）
+let cut = log.iter().rposition(|ev| match ev {
+    StepFinished { step_id: id, .. } | StepFailed { step_id: id, .. } => id == step_id,
+    _ => false,
+});
+if let Some(i) = cut {
+    log.truncate(i);   // 丢掉 i 及之后的一切
+}
+```
+
+### 为什么剪日志就等于「让那些 step 重跑」
+
+因为**引擎没有「step 是否执行过」这种独立状态**——它只认日志里有没有该 step 的终态
+事件。`ctx.step(id)` 在重放时的行为完全由日志决定：
+
+| 日志里 | `ctx.step(id)` 的行为 |
+| --- | --- |
+| **有** `StepFinished/StepFailed(id)` | **短路** —— 返回缓存结果，闭包**不执行** |
+| **没有** | 真正执行闭包，跑完 append 一条新 checkpoint |
+
+所以：
+
+> **日志 = 「哪些 step 可以短路」的索引。截断 = 把索引从某处切断，
+> 使那段重放时不再短路。**
+
+这也解释了 `continue_from` 为什么放在 **store 层**而不是引擎里
+（`run_workflow.rs:135` 原注释：*"continue_from lives at the store layer"*）——
+它是**日志操作**，不是引擎操作。
+
+### 三个常被忽略的推论
+
+1. **剪的是「该 step 及其之后」，不只是那一个 step**。因为下游 checkpoint 是在上游
+   结果之上产生的，上游要重跑，下游的旧结果就不能信。见测试
+   `continue_from_resets_downstream`。
+2. **副作用会真的再发生一次**（闭包被重新调用）。所以 `continue_from` 的语义是
+   **重跑**，不是"续命"。有真实副作用的 step 必须用 `stepCtx.id` 做外部系统的幂等键。
+3. **对没有终态 checkpoint 的 step，它是 no-op 且不报错**
+   （`run_store/mod.rs:214-218`：*"there is nothing to cut — resume would re-run it
+   anyway"*）。逻辑自洽：没 checkpoint 的本来就会重跑。
+
+### 没有任何东西被「回滚」
+
+容易误解成"回滚状态"。实际上全程只有一个动作：**删日志事件**。
+
+- `ctx.state` 靠 replay 重建，不需要回滚（见上面「`RunState` ≠ `ctx.state`」一节）
+- `RunState` 信封（status/output/error）在下次 drive 时被重新投影
+
 ## Adapter 实现清单（上游 `docs/api/store-adapters.md`）
 
 生产级 store adapter 应满足：
