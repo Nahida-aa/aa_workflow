@@ -59,13 +59,25 @@ let outcome = run_workflow(
 // RunOutcome { run_id, status, output, error }
 ```
 
+> **对应测试**（本 recipe 的回归在哪）：
+> - 基础形态（untyped 入口 + 一个 step + 输出即 run 输出）:
+>   `packages/workflow-core/src/engine/run_workflow.rs` 的 `handler_output_is_run_output`。
+> - **typed input 的拒绝分支**:`examples/shared/src/workflows.rs` 的
+>   `typed_input_rejects_missing_field`（缺 `readyAt` → run `Errored`,错误指向字段路径）。
+> - **typed input 的成功路径**:由 `examples/guide` 覆盖 —— 它用 `FulfillmentInput`
+>   驱动 `fulfillment_workflow()` 并断言端到端结果。
+>
+> 也就是说:核心仓库只测了 untyped 的 happy path,**typed input 的 happy path 目前
+> 由 examples 承担**。若要 core 级回归,可在 `packages/workflow-core/tests/` 加一个
+> 冒烟测试（本仓暂无该目录）。
+
 要点：
 
 - **`workflow` 与 `run_store` 是必填项**，由 `RunWorkflowOptions::new` 强制；
   其余（`input` / `run_id` / `deadline` …）走 builder 链。
 - **`.input::<T>()` 就是「有 schema」**：每次 drive 都做
-  `from_value::<TInput>`,**缺字段 / 类型错 → run 直接 `Errored`**（见 core 测试
-  `typed_input_rejects_missing_field`）。这是它相对「裸 JSON」的主要收益。
+  `from_value::<TInput>`,**缺字段 / 类型错 → run 直接 `Errored`**。这是它相对
+  「裸 JSON」的主要收益。
 - 不要 schema 就用 `Workflow::new("id")` 入口 —— 下面「审批挂起」一节就是，
   此时 `ctx.input` 是 `serde_json::Value`（且 `Workflow::new(...).handler(..)` 直接返回
   `Workflow`,不需要 `.into_workflow()`;`create_workflow(..)` 返回 `WorkflowDefinition`)。
