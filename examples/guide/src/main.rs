@@ -22,11 +22,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use workflow_core::{CreateWorkflowConfig, WorkflowDefinition, create_workflow};
-use workflow_runtime::{
+use aa_workflow_core::{CreateWorkflowConfig, WorkflowDefinition, create_workflow};
+use aa_workflow_runtime::{
     InMemoryExecutionStore, RunResultKind, WorkflowExecutionStatus, WorkflowExecutionStore,
     WorkflowRegistration, WorkflowRuntime, WorkflowRuntimeConfig, WorkflowRuntimeDeliverSignalArgs,
-    WorkflowRuntimeStartRunArgs, define_workflow_runtime,
+    WorkflowRuntimeStartRunArgs, define_aa_workflow_runtime,
 };
 
 // ============================================================
@@ -52,7 +52,7 @@ pub struct FulfillmentInput {
 /// （`wait_for_event`）——前者由 sweep 认领投递，后者由 webhook 投递。
 pub fn fulfillment_workflow() -> WorkflowDefinition<FulfillmentInput, serde_json::Value> {
     create_workflow(CreateWorkflowConfig::new("fulfillment").input::<FulfillmentInput>()).handler(
-        |ctx: workflow_core::BaseCtx<FulfillmentInput>| async move {
+        |ctx: aa_workflow_core::BaseCtx<FulfillmentInput>| async move {
             let order_id = ctx.input.order_id.clone();
             let reserve_order_id = order_id.clone();
             let ship_order_id = order_id.clone();
@@ -63,7 +63,7 @@ pub fn fulfillment_workflow() -> WorkflowDefinition<FulfillmentInput, serde_json
             let _reservation = ctx
                 .step(
                     "reserve-inventory",
-                    move |step: workflow_core::StepCtx| async move {
+                    move |step: aa_workflow_core::StepCtx| async move {
                         let order_id = reserve_order_id;
                         // 真实场景这里调库存服务。
                         Ok(serde_json::json!({
@@ -87,7 +87,7 @@ pub fn fulfillment_workflow() -> WorkflowDefinition<FulfillmentInput, serde_json
                 .unwrap_or_default()
                 .to_string();
 
-            ctx.step("ship-order", move |step: workflow_core::StepCtx| {
+            ctx.step("ship-order", move |step: aa_workflow_core::StepCtx| {
                 let order_id = ship_order_id.clone();
                 async move {
                     Ok(serde_json::json!({
@@ -112,7 +112,7 @@ pub fn fulfillment_workflow() -> WorkflowDefinition<FulfillmentInput, serde_json
 // ============================================================
 //
 // guide 用 `defineWorkflowRuntime({ store, workflows })`；Rust 版
-// `define_workflow_runtime`。in-memory store 仅供测试与演示（进程一退数据
+// `define_aa_workflow_runtime`。in-memory store 仅供测试与演示（进程一退数据
 // 全没）；生产换 DB 后端实现同一套契约即可，workflow 代码不动。
 
 /// 双柄：`mem` 供示例直读内部，`rt` 是给调用方的 runtime。
@@ -137,7 +137,7 @@ pub fn define_runtime() -> Fixture {
     );
 
     Fixture {
-        rt: Arc::new(define_workflow_runtime(WorkflowRuntimeConfig::new(
+        rt: Arc::new(define_aa_workflow_runtime(WorkflowRuntimeConfig::new(
             store, workflows,
         ))),
         mem,
@@ -249,7 +249,7 @@ pub async fn drive_to_payment_wait(
 pub async fn step_deliver_payment(
     fx: &Fixture,
     run_id: &str,
-) -> workflow_runtime::RunResult {
+) -> aa_workflow_runtime::RunResult {
     fx.rt
         .deliver_signal(WorkflowRuntimeDeliverSignalArgs {
             run_id: run_id.into(),
@@ -313,7 +313,7 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod guide_tests {
     use super::*;
-    use workflow_runtime::WorkflowExecutionStatus;
+    use aa_workflow_runtime::WorkflowExecutionStatus;
 
     /// guide §5+§6 的完整链路：定时器挂起 → sweep 唤醒 → 信号挂起 → 投递完成。
     ///
@@ -398,7 +398,7 @@ mod guide_tests {
             .filter(|e| {
                 matches!(
                     e.event,
-                    workflow_core::WorkflowEvent::StepFinished { ref step_id, .. }
+                    aa_workflow_core::WorkflowEvent::StepFinished { ref step_id, .. }
                         if step_id == "ship-order"
                 )
             })
@@ -426,7 +426,7 @@ mod guide_tests {
             .filter(|e| {
                 matches!(
                     e.event,
-                    workflow_core::WorkflowEvent::StepFinished { ref step_id, .. }
+                    aa_workflow_core::WorkflowEvent::StepFinished { ref step_id, .. }
                         if step_id == "reserve-inventory"
                 )
             })

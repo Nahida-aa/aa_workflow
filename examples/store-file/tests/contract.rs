@@ -1,7 +1,7 @@
 //! 共享契约套件的运行入口（第二次兑现「一份规格，N 个实现共用」）。
 //!
-//! 直接调 `workflow_runtime::store_contract::run_store_contract`——**不另写一套**。
-//! 第一个跑它的是 `packages/workflow-store-sqlx-postgres`，这里是第二个。
+//! 直接调 `aa_workflow_runtime::store_contract::run_store_contract`——**不另写一套**。
+//! 第一个跑它的是 `packages/aa-workflow-store-sqlx-postgres`，这里是第二个。
 //!
 //! # 隔离
 //!
@@ -16,9 +16,9 @@
 
 use std::sync::Arc;
 
-use workflow_runtime::run_store_adapter::WorkflowExecutionStore;
-use workflow_runtime::store_contract::run_store_contract;
-use workflow_store_file::FileExecutionStore;
+use aa_workflow_runtime::run_store_adapter::WorkflowExecutionStore;
+use aa_workflow_runtime::store_contract::run_store_contract;
+use example_store_file::FileExecutionStore;
 
 #[test]
 fn file_store_satisfies_execution_store_contract() {

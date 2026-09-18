@@ -1,12 +1,12 @@
 //! Host 无关的薄壳辅助：把 start / resume / `continue_from` 收成一个驱动入口
 //! （对齐 TanStack `runtime.ts` 的位置）。signals / pause 由引擎的
-//! [`ApprovalCtx`](workflow_core::define::WorkflowCtx::approve) +
-//! [`signal_run`](workflow_core::signal_run) 承担；示例 workflow 见
+//! [`ApprovalCtx`](aa_workflow_core::define::WorkflowCtx::approve) +
+//! [`signal_run`](aa_workflow_core::signal_run) 承担；示例 workflow 见
 //! [`approval_review`](crate::workflows::approval_review)。
 
 use std::sync::Arc;
 
-use workflow_core::{
+use aa_workflow_core::{
     RunOutcome, RunStore, RunWorkflowOptions, Workflow, WorkflowEvent, run_workflow,
 };
 
@@ -73,7 +73,7 @@ mod tests {
     use crate::file_run_store::FileRunStore;
     use crate::workflows::email_digest;
     use std::time::Duration;
-    use workflow_core::{RunStatus, signal_run};
+    use aa_workflow_core::{RunStatus, signal_run};
 
     fn finished_count(events: &[WorkflowEvent], step: &str) -> usize {
         events
@@ -223,7 +223,7 @@ mod tests {
             "进程 B 不能重复 append StepPaused"
         );
 
-        workflow_core::signal_run(
+        aa_workflow_core::signal_run(
             store2.as_ref(),
             "approve:r",
             "review",

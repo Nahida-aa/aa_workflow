@@ -1,6 +1,6 @@
 //! `FileExecutionStore`：文件落盘的 [`WorkflowExecutionStore`] 实现。
 //!
-//! 语义逐方法对齐 `workflow-runtime` 的 `InMemoryExecutionStore`
+//! 语义逐方法对齐 `aa-workflow-runtime` 的 `InMemoryExecutionStore`
 //! （`in_memory_store.rs`），落盘手法（CAS 追加 / 原子写）照 `examples/shared` 的
 //! `FileRunStore`。
 //!
@@ -12,9 +12,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use workflow_core::{DeleteReason, RunState, StoreError};
-use workflow_runtime::run_store_adapter::{WorkflowExecutionStore, WorkflowRunStoreAdapterStore};
-use workflow_runtime::types::*;
+use aa_workflow_core::{DeleteReason, RunState, StoreError};
+use aa_workflow_runtime::run_store_adapter::{WorkflowExecutionStore, WorkflowRunStoreAdapterStore};
+use aa_workflow_runtime::types::*;
 
 // ============================================================
 // 落盘的小工具

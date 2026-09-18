@@ -4,23 +4,23 @@
 //!
 //! 1. **跨实例重开**——进程 A 写、进程 B（新实例）打开同一 base 能读到并续跑。
 //!    这是「落盘」相对内存实现的**唯一实质差别**，必须自己验。
-//! 2. **接 runtime 端到端**——`define_workflow_runtime` 驱动一个含**并行 step**
+//! 2. **接 runtime 端到端**——`define_aa_workflow_runtime` 驱动一个含**并行 step**
 //!    的 workflow，验证 store 真能当引擎后端用（并行 step 会并发 append，走 CAS）。
 
 use std::sync::Arc;
 
-use workflow_core::{
+use aa_workflow_core::{
     BaseCtx, CreateWorkflowConfig, RunStatus, RunWorkflowOptions, StepCtx, create_workflow, run_workflow,
 };
-use workflow_runtime::run_store_adapter::{
+use aa_workflow_runtime::run_store_adapter::{
     WorkflowExecutionStore, WorkflowRunStoreAdapterStore, create_run_store_adapter,
 };
-use workflow_runtime::types::*;
-use workflow_store_file::FileExecutionStore;
+use aa_workflow_runtime::types::*;
+use example_store_file::FileExecutionStore;
 
 /// 造一个带 `step_id` 的最小事件（契约套件里也有同名的本地 helper）。
-fn custom(step: &str, ts: i64) -> workflow_core::WorkflowEvent {
-    workflow_core::WorkflowEvent::Custom {
+fn custom(step: &str, ts: i64) -> aa_workflow_core::WorkflowEvent {
+    aa_workflow_core::WorkflowEvent::Custom {
         ts,
         run_id: "run-1".into(),
         name: step.into(),

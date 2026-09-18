@@ -1,6 +1,6 @@
 # 与 TanStack Workflow 的关系与分歧
 
-本文档记录 aa-workflow（`workflow-core`）与
+本文档记录 aa-workflow（`aa-workflow-core`）与
 [TanStack Workflow](https://tanstack.com/workflow) 的对照结论，包括我们采纳了什么、
 拒绝了什么、以及为什么。任何复读这几轮的讨论都可以回到这里。
 
@@ -72,7 +72,7 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
 - **observability-only（不进日志，走 publisher）**：`RunStarted`、`StepStarted`、`StepProgress`；
 - **checkpoint（进日志，CAS append）**：`StepFinished`、`StepFailed`、`RunFinished`、`RunErrored`。
 
-「进日志」不等于「持久化」：日志怎么存由 [`RunStore`](packages/workflow-core/src/run_store/mod.rs)
+「进日志」不等于「持久化」：日志怎么存由 [`RunStore`](packages/aa-workflow-core/src/run_store/mod.rs)
 实现决定，`InMemoryStore` 进程一退就没了。
 
 ## 为什么第二轮把执行模型换成 handler 重放
@@ -189,7 +189,7 @@ RunWorkflowOptions::new(workflow, run_store)   // 必填两项由 new() 强制
 它不是一个包单独出生，那一个 commit 同时加了：
 
 ```
-packages/workflow-runtime/                    runtime 本体（lease / sweep / timer / schedule）
+packages/aa-workflow-runtime/                    runtime 本体（lease / sweep / timer / schedule）
 packages/workflow-vercel/                     host adapter ×4
 packages/workflow-netlify/
 packages/workflow-cloudflare/                 （次日 ba9cc31）
@@ -266,11 +266,11 @@ compile time）。guide 的写法受这个契约保护，examples 的 `as` 断�
 ### 但 examples 内部也不齐：只有 `cloudflare-d1/` 用了 runtime
 
 上面那批 examples 内部还有一层分裂。`examples/deployment-pocs/` 下 6 个目录，
-**只有 `cloudflare-d1/` 引用了 `@tanstack/workflow-runtime`**：
+**只有 `cloudflare-d1/` 引用了 `@tanstack/aa-workflow-runtime`**：
 
 | 目录 | 依赖 | 诞生 |
 | ---- | ---- | ---- |
-| `cloudflare/` / `netlify/` / `vercel/` / `api/` / `shared/` | 只有 `@tanstack/workflow-core@^0.0.2` | 05-28 |
+| `cloudflare/` / `netlify/` / `vercel/` / `api/` / `shared/` | 只有 `@tanstack/aa-workflow-core@^0.0.2` | 05-28 |
 | **`cloudflare-d1/`** | core + **runtime** + `workflow-cloudflare` + `store-cloudflare-d1`（全 `workspace:*`） | **05-30** |
 
 两个可读的信号：

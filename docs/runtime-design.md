@@ -1,10 +1,10 @@
-# workflow-runtime 设计意图
+# aa-workflow-runtime 设计意图
 
 > **状态**：D1 / D2 / D3 / D4 / D7 / D8 / D9 **均已定**。D5 是背景论证，D6 已归档。
 >
 > **结论：runtime 层必需**——判据是**「有没有常驻的驱动者」**（不是「有没有
 > 持久存储」，两者正交；见 D5）。LocalDub 有常驻 worker，属形态 A，**只用
-> `workflow-core` 是正确取舍**；但要支持形态 B（单次执行有时长上限的托管
+> `aa-workflow-core` 是正确取舍**；但要支持形态 B（单次执行有时长上限的托管
 > 进程 / serverless），lease / sweep / timer 投递全部必需。详见 D5 及其两个
 > 附录。
 >
@@ -26,7 +26,7 @@
 
 ## 起点：core 刻意不做的事
 
-`packages/workflow-core` 现在的边界（与上游 core 一致）：
+`packages/aa-workflow-core` 现在的边界（与上游 core 一致）：
 
 - replay 引擎 + 耐久原语 + `RunStore` 契约
 - **不做**：调度、队列、worker 协调、timer 索引、schedule
@@ -53,7 +53,7 @@ runtime 就是来补这块执行所有权层。上游 runtime 的职责（`runti
 #### 上游的实际结构（三个名字，容易看错）
 
 ```ts
-// workflow-core/src/types.ts:599
+// aa-workflow-core/src/types.ts:599
 export interface RunStore {                       // ① core 的契约
   getRunState; setRunState; deleteRun
   appendEvent(runId, idx, event)                  //    单条
@@ -61,7 +61,7 @@ export interface RunStore {                       // ① core 的契约
   subscribe?
 }
 
-// workflow-runtime/src/types.ts:290
+// aa-workflow-runtime/src/types.ts:290
 export interface WorkflowRunStoreAdapterStore {   // ② runtime 的存储基础
   loadRunState; saveRunState; deleteRun
   appendEvents({ runId, expectedNextIndex, events }) -> { nextIndex }   // 批量
@@ -69,10 +69,10 @@ export interface WorkflowRunStoreAdapterStore {   // ② runtime 的存储基础
   subscribeEvents?
 }
 
-// workflow-runtime/src/types.ts:305
+// aa-workflow-runtime/src/types.ts:305
 export type WorkflowRunStoreAdapter = RunStore    // ③ 别名，与 ② 无继承关系
 
-// workflow-runtime/src/types.ts:307
+// aa-workflow-runtime/src/types.ts:307
 export interface WorkflowExecutionStore extends WorkflowRunStoreAdapterStore { /* +19 */ }
 ```
 
@@ -132,10 +132,10 @@ deliverApproval  claimStaleRuns  claimRun  claimDueTimers  claimDueScheduleBucke
 #### 我们的选择（**已修正**：② 要立）
 
 ```rust
-// workflow-runtime/src/run_store_adapter.rs
+// aa-workflow-runtime/src/run_store_adapter.rs
 pub trait WorkflowRunStoreAdapterStore: Send + Sync { /* 6 个方法，照 ② 逐字对齐 */ }
 
-// workflow-runtime/src/lib.rs
+// aa-workflow-runtime/src/lib.rs
 pub trait WorkflowExecutionStore: WorkflowRunStoreAdapterStore { /* 扩展方法，待定 */ }
 ```
 
@@ -338,7 +338,7 @@ RunStore::get_events(x, "r1")                                            // ✅ 
 | --- | --- |
 | `workflow-store-cloudflare-d1` | Cloudflare D1（托管 SQLite） |
 | `workflow-store-drizzle-postgres` | Postgres |
-| `workflow-runtime` 内置 in-memory | 仅测试 |
+| `aa-workflow-runtime` 内置 in-memory | 仅测试 |
 
 两个都是**云托管数据库**。它们的并发语义由平台决定（D1 的单写者、Postgres 的
 事务），**不是本地文件能模仿出来的**——写一个 `flock` 版只会得到一个
@@ -356,7 +356,7 @@ runtime 的 lease；等真有 serverless 宿主接进来，那时自然知道 st
 
 #### 实测：上游的行为（2026-09-14，在 `learn_ls/workflow` 实跑）
 
-探针（`packages/workflow-core/tests/probe.suspend.test.ts`，已清理）：
+探针（`packages/aa-workflow-core/tests/probe.suspend.test.ts`，已清理）：
 
 | 挂起点 | 耗时 | 事件流 | 返回后 `RunState` |
 | --- | --- | --- | --- |
@@ -562,7 +562,7 @@ list）全部必需，D2 与 D4 不能作废。**
 
 #### 对 LocalDub 的意义
 
-它**属于形态 A**，所以「只用 `workflow-core`、不接 runtime」是**正确取舍**，
+它**属于形态 A**，所以「只用 `aa-workflow-core`、不接 runtime」是**正确取舍**，
 不是「可控性不足」：
 
 - 上游 `quick-start.md` 的「a workflow that does one thing」正是形态 A 的最小
@@ -765,7 +765,7 @@ workflow-store-drizzle-postgres → 同一个函数
 其中 `in-memory-store.test.ts` **整个文件只有 8 行**——没有自己的用例，纯粹把
 契约跑在内存实现上。第二、第三个 store 之所以写得出来，就是因为有这份可执行规格。
 
-我们移植为 [`store_contract::run_store_contract`](../packages/workflow-runtime/src/store_contract.rs)，
+我们移植为 [`store_contract::run_store_contract`](../packages/aa-workflow-runtime/src/store_contract.rs)，
 15 条（对照上游 17 条，去掉了 2 条与我们未实现的 `awaiting` 投影相关的）：
 
 | 组 | 条款 |

@@ -5,22 +5,22 @@
 
 上游 `docs/api/store-adapters.md` 开篇就是这条规定：
 
-> **Store adapters implement `WorkflowExecutionStore` from `@tanstack/workflow-runtime`.**
+> **Store adapters implement `WorkflowExecutionStore` from `@tanstack/aa-workflow-runtime`.**
 
 所以**写 store adapter 一律实现 [`WorkflowExecutionStore`]**，不是 core 的 `RunStore`。
 两个都叫「store 契约」，差一个后缀，极易看错。
 
-层次（`packages/workflow-runtime/src/run_store_adapter.rs`）：
+层次（`packages/aa-workflow-runtime/src/run_store_adapter.rs`）：
 
 ```text
-workflow_core::RunStore            引擎 replay 用（旧形状）
+aa_workflow_core::RunStore            引擎 replay 用（旧形状）
   ↕ 形状相近但无关（没有继承关系）
 WorkflowRunStoreAdapterStore       本仓 runtime 的存储基础：元数据信封 + 事件日志（6 个方法）
   └── WorkflowExecutionStore       要实现的**就是它**：+ lease / timer / schedule / 查询（共 19 个）
 ```
 
 **实现者只写一套方法**。要喂给 core 的 `run_workflow`（入参是 `Arc<dyn RunStore>`），
-用现成的 [`create_run_store_adapter`](packages/workflow-runtime/src/run_store_adapter.rs) 降格转换，
+用现成的 [`create_run_store_adapter`](packages/aa-workflow-runtime/src/run_store_adapter.rs) 降格转换，
 **不要在 store 里另写一份 `impl RunStore`**——那会变成两套几乎相同的方法，且有漂移风险
 （改一套忘另一套 → runtime 与 core 看到的状态不一致）。
 
@@ -121,7 +121,7 @@ if let Some(i) = cut {
 - [ ] 陈旧 lease 的恢复（`claim_stale_runs`）
 - [ ] timeline / list API
 - [ ] 迁移策略（package-owned SQL migration，见 `SCHEMA_MIGRATIONS.md` 体例）
-- [ ] 跑通共享契约测试套件（`packages/workflow-runtime/src/store_contract.rs`）
+- [ ] 跑通共享契约测试套件（`packages/aa-workflow-runtime/src/store_contract.rs`）
 
 ## `RunState` ≠ `ctx.state`（同名，但毫无关系）
 
@@ -131,13 +131,13 @@ if let Some(i) = cut {
 |          | `RunState<TInput, TOutput>`                                                                      | `ctx.state: TState`                                   |
 | -------- | ------------------------------------------------------------------------------------------------ | ----------------------------------------------------- |
 | 是什么   | run 的**持久化元数据信封**（store 存它）                                                         | workflow 的**业务状态**（handler 用）                 |
-| 定义处   | `workflow-core/src/run_store/mod.rs`（上游 `types.ts:540`）                                      | `BaseCtx<TInput, TState>` 的 `state` 字段             |
+| 定义处   | `aa-workflow-core/src/run_store/mod.rs`（上游 `types.ts:540`）                                      | `BaseCtx<TInput, TState>` 的 `state` 字段             |
 | 怎么声明 | 固定结构，无 schema                                                                              | `.state::<T>()` + `.initialize(...)`                  |
 | 谁消费   | **store**（路由 / 恢复 / 审计）                                                                  | **handler**（`ctx.state.count += 1`）                 |
 | 存哪     | **持久化**（表 `workflow_run_states` / `workflow_runs`）                                         | **不持久化**，每次 resume 由 `initialize(input)` 重建 |
 | 装什么   | `run_id` / `status` / `input` / `output` / `error` / `waiting_for` / `pending_approval` / 时间戳 | 任意业务字段                                          |
 
-**上游专门写了一句注释来排斥这种混淆**（`workflow-core/src/types.ts:534-536`）：
+**上游专门写了一句注释来排斥这种混淆**（`aa-workflow-core/src/types.ts:534-536`）：
 
 > Persisted run metadata. **State is intentionally NOT stored here** — it is
 > reconstructed from `initialize(input)` + log replay on every resume.
@@ -223,6 +223,6 @@ now / emit / signal / runtime 各节，**唯独没有 `ctx.state`**——它没�
 
 - 上游 TS：`learn_ls/workflow/packages/workflow-store-drizzle-postgres`（全量实现 19 个方法，
   含 lease/timer/schedule/查询）与 `workflow-store-cloudflare-d1`
-- 本仓 `packages/workflow-runtime/src/in_memory_store.rs`（`InMemoryExecutionStore`）
+- 本仓 `packages/aa-workflow-runtime/src/in_memory_store.rs`（`InMemoryExecutionStore`）
 
 写新 adapter 时**照 TS 参考实现逐方法对照**，schema 也逐列对齐它的 `migrations/*.sql`。

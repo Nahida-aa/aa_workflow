@@ -7,7 +7,7 @@
 //! `docs/api/store-adapters.md` 开篇的规定恰好相反：
 //!
 //! > Store adapters implement `WorkflowExecutionStore` from
-//! > `@tanstack/workflow-runtime`.
+//! > `@tanstack/aa-workflow-runtime`.
 //!
 //! 我们**被这个示例误导过**（写 `AGENTS.md` 时一度把「实现 `RunStore`」当成 store
 //! adapter 的做法）。示例层不能只有旧契约的 store——所以这个 crate 提供**新契约**
@@ -18,9 +18,9 @@
 //!
 //! | crate | 契约 | 用途 |
 //! | --- | --- | --- |
-//! | `examples/shared`（`FileRunStore`） | `workflow_core::RunStore`（旧） | 与上游示例对账 |
+//! | `examples/shared`（`FileRunStore`） | `aa_workflow_core::RunStore`（旧） | 与上游示例对账 |
 //! | 本 crate（`FileExecutionStore`） | `WorkflowExecutionStore`（新） | store adapter 的参考实现 |
-//! | `packages/workflow-store-sqlx-postgres` | `WorkflowExecutionStore`（新） | 生产级 / 多 worker |
+//! | `packages/aa-workflow-store-sqlx-postgres` | `WorkflowExecutionStore`（新） | 生产级 / 多 worker |
 //!
 //! # 与 `-sqlx-postgres` 的分工：单进程 vs 多 worker
 //!
@@ -30,7 +30,7 @@
 //!   文件系统没有 `select ... for update skip locked` 那样的原子原语，
 //!   真做跨进程 lease 要引入文件锁（flock），而它在 NFS 等场景不可靠。
 //! - **多 worker / serverless 场景请用
-//!   [`workflow-store-sqlx-postgres`](../../packages/workflow-store-sqlx-postgres)**，
+//!   [`workflow-store-sqlx-postgres`](../../packages/aa-workflow-store-sqlx-postgres)**，
 //!   它用 Postgres 的行锁做 CAS 与 lease。
 //!
 //! 这不是「简化版」的托词：契约套件本来就用**显式时间戳**模拟竞争而非真并发
@@ -56,7 +56,7 @@
 //! - [`file_store`] — `FileExecutionStore` 本体（新契约的落盘实现）
 //! - [`mod@dub_sf_ocr`] — 一个可复用的示例 workflow：LocalDub `dub_sf_ocr` 的
 //!   **两分支并行**形状。放在 `src/` 而非测试里，是为了别人也能
-//!   `use workflow_store_file::dub_sf_ocr` 拿去驱动自己的 store。
+//!   `use example_store_file::dub_sf_ocr` 拿去驱动自己的 store。
 
 pub mod dub_sf_ocr;
 pub mod file_store;

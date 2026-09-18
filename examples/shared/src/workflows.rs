@@ -13,7 +13,7 @@
 //! - [`fulfillment`]（id `fulfillment`）— 对齐官方 `fulfillmentWorkflow` / wf-demo：
 //!   `reserve-inventory` → `readyAt` 定时闸门（sleep）→ `payment-received` 事件等待 → `ship-order`。
 //! - [`approval_review`] — 人工审批：`ctx.approve` 持久化一个等待点，
-//!   外部用 [`workflow_core::signal_run`] 交付决定后继续（signals 语义载体）。
+//!   外部用 [`aa_workflow_core::signal_run`] 交付决定后继续（signals 语义载体）。
 //! - [`approval_order`]（id `approval-order`）— 对齐 wf-demo：金额阈值决定是否人工
 //!   审批，拒绝分支；`email_digest` 是 resume / `continue_from` 的行为载体。
 //! - [`invoice`]（id `invoice`）— 对齐 wf-demo：连续两个 `sleep`（双定时器，引擎自动唤醒）。
@@ -27,7 +27,7 @@
 //!   （与 TanStack 0.0.4 一致）。
 
 use std::time::Duration;
-use workflow_core::{
+use aa_workflow_core::{
     Backoff, BaseCtx, CreateWorkflowConfig, RetryPolicy, StepCtx, StepOptions, Workflow,
     WorkflowCtx, WorkflowDefinition, create_workflow,
 };
@@ -677,7 +677,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, LazyLock};
     use std::time::Duration;
-    use workflow_core::{
+    use aa_workflow_core::{
         InMemoryStore, RunStatus, RunStore, RunWorkflowOptions, Workflow, WorkflowEvent,
         run_workflow, signal_event,
         signal_run,
@@ -729,7 +729,7 @@ mod tests {
         opts: impl Fn(Arc<Workflow>, Arc<dyn RunStore>) -> RunWorkflowOptions,
         step_id: &str,
         payload: serde_json::Value,
-    ) -> workflow_core::RunOutcome {
+    ) -> aa_workflow_core::RunOutcome {
         let run_id = opts(Arc::new(wf.clone()), store.clone())
             .run_id
             .clone()
@@ -749,7 +749,7 @@ mod tests {
         store: &Arc<dyn RunStore>,
         wf: &Workflow,
         opts: impl Fn(Arc<Workflow>, Arc<dyn RunStore>) -> RunWorkflowOptions,
-    ) -> workflow_core::RunOutcome {
+    ) -> aa_workflow_core::RunOutcome {
         loop {
             let run_id = opts(Arc::new(wf.clone()), store.clone())
                 .run_id

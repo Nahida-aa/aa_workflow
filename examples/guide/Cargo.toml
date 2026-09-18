@@ -1,13 +1,13 @@
 [package]
-name = "guide"
+name = "example-guide"
 version = "0.1.0"
 edition = "2024"
 publish = false
 description = "Runnable port of TanStack Workflow's guide/index.md (sections 1, 2, 5, 6)"
 
 [dependencies]
-workflow-core = { path = "../../packages/workflow-core" }
-workflow-runtime = { path = "../../packages/workflow-runtime" }
+aa-workflow-core = { path = "../../packages/aa-workflow-core" }
+aa-workflow-runtime = { path = "../../packages/aa-workflow-runtime" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 serde = { version = "1", features = ["derive"] }
 anyhow = "1"

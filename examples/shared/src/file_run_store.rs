@@ -1,12 +1,12 @@
 //! 一个独立的落盘 [`RunStore`] 实现，供 example 层使用，同时充当"store 契约
 //! 可插拔"的活例。
 //!
-//! # ⚠️ 这是**旧契约**（`workflow_core::RunStore`）
+//! # ⚠️ 这是**旧契约**（`aa_workflow_core::RunStore`）
 //!
 //! 写新的 store adapter **请勿照它**——上游规定 adapter 实现的是
 //! `WorkflowExecutionStore`（见 `docs/api/store-adapters.md` 开篇）。新契约的
 //! 落盘示范见 [`examples/store-file`](../../store-file)，生产级见
-//! `packages/workflow-store-sqlx-postgres`。
+//! `packages/aa-workflow-store-sqlx-postgres`。
 //!
 //! 本文件保留的原因：与上游 `examples/deployment-pocs/shared` 对账。
 //! `RunStore` 本身仍有用途（core 的 `run_workflow` 要它），只是不该被当成
@@ -17,7 +17,7 @@
 //! - `<base>/<run_id>/run.json` — [`RunState`] 信封（元数据面）
 //! - `<base>/<run_id>/events.jsonl` — append-only 事件日志（契约面，CAS append）
 //!
-//! 语义对齐 [`workflow_core::run_store::InMemoryStore`]（CAS 冲突报
+//! 语义对齐 [`aa_workflow_core::run_store::InMemoryStore`]（CAS 冲突报
 //! [`StoreError::Conflict`]、`subscribe` 用 `std::sync::mpsc` 扇出），只是落盘。
 //! 与 LocalDub 的 `FsRunStore` 是同一思想的独立最小实现（彼方不回依赖这里，
 //! 语义上可以此为准）。
@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use workflow_core::{DeleteReason, RunState, RunStore, StoreError, WorkflowEvent};
+use aa_workflow_core::{DeleteReason, RunState, RunStore, StoreError, WorkflowEvent};
 
 fn map_io(e: std::io::Error) -> StoreError {
     StoreError::Io(e.to_string())
@@ -214,7 +214,7 @@ impl RunStore for FileRunStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use workflow_core::RunStatus;
+    use aa_workflow_core::RunStatus;
 
     fn temp_base(name: &str) -> PathBuf {
         let dir =

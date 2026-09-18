@@ -5,7 +5,7 @@ title: Quick Start
 
 # Quick Start
 
-`workflow-core` 的最小上手配方（recipe 形态对齐 TanStack Workflow 的
+`aa-workflow-core` 的最小上手配方（recipe 形态对齐 TanStack Workflow 的
 [quick-start](../../../learn_ls/workflow/docs/quick-start.md)，代码是本仓的 Rust 对刻）。
 每段都可独立成立；想按顺序读完可运行的版本，见 `examples/guide`。
 
@@ -15,7 +15,7 @@ title: Quick Start
 
 ```toml
 [dependencies]
-workflow-core = { path = "../aa-workflow/packages/workflow-core" }
+aa-workflow-core = { path = "../aa-workflow/packages/aa-workflow-core" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde_json = "1"
 anyhow = "1"
@@ -25,7 +25,7 @@ anyhow = "1"
 
 ```rust
 use std::sync::Arc;
-use workflow_core::{
+use aa_workflow_core::{
     CreateWorkflowConfig, InMemoryStore, RunStatus, RunStore, RunWorkflowOptions, StepCtx,
     Workflow, WorkflowDefinition, create_workflow, run_workflow, signal_event, signal_run,
     // 下面各节还会用到：Middleware / StepOptions / RetryPolicy / Backoff
@@ -60,11 +60,11 @@ let outcome = run_workflow(
 ```
 
 > **对应测试**（本 recipe 的回归在哪）：
-> - **本文件专属**:`packages/workflow-core/tests/quickstart.rs` —— 三条:
+> - **本文件专属**:`packages/aa-workflow-core/tests/quickstart.rs` —— 三条:
 >   typed input 成功路径、缺字段拒绝（并断言不产生 `StepFinished`）、
 >   `sc.id` 跨 resume 稳定（钉住「拿它当幂等键」这条承诺）。
 > - 基础形态（untyped 入口 + 一个 step + 输出即 run 输出）:
->   `packages/workflow-core/src/engine/run_workflow.rs` 的 `handler_output_is_run_output`。
+>   `packages/aa-workflow-core/src/engine/run_workflow.rs` 的 `handler_output_is_run_output`。
 > - typed input 的拒绝分支另有 examples 版:`examples/shared/src/workflows.rs` 的
 >   `typed_input_rejects_missing_field`;`examples/guide` 覆盖 typed input 的成功路径
 >   （用 `FulfillmentInput` 驱动 `fulfillment_workflow()` 并断言端到端结果）。
@@ -266,7 +266,7 @@ store 是可插拔的，workflow 代码不动。本仓三个实现跑**同一份
 | `workflow-store-sqlx-postgres` | `WorkflowExecutionStore` | **多 worker**（Postgres 行锁） |
 
 写新 store 实现 `WorkflowExecutionStore`（**不是** `RunStore`），然后跑
-`workflow_runtime::store_contract::run_store_contract`。规则见 `AGENTS.md`。
+`aa_workflow_runtime::store_contract::run_store_contract`。规则见 `AGENTS.md`。
 
 > 注意 `run_workflow` 吃的是 core 的 `Arc<dyn RunStore>`（旧形状）；手上有
 > `WorkflowExecutionStore` 时用 `create_run_store_adapter` 降格。
@@ -287,4 +287,4 @@ store 是可插拔的，workflow 代码不动。本仓三个实现跑**同一份
 - `docs/runtime-design.md` — runtime 层决策记录（lease / sweep / timer / schedule）
 - `docs/tanstack-alignment.md` — 对齐与分歧的完整论证
 - `AGENTS.md` — store adapter 规则、`RunState` ≠ `ctx.state`、state 写入位置准则
-- `examples/store-file` / `packages/workflow-store-sqlx-postgres` — 两个 store 参考
+- `examples/store-file` / `packages/aa-workflow-store-sqlx-postgres` — 两个 store 参考

@@ -1,7 +1,7 @@
 //! LocalDub `dub_sf_ocr` pipeline 的形状模型（可复用的 workflow 定义）。
 //!
 //! 放在 `src/` 而不是测试里，是因为它是一个**完整的示例 workflow**——别人可以
-//! `use workflow_store_file::dub_sf_ocr` 拿去驱动自己的 store。测试在
+//! `use example_store_file::dub_sf_ocr` 拿去驱动自己的 store。测试在
 //! `tests/dub_sf_ocr.rs`。
 //!
 //! 从 `examples/shared` 搬过来的（那边已删除）。
@@ -32,7 +32,7 @@
 //!
 //! 不是 LocalDub 的接线，只是把它的依赖图形状搬过来。
 
-use workflow_core::{
+use aa_workflow_core::{
     BaseCtx, CreateWorkflowConfig, StepCtx, WorkflowDefinition, create_workflow,
 };
 

@@ -1,6 +1,6 @@
 //! 示例 workflow 注册表（对齐 wf-demo 的 `WORKFLOWS` map 位置）：按 id 查示例。
 
-use workflow_core::Workflow;
+use aa_workflow_core::Workflow;
 
 use crate::workflows::{
     approval_order, approval_review, compliance, email_digest, event_gate, fulfillment,
