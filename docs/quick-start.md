@@ -26,30 +26,34 @@ anyhow = "1"
 ```rust
 use std::sync::Arc;
 use workflow_core::{
-    BaseCtx, CreateWorkflowConfig, InMemoryStore, RunStatus, RunStore, RunWorkflowOptions,
-    StepCtx, WorkflowDefinition, create_workflow, run_workflow,
+    CreateWorkflowConfig, InMemoryStore, RunStatus, RunStore, RunWorkflowOptions, StepCtx,
+    Workflow, WorkflowDefinition, create_workflow, run_workflow, signal_event, signal_run,
+    // 下面各节还会用到：Middleware / StepOptions / RetryPolicy / Backoff
 };
 
-fn charge_workflow() -> WorkflowDefinition<serde_json::Value, serde_json::Value> {
-    create_workflow(
-        CreateWorkflowConfig::new("charge").input::<serde_json::Value>(),
-    )
-    .handler(|ctx: BaseCtx<serde_json::Value>| async move {
-        // ctx.step 是**唯一**会被 checkpoint 的副作用。
-        let result = ctx
-            .step("stripe-charge", |sc: StepCtx| async move {
-                // sc.id 是确定性 step id —— 拿它当外部系统的幂等键。
-                Ok(serde_json::json!({ "chargeId": format!("ch_{}", sc.id) }))
+/// input schema：serde 类型就是 schema（Rust 版 zod `input`）。
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChargeInput { amount: i64, user_id: String }
+
+fn charge_workflow() -> WorkflowDefinition<ChargeInput, serde_json::Value> {
+    create_workflow(CreateWorkflowConfig::new("charge").input::<ChargeInput>())
+        // 闭包参数类型**可以推断**（`Fn(BaseCtx<TInput, TState, TExt>) -> Fut`
+        // 这个约束会把签名推下去），不必写 `|ctx: BaseCtx<ChargeInput>|`。
+        .handler(|ctx| async move {
+            let amount = ctx.input.amount;      // 强类型字段，不是 .get() 链
+            ctx.step("stripe-charge", |sc: StepCtx| async move {
+                // sc.id 是确定性 step id —— 拿它当外部系统的幂等键
+                Ok(serde_json::json!({ "chargeId": format!("ch_{}", sc.id), "amount": amount }))
             })
-            .await?;
-        Ok(result)
-    })
+            .await
+        })
 }
 
 let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
 let outcome = run_workflow(
     &RunWorkflowOptions::new(Arc::new(charge_workflow().into_workflow()), store)
-        .input(serde_json::json!({ "amount": 4200 })),
+        .input(serde_json::json!({ "amount": 4200, "userId": "cus_123" })),
 ).await?;
 
 // RunOutcome { run_id, status, output, error }
@@ -59,8 +63,24 @@ let outcome = run_workflow(
 
 - **`workflow` 与 `run_store` 是必填项**，由 `RunWorkflowOptions::new` 强制；
   其余（`input` / `run_id` / `deadline` …）走 builder 链。
-- **step 闭包返回 `serde_json::Value`**（上游是泛型 `T`）——日志即契约，
-  强类型的读取走 `ctx.state`（见下）或事后反序列化。
+- **`.input::<T>()` 就是「有 schema」**：每次 drive 都做
+  `from_value::<TInput>`,**缺字段 / 类型错 → run 直接 `Errored`**（见 core 测试
+  `typed_input_rejects_missing_field`）。这是它相对「裸 JSON」的主要收益。
+- 不要 schema 就用 `Workflow::new("id")` 入口 —— 下面「审批挂起」一节就是，
+  此时 `ctx.input` 是 `serde_json::Value`（且 `Workflow::new(...).handler(..)` 直接返回
+  `Workflow`,不需要 `.into_workflow()`;`create_workflow(..)` 返回 `WorkflowDefinition`)。
+
+### `serde_json::Value` 不是 TS 的 `any`
+
+- Rust **没有 `any`**。`Value` 是一个**具体类型**（`enum`:Null / Bool / Number / String /
+  Array / Object）——编译器照样检查你对它的用法。它表示的是「运行时形状不固定」，不是「不检查」。
+
+用 `Value` 的代价（相对具体类型）:
+
+- 取值要走 `Option` 访问器（`as_str()` / `as_i64()` / `.get("x")`)，编译器帮你挡住"忘处理缺失"，但代码更啰嗦。
+- **丢掉 schema 校验**：没有 `.input::<T>()`,就不会有"缺字段即报错"。
+
+所以：有明确入参形状就定义 struct 并 `.input::<T>()`;只有真正动态的 payload 才留 `Value`。
 
 ## Recipe: 挂起等人工审批
 
@@ -68,14 +88,14 @@ let outcome = run_workflow(
 `WorkflowParked`，drive 以 `Paused` 收尾，进程可以退出；唤醒一律来自外部。
 
 ```rust
-let wf = create_workflow(CreateWorkflowConfig::new("order").input::<serde_json::Value>())
-    .handler(|ctx: BaseCtx<serde_json::Value>| async move {
-        let decision = ctx.approve("large-order", "金额超限，需要人工放行").await?;
-        if decision.get("approved").and_then(|v| v.as_bool()) != Some(true) {
-            return Ok(serde_json::json!({ "status": "rejected" }));
-        }
-        Ok(serde_json::json!({ "status": "approved" }))
-    });
+// 没有 input schema 时用 `Workflow::new`（返回 Workflow，不用 .into_workflow()）
+let wf = Workflow::new("order").handler(|ctx| async move {
+    let decision = ctx.approve("large-order", "金额超限，需要人工放行").await?;
+    if decision.get("approved").and_then(|v| v.as_bool()) != Some(true) {
+        return Ok(serde_json::json!({ "status": "rejected" }));
+    }
+    Ok(serde_json::json!({ "status": "approved" }))
+});
 
 // 第一次 drive：停在审批点。
 let out = run_workflow(
@@ -130,7 +150,8 @@ let wf = create_workflow(
         .state::<CounterState>()
         .initialize(|_input| Ok(serde_json::json!({ "total": 0 }))),
 )
-.handler(|ctx: BaseCtx<serde_json::Value, CounterState>| async move {
+// 写 state 需要 `|mut ctx|`（DerefMut 要可变借用）；参数类型照旧可推断。
+.handler(|mut ctx| async move {
     let v = ctx.step("compute", |_sc| async { Ok(serde_json::json!(42)) }).await?;
     ctx.state.total = v.as_i64().unwrap_or(0);   // 串行位置，写 state 安全
     Ok(serde_json::json!({ "total": ctx.state.total }))
@@ -182,7 +203,7 @@ let wf = create_workflow(CreateWorkflowConfig::new("send-receipt").input::<serde
     .middleware::<UserExt>(
         Middleware::new().produce(|_ctx| Ok(serde_json::json!({ "user": "alice" }))),
     )
-    .handler(|ctx: BaseCtx<serde_json::Value, serde_json::Value, UserExt>| async move {
+    .handler(|ctx| async move {
         // ctx.ext.user 现在是 typed 的
         ctx.step("email", |_sc| async move {
             Ok(serde_json::json!({ "to": ctx.ext.user }))
