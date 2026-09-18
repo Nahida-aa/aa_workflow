@@ -60,16 +60,14 @@ let outcome = run_workflow(
 ```
 
 > **对应测试**（本 recipe 的回归在哪）：
+> - **本文件专属**:`packages/workflow-core/tests/quickstart.rs` —— 三条:
+>   typed input 成功路径、缺字段拒绝（并断言不产生 `StepFinished`）、
+>   `sc.id` 跨 resume 稳定（钉住「拿它当幂等键」这条承诺）。
 > - 基础形态（untyped 入口 + 一个 step + 输出即 run 输出）:
 >   `packages/workflow-core/src/engine/run_workflow.rs` 的 `handler_output_is_run_output`。
-> - **typed input 的拒绝分支**:`examples/shared/src/workflows.rs` 的
->   `typed_input_rejects_missing_field`（缺 `readyAt` → run `Errored`,错误指向字段路径）。
-> - **typed input 的成功路径**:由 `examples/guide` 覆盖 —— 它用 `FulfillmentInput`
->   驱动 `fulfillment_workflow()` 并断言端到端结果。
->
-> 也就是说:核心仓库只测了 untyped 的 happy path,**typed input 的 happy path 目前
-> 由 examples 承担**。若要 core 级回归,可在 `packages/workflow-core/tests/` 加一个
-> 冒烟测试（本仓暂无该目录）。
+> - typed input 的拒绝分支另有 examples 版:`examples/shared/src/workflows.rs` 的
+>   `typed_input_rejects_missing_field`;`examples/guide` 覆盖 typed input 的成功路径
+>   （用 `FulfillmentInput` 驱动 `fulfillment_workflow()` 并断言端到端结果）。
 
 要点：
 
