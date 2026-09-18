@@ -119,6 +119,38 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
    同形。唤醒一律来自外部（runtime 的 `sweep` / `deliver_signal`）。
    见 `docs/runtime-design.md` D3。
 
+## 驱动入口：`RunWorkflowOptions` 的字段对照
+
+上游 `runWorkflow` 收一个结构体（`engine/run-workflow.ts:34-72` 的
+`RunWorkflowOptions`），`workflow` / `runStore` 必填。我们照做（2026-09-18 起；
+此前是 4 个位置参数，易传错位）：
+
+```rust
+RunWorkflowOptions::new(workflow, run_store)   // 必填两项由 new() 强制
+    .input(..).run_id(..).continue_from(..).target_step(..)
+    .deadline(..).min_yield_remaining(..).yield_resume_at(..)
+    .publisher(Some(..))
+```
+
+逐字段对照（截至 2026-09-18）：
+
+| 上游 `RunWorkflowOptions` | 本仓 | 说明 |
+| --- | --- | --- |
+| `workflow` / `runStore` | ✅ `workflow` / `run_store` | 必填，`new()` 强制 |
+| `input` / `runId` | ✅ 同名 | |
+| `deadline` / `minYieldRemainingMs` / `yieldResumeAt` | ✅ 同名 | |
+| `publish` | ✅ `publisher` | 位置从参数移进结构体 |
+| `signalDelivery` / `approval` | — | 形态差异：上游「带投递再跑一次」是一个调用；本仓先 `signal_run` / `signal_event` 落盘（`STEP_RESUME`），再单独 drive（D3） |
+| `recover` | ❌ 暂无 | 「认领过期 lease 后重放中断的 run」。本仓有 `claim_stale_runs`（认领）但没有对应的恢复入口——**真缺口**，补它要连着 runtime 闭环 |
+| `attach` | ❌ 暂无 | 只读订阅已有 run（不驱动）。本仓 `subscribe` 只能 tail 事件，拿不到 RunState 快照 |
+| `signal`（AbortSignal） | ❌ 暂无 | 本仓有 `cancel_run`（写 Aborted 终局），不是 drive 参数 |
+| `threadId` / `outputSink` / `telemetry` | ❌ 暂无 | 无 thread 概念 / 无 OTel 集成 |
+| — | ➕ `continue_from` / `target_step` | **本地扩展**（见上节 1、2） |
+
+名字差异：旧版本仓叫 `RunOptions`，2026-09-18 起对齐为 `RunWorkflowOptions`。
+另注：上游把这个接口定义在 `engine/run-workflow.ts` 而非 `types.ts`（与 `RunStore`
+的放法不一致），对照时容易漏。
+
 ## 换了模型仍没变的硬设计
 
 - append-only 日志 + 单写者 CAS（`DrvInner.log_len` 单调推进，冲突重基）：
