@@ -1,6 +1,17 @@
 //! 一个独立的落盘 [`RunStore`] 实现，供 example 层使用，同时充当"store 契约
 //! 可插拔"的活例。
 //!
+//! # ⚠️ 这是**旧契约**（`workflow_core::RunStore`）
+//!
+//! 写新的 store adapter **请勿照它**——上游规定 adapter 实现的是
+//! `WorkflowExecutionStore`（见 `docs/api/store-adapters.md` 开篇）。新契约的
+//! 落盘示范见 [`examples/store-file`](../../store-file)，生产级见
+//! `packages/workflow-store-sqlx-postgres`。
+//!
+//! 本文件保留的原因：与上游 `examples/deployment-pocs/shared` 对账。
+//! `RunStore` 本身仍有用途（core 的 `run_workflow` 要它），只是不该被当成
+//! 新 adapter 的模板。
+//!
 //! 布局（按 run_id 隔离，多个 run 可共存于同一 base 目录）：
 //!
 //! - `<base>/<run_id>/run.json` — [`RunState`] 信封（元数据面）

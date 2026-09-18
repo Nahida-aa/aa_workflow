@@ -6,8 +6,26 @@
 //! 保护的新写法（`input: z.object(...)` + `ctx.input.field`）。我们跟 guide
 //! 一致。差异细节见 `docs/tanstack-alignment.md` 的「参考上游时看哪边」。
 //!
+//! # ⚠️ 本 crate 的 `FileRunStore` 实现的是**旧契约** `RunStore`
+//!
+//! 上游 `docs/api/store-adapters.md` 开篇规定的是：
+//!
+//! > Store adapters implement `WorkflowExecutionStore` from
+//! > `@tanstack/workflow-runtime`.
+//!
+//! 本 crate 里的 [`FileRunStore`] 实现的是 core 的 `workflow_core::RunStore`
+//! ——那是**旧形状**（由 `create_run_store_adapter` 从新契约降格得到）。**写新的
+//! store adapter 请勿照它**，参考这两个：
+//!
+//! - [`examples/store-file`](../../store-file) — 文件落盘，实现新契约（单进程）
+//! - [`packages/workflow-store-sqlx-postgres`](../../../packages/workflow-store-sqlx-postgres)
+//!   — Postgres，实现新契约（生产级 / 多 worker）
+//!
+//! 保留本 crate 的原因：它对齐 TanStack `examples/deployment-pocs/shared` 的位置，
+//! 有与上游对账的价值。所以两者分工是**契约**，不是新旧替代。
+//!
 //! 三个可复用件：
-//! - [`file_run_store::FileRunStore`] — 一个独立的落盘 [`workflow_core::RunStore`] 实现（`run.json` 信封 +
+//! - [`file_run_store::FileRunStore`] — 一个独立的落盘 [`workflow_core::RunStore`]（**旧契约**）实现（`run.json` 信封 +
 //!   append-only `events.jsonl`，CAS append + subscribe），证明 store 契约可插拔；
 //! - [`workflows`] — 示例 workflow 定义（handler 形态，代码即 DAG），场景集对齐
 //!   wf-demo：并行/retry/分支、resume/`continue_from`、approval、双定时器 sleep、

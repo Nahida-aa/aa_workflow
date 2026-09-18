@@ -1824,6 +1824,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "workflow-store-file"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+ "workflow-core",
+ "workflow-runtime",
+]
+
+[[package]]
 name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
