@@ -326,7 +326,7 @@ impl<In, St, Ext> BaseCtx<In, St, Ext> {
     }
 
     /// Cooperative hand-back of the runtime budget (TanStack `yield`): durably
-    /// parks the run on a `"__timer"` wait until [`RunOptions`](crate::engine::RunOptions) 的 `yield_resume_at`
+    /// parks the run on a `"__timer"` wait until [`RunWorkflowOptions`](crate::engine::RunWorkflowOptions) 的 `yield_resume_at`
     /// (or now+1ms), so a host can re-invoke with a freshly extended deadline.
     /// Deterministic id `__yield-{n}` (per-invocation counter), replay-safe.
     pub async fn yield_(&self) -> anyhow::Result<serde_json::Value>
@@ -565,7 +565,7 @@ impl Workflow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{RunOptions, run_workflow};
+    use crate::engine::{RunWorkflowOptions, run_workflow};
     use crate::event::RunStatus;
     use crate::run_store::InMemoryStore;
     use std::sync::{Arc, Mutex};
@@ -592,10 +592,8 @@ mod tests {
                 },
             );
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
         )
         .await
         .unwrap();
@@ -617,9 +615,12 @@ mod tests {
                 Ok(serde_json::json!({ "user": ctx.ext.user }))
             },
         );
-        let out2 = run_workflow(&wf2, store2, &RunOptions::new(serde_json::json!({})), None)
-            .await
-            .unwrap();
+        let out2 = run_workflow(
+            &RunWorkflowOptions::new(Arc::new(wf2.clone()), store2)
+                .input(serde_json::json!({})),
+        )
+        .await
+        .unwrap();
         assert_eq!(out2.output, Some(serde_json::json!({ "user": "" })));
     }
 
@@ -664,9 +665,12 @@ mod tests {
                     .await
                 });
         let store = Arc::new(InMemoryStore::new());
-        let out = run_workflow(&wf, store, &RunOptions::new(serde_json::json!({})), None)
-            .await
-            .unwrap();
+        let out = run_workflow(
+            &RunWorkflowOptions::new(Arc::new(wf.clone().into_workflow()), store)
+                .input(serde_json::json!({})),
+        )
+        .await
+        .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(
             *order.lock().unwrap(),

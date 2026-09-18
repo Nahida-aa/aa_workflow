@@ -706,7 +706,7 @@ sweep 能认领，必须有人把它登记成 `WorkflowExecutionStore::schedule_
 
 core 每次 drive 都用 `initialize(input)` **重建 state**，所以 resume 也必须拿到
 原始 input。原来 `deliver_signal` / `deliver_approval` 给的是 `input: None`，
-落到 `RunOptions::new(Null)`——强类型 input（`.input::<FulfillmentInput>()`）
+落到 `RunWorkflowOptions::new(Null)`——强类型 input（`.input::<FulfillmentInput>()`）
 直接反序列化失败：
 
 ```

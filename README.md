@@ -91,21 +91,27 @@ pub fn fulfillment_saga() -> WorkflowDefinition<SagaInput, serde_json::Value> {
 
 ## 驱动
 
+入参是一个结构体（对齐上游 `RunWorkflowOptions`），**`workflow` / `run_store` 是必填项**——
+由 `RunWorkflowOptions::new` 强制，之后可选项走 builder 链。
+
 ```rust
 let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
 let outcome = run_workflow(
-    &workflow,                    // &Workflow
-    store.clone(),
-    &RunOptions::new(json!({ "orderId": "A-1" }))
+    &RunWorkflowOptions::new(Arc::new(workflow.clone()), store.clone())  // 必填两项
+        .input(json!({ "orderId": "A-1" }))
         .run_id("run_1")          // 复用 run_id ⇒ resume
-        .continue_from("charge")  // 从该 step 截断后重跑后缀
-        .target_step("gen-pdf")   // 命中即停
-        .deadline(now_ms + 30_000),
-    Some(tracing_publisher()),    // 事件回调
+        .continue_from("charge")  // 从该 step 截断后重跑后缀（本地扩展，见下）
+        .target_step("gen-pdf")   // 命中即停（本地扩展）
+        .deadline(now_ms + 30_000)
+        .publisher(Some(tracing_publisher())),
 ).await?;
 ```
 
 `RunOutcome { run_id, status, output, error }`。
+
+与上游 `RunWorkflowOptions` 的字段差异：`continue_from` / `target_step` 是**本仓的
+本地扩展**（上游没有）；`recover` / `attach` / `signal` / `threadId` / `outputSink` /
+`telemetry` 本仓**暂无**。详见 `docs/tanstack-alignment.md`。
 
 引擎入口：
 
@@ -267,7 +273,7 @@ packages/workflow-core/     引擎本体
   src/define/state_handle.rs  共享可变 state（对齐 TS 的 live 引用语义）
   src/middleware/create_middleware.rs  Middleware（produce + wrap）
   src/engine/mod.rs         EngineRuntime、exec_step / exec_pause、signal_*
-  src/engine/run_workflow.rs  单次 drive 的顶层编排、RunOptions
+  src/engine/run_workflow.rs  单次 drive 的顶层编排、RunWorkflowOptions
   src/engine/state_diff.rs  RFC 6902 state delta（对齐上游 engine/state-diff.ts）
   src/registry/select_version.rs  版本路由（匹配不上不回退）
   src/error.rs              StoreError / WorkflowError / RunError / RunErrorCode

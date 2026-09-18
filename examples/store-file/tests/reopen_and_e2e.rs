@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use workflow_core::{
-    BaseCtx, CreateWorkflowConfig, RunOptions, RunStatus, StepCtx, create_workflow, run_workflow,
+    BaseCtx, CreateWorkflowConfig, RunStatus, RunWorkflowOptions, StepCtx, create_workflow, run_workflow,
 };
 use workflow_runtime::run_store_adapter::{
     WorkflowExecutionStore, WorkflowRunStoreAdapterStore, create_run_store_adapter,
@@ -137,10 +137,8 @@ async fn drives_a_parallel_workflow() {
     let core_store = create_run_store_adapter(store.clone());
 
     let out = run_workflow(
-        &wf,
-        core_store,
-        &RunOptions::new(serde_json::json!({ "n": 1 })),
-        None,
+        &RunWorkflowOptions::new(Arc::new(wf.clone().into_workflow()), core_store)
+            .input(serde_json::json!({ "n": 1 })),
     )
     .await
     .expect("run_workflow");

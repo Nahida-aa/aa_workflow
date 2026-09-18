@@ -19,71 +19,124 @@ use crate::event::{RunStatus, StepStatus, WorkflowEvent, fold_step_states};
 use crate::resource::Gate;
 use crate::run_store::{RunState, RunStore};
 
-/// Per-invocation options. `run_id`, `continue_from` and `target_step` are
-/// invocation options, NOT persisted — persistent state lives in the event
-/// log. `max_concurrency` is gone: parallelism is explicit handler code
-/// (`tokio::try_join!`).
-#[derive(Default)]
-pub struct RunOptions {
+/// `run_workflow` / `run_workflow_sync` 的入参（对齐上游 `RunWorkflowOptions`，
+/// 见 `engine/run-workflow.ts:34-72`）。
+///
+/// # 为什么把 `workflow` / `run_store` 也收进来
+///
+/// 之前是 4 个位置参数 `run_workflow(&wf, store, &opts, publisher)`——容易传错位。
+/// 上游把**全部**入参放在一个结构体里，`workflow` / `runStore` 是**必填字段**。
+/// 这里照做：必填项由 [`RunWorkflowOptions::new`] 强制（构造完就一定齐了），
+/// 可选项走 builder 链。
+///
+/// # 与上游的字段差异
+///
+/// | 上游 `RunWorkflowOptions` | 本结构 | 说明 |
+/// | --- | --- | --- |
+/// | `workflow` / `runStore` | ✅ `workflow` / `run_store` | 必填 |
+/// | `input` / `runId` / `deadline` / `minYieldRemainingMs` / `yieldResumeAt` | ✅ | 同名同义 |
+/// | `publish` | ✅ `publisher` | 位置从参数移进结构体 |
+/// | `signalDelivery` / `approval` | — | 我们走 `signal_run` / `signal_event` 先落盘再 drive（D3 的形态差异） |
+/// | `recover` / `attach` / `signal` / `threadId` / `outputSink` / `telemetry` | — | **暂无**；未做，不是不做 |
+/// | — | ➕ `continue_from` / `target_step` | **本地扩展**（上游连这两个概念都没有） |
+///
+/// # 为什么 `workflow` 是 `Arc<Workflow>` 而不是 `Workflow`
+///
+/// `Workflow` 内含 `Vec<Workflow>`（`previous_versions`）与若干 `Arc`，
+/// 直接持有所有权会让每次 builder 调用都要 clone 一遍。`Arc` 让 clone 变成
+/// 引用计数自增，同时避免给结构体引入生命周期参数（那会让 builder 链很难写）。
+pub struct RunWorkflowOptions {
+    /// 要驱动的 workflow。**必填**（由 [`Self::new`] 保证）。
+    pub workflow: Arc<Workflow>,
+    /// 事件日志 / run 元数据的落盘位置。**必填**（由 [`Self::new`] 保证）。
+    pub run_store: Arc<dyn RunStore>,
+
+    /// 复用该 run_id ⇒ resume（成功 step 短路、失败 rethrow）。
     pub run_id: Option<String>,
+    /// run 输入。默认 `Value::Null`。
     pub input: serde_json::Value,
+    /// 命中即停（本地扩展；上游用 handler 内 early `return`）。
     pub target_step: Option<String>,
+    /// 从该 step 的最新终态 checkpoint 处截断后重跑后缀（**本地扩展**）。
     pub continue_from: Option<String>,
-    /// Absolute UTC ms budget for this drive (TanStack `deadline`). When set,
-    /// `time_remaining()` / `should_yield()` (ctx + step) and `ctx.yield_()`
-    /// become active; a fresh budget can be supplied on every resume.
+    /// 本次 drive 的绝对 UTC ms 预算（上游 `deadline`）。设了之后
+    /// `time_remaining()` / `should_yield()` / `ctx.yield_()` 才生效；
+    /// 每次 resume 都可以给一个新的。
     pub deadline: Option<i64>,
-    /// `should_yield()` flips true when fewer than this many ms remain
-    /// (TanStack `minYieldRemainingMs`, default 1000).
+    /// 剩余预算低于此值时 `should_yield()` 翻真（上游 `minYieldRemainingMs`，默认 1000）。
     pub min_yield_remaining_ms: Option<u64>,
-    /// Absolute ms at which `ctx.yield_()` re-wakes (TanStack `yieldResumeAt`;
-    /// defaults to "now+1ms" per call).
+    /// `ctx.yield_()` 的重新唤醒时刻（上游 `yieldResumeAt`；默认每次调用「now+1ms」）。
     pub yield_resume_at: Option<i64>,
+    /// 每个事件都会回调（上游 `publish`）——host 可以接到 Redis / Durable Streams
+    /// 之类的扇出通道，让别的节点能 tail 这个 run。
+    pub publisher: Option<Arc<dyn Fn(&WorkflowEvent) + Send + Sync>>,
 }
 
-impl RunOptions {
-    pub fn new(input: serde_json::Value) -> Self {
+impl RunWorkflowOptions {
+    /// **必填项在这里**：`workflow` + `run_store`。构造完这两个就一定齐了。
+    pub fn new(workflow: Arc<Workflow>, run_store: Arc<dyn RunStore>) -> Self {
         Self {
+            workflow,
+            run_store,
             run_id: None,
-            input,
+            input: serde_json::Value::Null,
             target_step: None,
             continue_from: None,
             deadline: None,
             min_yield_remaining_ms: None,
             yield_resume_at: None,
+            publisher: None,
         }
     }
 
+    /// run 输入。
+    pub fn input(mut self, v: serde_json::Value) -> Self {
+        self.input = v;
+        self
+    }
+
+    /// 复用该 run_id ⇒ resume。
     pub fn run_id(mut self, v: impl Into<String>) -> Self {
         self.run_id = Some(v.into());
         self
     }
 
+    /// 命中即停。
     pub fn target_step(mut self, v: impl Into<String>) -> Self {
         self.target_step = Some(v.into());
         self
     }
 
+    /// 从该 step 截断后重跑后缀。
     pub fn continue_from(mut self, v: impl Into<String>) -> Self {
         self.continue_from = Some(v.into());
         self
     }
 
-    /// Set the absolute UTC ms runtime budget for this drive.
+    /// 设置本次 drive 的绝对 UTC ms 预算。
     pub fn deadline(mut self, v: i64) -> Self {
         self.deadline = Some(v);
         self
     }
 
-    /// Set when `should_yield()` turns true (ms of headroom left).
+    /// 剩余预算低于此值时允许让出（上游 `minYieldRemainingMs`）。
     pub fn min_yield_remaining(mut self, v: u64) -> Self {
         self.min_yield_remaining_ms = Some(v);
         self
     }
 
-    /// Set the absolute re-wake timestamp for `ctx.yield_()`.
+    /// `ctx.yield_()` 的重新唤醒时刻。
     pub fn yield_resume_at(mut self, v: i64) -> Self {
         self.yield_resume_at = Some(v);
+        self
+    }
+
+    /// 事件回调（上游 `publish`）。收 `Option`，便于直接对接旧的四参数签名。
+    pub fn publisher(
+        mut self,
+        v: Option<Arc<dyn Fn(&WorkflowEvent) + Send + Sync>>,
+    ) -> Self {
+        self.publisher = v;
         self
     }
 }
@@ -121,11 +174,12 @@ pub use crate::registry::select_workflow_version;
 /// `run` not re-executed) and rethrows failed ones. Multiplex step results
 /// however you like — the log is the only source of truth.
 pub async fn run_workflow(
-    workflow: &Workflow,
-    store: Arc<dyn RunStore>,
-    opts: &RunOptions,
-    publisher: Option<Arc<dyn Fn(&WorkflowEvent) + Send + Sync>>,
+    opts: &RunWorkflowOptions,
 ) -> Result<RunOutcome, WorkflowError> {
+    let workflow = &opts.workflow;
+    let store = Arc::clone(&opts.run_store);
+    let publisher = opts.publisher.clone();
+
     let run_id = opts
         .run_id
         .clone()
@@ -367,17 +421,12 @@ fn init_failed(
 
 /// Sync convenience over a local multi-thread runtime for callers that are
 /// not async themselves (e.g. LocalDub's CLI entrypoint).
-pub fn run_workflow_sync(
-    workflow: &Workflow,
-    store: Arc<dyn RunStore>,
-    opts: &RunOptions,
-    publisher: Option<Arc<dyn Fn(&WorkflowEvent) + Send + Sync>>,
-) -> Result<RunOutcome, WorkflowError> {
+pub fn run_workflow_sync(opts: &RunWorkflowOptions) -> Result<RunOutcome, WorkflowError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_time()
         .build()
         .map_err(|e| WorkflowError::Internal(format!("tokio runtime: {e}")))?;
-    rt.block_on(run_workflow(workflow, store, opts, publisher))
+    rt.block_on(run_workflow(opts))
 }
 #[cfg(test)]
 mod tests {
@@ -405,10 +454,8 @@ mod tests {
                 .await
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(json!({ "x": 1 })),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(json!({ "x": 1 })),
         )
         .await
         .unwrap();
@@ -439,10 +486,9 @@ mod tests {
                 .await
             });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(json!({})).run_id("bad-init:r"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(json!({}))
+            .run_id("bad-init:r"),
         )
         .await
         .unwrap();
@@ -472,10 +518,9 @@ mod tests {
         });
         let wf: Workflow = wf.into_workflow();
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(json!({})).run_id("bad-state:r"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(json!({}))
+            .run_id("bad-state:r"),
         )
         .await
         .unwrap();
@@ -502,10 +547,9 @@ mod tests {
                 .await
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(json!({})).run_id("code:err"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(json!({}))
+            .run_id("code:err"),
         )
         .await
         .unwrap();
@@ -532,10 +576,9 @@ mod tests {
             Err(crate::engine::WorkflowCancelled.into())
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(json!({})).run_id("code:abort"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(json!({}))
+            .run_id("code:abort"),
         )
         .await
         .unwrap();
@@ -568,10 +611,10 @@ mod tests {
             .initialize(|_| Err(anyhow::anyhow!("nope")))
             .handler(|_ctx: WorkflowCtx| async move { Ok(json!({ "unreachable": true })) });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(json!({})).run_id("code:validation"),
-            Some(publisher),
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(json!({}))
+            .run_id("code:validation")
+            .publisher(Some(publisher)),
         )
         .await
         .unwrap();
@@ -613,10 +656,9 @@ mod tests {
             .await
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(json!({})).run_id("one:r"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(json!({}))
+            .run_id("one:r"),
         )
         .await
         .unwrap();
@@ -677,10 +719,9 @@ mod tests {
             let v1 = v1.clone();
             async move {
                 run_workflow(
-                    &v1,
-                    store,
-                    &RunOptions::new(serde_json::json!({})).run_id("ver:mismatch"),
-                    None,
+                    &RunWorkflowOptions::new(Arc::new(v1.clone()), store)
+                        .input(serde_json::json!({}))
+                    .run_id("ver:mismatch"),
                 )
                 .await
             }
@@ -702,10 +743,9 @@ mod tests {
             .version("v2")
             .handler(|_ctx: WorkflowCtx| async move { Ok(serde_json::Value::Null) });
         let err = run_workflow(
-            &v2,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("ver:mismatch"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(v2.clone()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("ver:mismatch"),
         )
         .await
         .expect_err("版本不匹配应报错");
@@ -753,10 +793,8 @@ mod tests {
 
         // first run: b fails, run errors
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
         )
         .await
         .unwrap();
@@ -767,10 +805,9 @@ mod tests {
 
         // plain resume: failed checkpoint rethrows → still errored, no rerun
         let again = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id(run_id.clone()),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id(run_id.clone()),
         )
         .await
         .unwrap();
@@ -783,12 +820,10 @@ mod tests {
 
         // continue_from "b": truncate b's checkpoint + suffix, replay reruns b
         let resumed = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({}))
-                .run_id(run_id)
-                .continue_from("b"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id(run_id)
+            .continue_from("b"),
         )
         .await
         .unwrap();
@@ -826,20 +861,16 @@ mod tests {
             }
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
         )
         .await
         .unwrap();
         let second = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({}))
-                .run_id(out.run_id)
-                .continue_from("b"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id(out.run_id)
+            .continue_from("b"),
         )
         .await
         .unwrap();
@@ -878,10 +909,9 @@ mod tests {
             }
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).target_step("b"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .target_step("b"),
         )
         .await
         .unwrap();
@@ -908,10 +938,8 @@ mod tests {
             Ok(serde_json::json!({ "out": v }))
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
         )
         .await
         .unwrap();
@@ -941,10 +969,9 @@ mod tests {
         .into_workflow();
 
         let out1 = run_workflow(
-            &v1,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("ver:r"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(v1.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("ver:r"),
         )
         .await
         .unwrap();
@@ -964,10 +991,9 @@ mod tests {
         });
 
         let out2 = run_workflow(
-            &v2,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("ver:r"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(v2.clone().into_workflow()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("ver:r"),
         )
         .await
         .unwrap();
@@ -978,10 +1004,9 @@ mod tests {
         );
 
         let out3 = run_workflow(
-            &v2,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("ver:r2"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(v2.clone().into_workflow()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("ver:r2"),
         )
         .await
         .unwrap();

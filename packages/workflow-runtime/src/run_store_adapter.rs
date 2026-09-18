@@ -586,7 +586,7 @@ mod e2e_tests {
     use super::*;
     use crate::in_memory_store::InMemoryExecutionStore;
     use workflow_core::{
-        BaseCtx, CreateWorkflowConfig, RunOptions, RunStatus, StepCtx, Workflow, create_workflow,
+        BaseCtx, CreateWorkflowConfig, RunWorkflowOptions, RunStatus, StepCtx, Workflow, create_workflow,
     };
 
     /// 用适配器把一个 `WorkflowExecutionStore` 实现接进 core，跑通一次真实
@@ -610,10 +610,9 @@ mod e2e_tests {
         let store = create_run_store_adapter(exec);
 
         let out = workflow_core::run_workflow(
-            &wf,
-            store,
-            &RunOptions::new(serde_json::json!({})).run_id("e2e:1"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store)
+                .input(serde_json::json!({}))
+            .run_id("e2e:1"),
         )
         .await
         .unwrap();

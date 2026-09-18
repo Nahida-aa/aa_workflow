@@ -2,7 +2,7 @@
 //! 结果缓存 / CAS 追加），`exec_step` 跑单个 durable step，
 //! `exec_pause` + `signal_run` 实现 durable 等待（approval / sleep）。
 //! 单次 invocation 的顶层编排（`run_workflow` / `run_workflow_sync` /
-//! `RunOptions` / `RunOutcome`）在 `run_workflow` 子模块。
+//! `RunWorkflowOptions` / `RunOutcome`）在 `run_workflow` 子模块。
 
 use std::future::Future;
 use std::sync::Arc;
@@ -19,7 +19,7 @@ use crate::run_store::RunStore;
 mod run_workflow;
 pub mod state_diff;
 pub use run_workflow::{
-    RunOptions, RunOutcome, run_workflow, run_workflow_sync, select_workflow_version,
+    RunOutcome, RunWorkflowOptions, run_workflow, run_workflow_sync, select_workflow_version,
 };
 pub use state_diff::{Operation, diff_state, snapshot_state};
 
@@ -798,10 +798,8 @@ mod tests {
             }
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
         )
         .await
         .unwrap();
@@ -850,10 +848,8 @@ mod tests {
             }
         });
         run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
         )
         .await
         .unwrap();
@@ -953,10 +949,8 @@ mod tests {
             }
         });
         run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
         )
         .await
         .unwrap();
@@ -1000,18 +994,15 @@ mod tests {
             }
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
         )
         .await
         .unwrap();
         let second = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id(out.run_id),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id(out.run_id),
         )
         .await
         .unwrap();
@@ -1059,20 +1050,17 @@ mod tests {
             }
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
         )
         .await
         .unwrap();
         // mark a stale, rereun: a reruns, b stays cached
         fresh_a.store(false, Ordering::SeqCst);
         let second = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id(out.run_id),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id(out.run_id),
         )
         .await
         .unwrap();
@@ -1112,10 +1100,8 @@ mod tests {
             }
         });
         run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
         )
         .await
         .unwrap();
@@ -1148,10 +1134,8 @@ mod tests {
             }
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
         )
         .await
         .unwrap();
@@ -1180,10 +1164,8 @@ mod tests {
             .await
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
         )
         .await
         .unwrap();
@@ -1235,10 +1217,8 @@ mod tests {
             .await
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
         )
         .await
         .unwrap();
@@ -1271,10 +1251,8 @@ mod tests {
             Ok(serde_json::Value::Null)
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
         )
         .await
         .unwrap();
@@ -1296,12 +1274,12 @@ mod tests {
             .await
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("prog_run"),
-            Some(Arc::new(move |e: &WorkflowEvent| {
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("prog_run")
+            .publisher(Some(Arc::new(move |e: &WorkflowEvent| {
                 sink.lock().unwrap().push(e.clone())
-            })),
+            }))),
         )
         .await
         .unwrap();
@@ -1419,10 +1397,9 @@ mod tests {
         // Drive #1 —— 跑到挂起点就**返回**（不阻塞）。对齐上游：写 checkpoint
         // 后 `throw WorkflowPaused`，drive 直接结束。
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("r1"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("r1"),
         )
         .await
         .unwrap();
@@ -1456,10 +1433,9 @@ mod tests {
 
         // Drive #2 —— 从日志短路 `charge`，pause 有 resume 直接放行。
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("r1"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("r1"),
         )
         .await
         .unwrap();
@@ -1517,10 +1493,9 @@ mod tests {
         let wf2 = wf.clone();
         let t1 = tokio::spawn(async move {
             run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({})).run_id("r2"),
-                None,
+                &RunWorkflowOptions::new(Arc::new(wf2.clone()), store2)
+                    .input(serde_json::json!({}))
+                .run_id("r2"),
             )
             .await
         });
@@ -1539,10 +1514,9 @@ mod tests {
         let wf3 = wf.clone();
         let t2 = tokio::spawn(async move {
             run_workflow(
-                &wf3,
-                store3,
-                &RunOptions::new(serde_json::json!({})).run_id("r2"),
-                None,
+                &RunWorkflowOptions::new(Arc::new(wf3.clone()), store3)
+                    .input(serde_json::json!({}))
+                .run_id("r2"),
             )
             .await
         });
@@ -1605,10 +1579,9 @@ mod tests {
         // Drive #1：立刻返回 `Paused`（不阻塞 250ms）。
         let started = std::time::Instant::now();
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("s1"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("s1"),
         )
         .await
         .unwrap();
@@ -1639,10 +1612,9 @@ mod tests {
 
         // Drive #2：放行。
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("s1"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("s1"),
         )
         .await
         .unwrap();
@@ -1681,10 +1653,9 @@ mod tests {
 
         // Run 1: park, signal, finish.
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("r3"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("r3"),
         )
         .await
         .unwrap();
@@ -1697,10 +1668,9 @@ mod tests {
         )
         .unwrap();
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("r3"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("r3"),
         )
         .await
         .unwrap();
@@ -1710,10 +1680,9 @@ mod tests {
         // Run 2, same run_id: the StepResume is already in the log, so
         // approve resolves from the log — no new checkpoints appended.
         let out2 = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("r3"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("r3"),
         )
         .await
         .unwrap();
@@ -1750,10 +1719,9 @@ mod tests {
         });
         // Drive #1：跑到挂起点返回 `Paused`（不阻塞）。
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("ne1"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("ne1"),
         )
         .await
         .unwrap();
@@ -1777,10 +1745,9 @@ mod tests {
         )
         .unwrap();
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("ne1"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("ne1"),
         )
         .await
         .unwrap();
@@ -1803,20 +1770,18 @@ mod tests {
             Ok(out)
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("ne2"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("ne2"),
         )
         .await
         .unwrap();
         assert_eq!(out.status, RunStatus::Paused);
         signal_event(store.as_ref(), "ne2", "go", serde_json::json!(42)).unwrap();
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("ne2"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("ne2"),
         )
         .await
         .unwrap();
@@ -1827,10 +1792,9 @@ mod tests {
         let store3 = store.clone();
         let wf3 = wf.clone();
         let out2 = run_workflow(
-            &wf3,
-            store3,
-            &RunOptions::new(serde_json::json!({})).run_id("ne2"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf3.clone()), store3)
+                .input(serde_json::json!({}))
+            .run_id("ne2"),
         )
         .await
         .unwrap();
@@ -1860,10 +1824,8 @@ mod tests {
             Ok(serde_json::Value::Null)
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
         )
         .await
         .unwrap();
@@ -1878,10 +1840,9 @@ mod tests {
 
         signal_run(store.as_ref(), &out.run_id, "cooldown", serde_json::Value::Null).unwrap();
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id(out.run_id),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id(out.run_id),
         )
         .await
         .unwrap();
@@ -1906,10 +1867,9 @@ mod tests {
             Ok(serde_json::Value::Null)
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("stu1"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("stu1"),
         )
         .await
         .unwrap();
@@ -1923,10 +1883,9 @@ mod tests {
 
         signal_run(store.as_ref(), "stu1", "cooldown", serde_json::Value::Null).unwrap();
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("stu1"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("stu1"),
         )
         .await
         .unwrap();
@@ -1947,12 +1906,12 @@ mod tests {
             Ok(serde_json::Value::Null)
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("em1"),
-            Some(Arc::new(move |e: &WorkflowEvent| {
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("em1")
+            .publisher(Some(Arc::new(move |e: &WorkflowEvent| {
                 sink.lock().unwrap().push(e.clone())
-            })),
+            }))),
         )
         .await
         .unwrap();
@@ -1998,10 +1957,9 @@ mod tests {
         });
         // Drive #1：跑到 approve 挂起就返回。
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("det1"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("det1"),
         )
         .await
         .unwrap();
@@ -2009,10 +1967,9 @@ mod tests {
         signal_run(store.as_ref(), "det1", "gate", serde_json::json!(true)).unwrap();
         // Drive #2：`__now-0` / `__uuid-0` 从日志缓存取（deterministic replay）。
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("det1"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("det1"),
         )
         .await
         .unwrap();
@@ -2021,10 +1978,9 @@ mod tests {
 
         // 重跑（崩溃恢复模拟）：now/uuid 全部从日志缓存值取，输出逐字节一致。
         let out2 = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("det1"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("det1"),
         )
         .await
         .unwrap();
@@ -2078,10 +2034,8 @@ mod tests {
             Ok(serde_json::json!({ "a": a?, "b": b? }))
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
         )
         .await
         .unwrap();
@@ -2104,10 +2058,9 @@ mod tests {
         let store2 = store.clone();
         let wf2 = wf.clone();
         let out2 = run_workflow(
-            &wf2,
-            store2,
-            &RunOptions::new(serde_json::json!({})).run_id(&out.run_id),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf2.clone()), store2)
+                .input(serde_json::json!({}))
+            .run_id(&out.run_id),
         )
         .await
         .unwrap();
@@ -2139,10 +2092,9 @@ mod tests {
 
         // Drive #1：挂起即返回。
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("ca1"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("ca1"),
         )
         .await
         .unwrap();
@@ -2159,10 +2111,9 @@ mod tests {
 
         // Drive #2：引擎拾取 `Aborted`，以 Aborted 收尾。
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("ca1"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("ca1"),
         )
         .await
         .unwrap();
@@ -2186,10 +2137,9 @@ mod tests {
 
         // 已 cancel 的 run 不能再被 drive 复活。
         let again = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("ca1"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("ca1"),
         )
         .await
         .unwrap();
@@ -2235,10 +2185,9 @@ mod tests {
         let wf2 = wf.clone();
         let task = tokio::spawn(async move {
             run_workflow(
-                &wf2,
-                store2,
-                &RunOptions::new(serde_json::json!({})).run_id("sig1"),
-                None,
+                &RunWorkflowOptions::new(Arc::new(wf2.clone()), store2)
+                    .input(serde_json::json!({}))
+                .run_id("sig1"),
             )
             .await
         });
@@ -2271,10 +2220,9 @@ mod tests {
         // Drive #1：挂起即返回（不等那 1 秒）。
         let started = std::time::Instant::now();
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("ca2"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("ca2"),
         )
         .await
         .unwrap();
@@ -2290,10 +2238,9 @@ mod tests {
 
         // Drive #2：引擎拾取到 Aborted，在第一个边界以 Aborted 收尾。
         let out2 = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("ca2"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("ca2"),
         )
         .await
         .unwrap();
@@ -2309,10 +2256,9 @@ mod tests {
         // 对 aborted 直接 route 到 attach，`run-workflow.ts:275-282`）。
         signal_run(store.as_ref(), "ca2", "hold", serde_json::Value::Null).unwrap();
         let out3 = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("ca2"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("ca2"),
         )
         .await
         .unwrap();
@@ -2327,10 +2273,8 @@ mod tests {
             Ok(serde_json::json!({ "ok": true }))
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
         )
         .await
         .unwrap();
@@ -2363,10 +2307,11 @@ mod tests {
             }
         });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).deadline(crate::engine::now_ms() + 300), // 500ms 内到期 → headroom < 1000
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .deadline(crate::engine::now_ms() + 300)
+            .publisher(// 500ms 内到期 → headroom < 1000
+            None),
         )
         .await
         .unwrap();
@@ -2398,10 +2343,9 @@ mod tests {
 
         // Drive #1：停在 `__yield-0`，立刻返回。
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("y1"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("y1"),
         )
         .await
         .unwrap();
@@ -2415,10 +2359,9 @@ mod tests {
         // host 重新唤起（延期预算）→ 投递 timer。
         signal_run(store.as_ref(), "y1", "__yield-0", serde_json::Value::Null).unwrap();
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("y1"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("y1"),
         )
         .await
         .unwrap();
@@ -2429,10 +2372,9 @@ mod tests {
 
         // replay：yield 的 StepResume 已在日志 → 短路径立即放行，不新增 checkpoint
         let out2 = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("y1"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("y1"),
         )
         .await
         .unwrap();
@@ -2459,12 +2401,10 @@ mod tests {
         // Drive #1：`yield_resume_at` 原样落到 deadline 上——由外部 timer 认领，
         // 引擎自己不等（这正是 upstream `yieldResumeAt` 的用途）。
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({}))
-                .run_id("y2")
-                .yield_resume_at(resume_at),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("y2")
+            .yield_resume_at(resume_at),
         )
         .await
         .unwrap();
@@ -2478,10 +2418,9 @@ mod tests {
 
         signal_run(store.as_ref(), "y2", "__yield-0", serde_json::Value::Null).unwrap();
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("y2"),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("y2"),
         )
         .await
         .unwrap();
@@ -2520,10 +2459,8 @@ mod tests {
         });
         let wf: Workflow = wf.into_workflow();
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
         )
         .await
         .unwrap();
@@ -2568,10 +2505,8 @@ mod tests {
         });
         let wf2: Workflow = wf2.into_workflow();
         let out2 = run_workflow(
-            &wf2,
-            store2.clone(),
-            &RunOptions::new(serde_json::json!({})),
-            None,
+            &RunWorkflowOptions::new(Arc::new(wf2.clone()), store2.clone())
+                .input(serde_json::json!({})),
         )
         .await
         .unwrap();
@@ -2615,12 +2550,12 @@ mod tests {
                 Ok(serde_json::Value::Null)
             });
         let out = run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("sd"),
-            Some(Arc::new(move |e: &WorkflowEvent| {
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("sd")
+            .publisher(Some(Arc::new(move |e: &WorkflowEvent| {
                 sink.lock().unwrap().push(e.clone())
-            })),
+            }))),
         )
         .await
         .unwrap();
@@ -2687,12 +2622,12 @@ mod tests {
                 Ok(serde_json::Value::Null)
             });
         run_workflow(
-            &wf,
-            store.clone(),
-            &RunOptions::new(serde_json::json!({})).run_id("tail:1"),
-            Some(Arc::new(move |e: &WorkflowEvent| {
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+            .run_id("tail:1")
+            .publisher(Some(Arc::new(move |e: &WorkflowEvent| {
                 sink.lock().unwrap().push(e.clone())
-            })),
+            }))),
         )
         .await
         .unwrap();

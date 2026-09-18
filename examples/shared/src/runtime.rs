@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
-use workflow_core::{RunOptions, RunOutcome, RunStore, Workflow, WorkflowEvent, run_workflow};
+use workflow_core::{
+    RunOutcome, RunStore, RunWorkflowOptions, Workflow, WorkflowEvent, run_workflow,
+};
 
 /// 可选的事件订阅者（每个 `ctx.step` 落盘事件都会回调）。
 pub type EventSubscriber = Arc<dyn Fn(&WorkflowEvent) + Send + Sync>;
@@ -30,8 +32,15 @@ pub struct DriveOpts<'a> {
 }
 
 impl DriveOpts<'_> {
-    fn into_run_options(&self, input: serde_json::Value) -> RunOptions {
-        let mut ro = RunOptions::new(input);
+    /// 组装引擎入参。`workflow` / `store` 由调用方传入——它们是
+    /// [`RunWorkflowOptions`] 的**必填项**（对齐上游 `RunWorkflowOptions`）。
+    fn into_run_options(
+        &self,
+        workflow: Arc<Workflow>,
+        store: Arc<dyn RunStore>,
+        input: serde_json::Value,
+    ) -> RunWorkflowOptions {
+        let mut ro = RunWorkflowOptions::new(workflow, store).input(input);
         if let Some(id) = self.run_id {
             ro = ro.run_id(id);
         }
@@ -41,7 +50,7 @@ impl DriveOpts<'_> {
         if let Some(ts) = self.target_step {
             ro = ro.target_step(ts);
         }
-        ro
+        ro.publisher(self.publisher.clone())
     }
 }
 
@@ -52,14 +61,10 @@ pub async fn drive(
     input: serde_json::Value,
     opts: DriveOpts<'_>,
 ) -> anyhow::Result<RunOutcome> {
-    run_workflow(
-        workflow,
-        store,
-        &opts.into_run_options(input),
-        opts.publisher,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("{e}"))
+    let options = opts.into_run_options(Arc::new(workflow.clone()), store, input);
+    run_workflow(&options)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 #[cfg(test)]

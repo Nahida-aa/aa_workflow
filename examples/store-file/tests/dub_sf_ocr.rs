@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use workflow_core::{RunOptions, RunStatus, WorkflowEvent, run_workflow};
+use workflow_core::{RunWorkflowOptions, RunStatus, WorkflowEvent, run_workflow};
 use workflow_runtime::run_store_adapter::{
     WorkflowExecutionStore, WorkflowRunStoreAdapterStore, create_run_store_adapter,
 };
@@ -101,12 +101,7 @@ async fn dub_sf_ocr_runs_all_ten_steps_once() {
 
     let (store, dir) = temp_store("all_steps");
     let core_store = create_run_store_adapter(store.clone() as Arc<dyn WorkflowExecutionStore>);
-    let out = run_workflow(
-        &dub_sf_ocr(),
-        core_store,
-        &RunOptions::new(dub_input()),
-        None,
-    )
+    let out = run_workflow(&RunWorkflowOptions::new(Arc::new(dub_sf_ocr().into_workflow()), core_store).input(dub_input()))
     .await
     .unwrap();
     assert_eq!(out.status, RunStatus::Finished);
@@ -138,12 +133,7 @@ async fn dub_sf_ocr_branches_run_concurrently() {
 
     let (store, dir) = temp_store("concurrent");
     let core_store = create_run_store_adapter(store.clone() as Arc<dyn WorkflowExecutionStore>);
-    let out = run_workflow(
-        &dub_sf_ocr(),
-        core_store,
-        &RunOptions::new(dub_input()),
-        None,
-    )
+    let out = run_workflow(&RunWorkflowOptions::new(Arc::new(dub_sf_ocr().into_workflow()), core_store).input(dub_input()))
     .await
     .unwrap();
     assert_eq!(out.status, RunStatus::Finished);
@@ -165,20 +155,21 @@ async fn dub_sf_ocr_replay_short_circuits() {
     dub_probe::reset();
 
     let (store, dir) = temp_store("replay");
-    let wf = dub_sf_ocr();
+    let wf = dub_sf_ocr().into_workflow();
     let core_store =
         create_run_store_adapter(store.clone() as Arc<dyn WorkflowExecutionStore>);
-    let out = run_workflow(&wf, core_store.clone(), &RunOptions::new(dub_input()), None)
-        .await
-        .unwrap();
+    let out = run_workflow(
+        &RunWorkflowOptions::new(Arc::new(wf.clone()), core_store.clone()).input(dub_input()),
+    )
+    .await
+    .unwrap();
     let run_id = out.run_id.clone();
     let ts_1 = sf_ts(&events_of(&store, &run_id), "separate");
 
     let again = run_workflow(
-        &wf,
-        core_store,
-        &RunOptions::new(dub_input()).run_id(run_id.clone()),
-        None,
+        &RunWorkflowOptions::new(Arc::new(wf.clone()), core_store)
+            .input(dub_input())
+            .run_id(run_id.clone()),
     )
     .await
     .unwrap();
@@ -204,12 +195,7 @@ async fn dub_sf_ocr_steps_read_typed_state() {
     let (store, dir) = temp_store("typed_state");
     let core_store =
         create_run_store_adapter(store.clone() as Arc<dyn WorkflowExecutionStore>);
-    let out = run_workflow(
-        &dub_sf_ocr(),
-        core_store,
-        &RunOptions::new(serde_json::json!({ "videoDir": "/w/1", "targetLang": "vi" })),
-        None,
-    )
+    let out = run_workflow(&RunWorkflowOptions::new(Arc::new(dub_sf_ocr().into_workflow()), core_store).input(serde_json::json!({ "videoDir": "/w/1", "targetLang": "vi" })))
     .await
     .unwrap();
     assert_eq!(out.status, RunStatus::Finished);
@@ -247,12 +233,7 @@ async fn dub_sf_ocr_state_defaults_target_lang() {
     let (store, dir) = temp_store("default_lang");
     let core_store =
         create_run_store_adapter(store.clone() as Arc<dyn WorkflowExecutionStore>);
-    let out = run_workflow(
-        &dub_sf_ocr(),
-        core_store,
-        &RunOptions::new(serde_json::json!({ "videoDir": "/w/2" })),
-        None,
-    )
+    let out = run_workflow(&RunWorkflowOptions::new(Arc::new(dub_sf_ocr().into_workflow()), core_store).input(serde_json::json!({ "videoDir": "/w/2" })))
     .await
     .unwrap();
     assert_eq!(out.status, RunStatus::Finished);
@@ -288,21 +269,21 @@ async fn dub_sf_ocr_continue_from_is_unsupported_on_new_contract() {
     dub_probe::reset();
 
     let (store, dir) = temp_store("continue_from");
-    let wf = dub_sf_ocr();
+    let wf = dub_sf_ocr().into_workflow();
     let core_store =
         create_run_store_adapter(store.clone() as Arc<dyn WorkflowExecutionStore>);
-    let out = run_workflow(&wf, core_store.clone(), &RunOptions::new(dub_input()), None)
-        .await
-        .unwrap();
+    let out = run_workflow(
+        &RunWorkflowOptions::new(Arc::new(wf.clone()), core_store.clone()).input(dub_input()),
+    )
+    .await
+    .unwrap();
     let run_id = out.run_id.clone();
 
     let resumed = run_workflow(
-        &wf,
-        core_store,
-        &RunOptions::new(dub_input())
+        &RunWorkflowOptions::new(Arc::new(wf.clone()), core_store)
+            .input(dub_input())
             .run_id(run_id.clone())
             .continue_from("tts"),
-        None,
     )
     .await;
 

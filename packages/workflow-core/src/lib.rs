@@ -55,8 +55,8 @@ pub use define::{
 };
 pub use engine::{Operation, diff_state, snapshot_state};
 pub use engine::{
-    RunOptions, RunOutcome, cancel_run, run_workflow, run_workflow_sync, select_workflow_version,
-    signal_event, signal_run,
+    RunOutcome, RunWorkflowOptions, cancel_run, run_workflow, run_workflow_sync,
+    select_workflow_version, signal_event, signal_run,
 };
 pub use error::{RunError, RunErrorCode, StoreError, WorkflowError};
 pub use event::{RunStatus, StepAttempt, StepState, StepStatus, WorkflowEvent, fold_step_states};

@@ -1,7 +1,7 @@
 # BaseCtx API 对等矩阵（aa-workflow Rust 端口 ↔ TanStack workflow-core）
 
 对照真源：`learn_ls/workflow/packages/workflow-core/src/types.ts`（BaseCtx /
-StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunOptions.runtime）。
+StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunWorkflowOptions.runtime）。
 本矩阵只覆盖 **ctx 层 API 对等**；引擎内部（checkpoint 日志、replay、RunState 信封）
 的对等由各自文档描述，不在本表。
 
@@ -28,7 +28,7 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunOptions.runtime�
 | `runtime: WorkflowRuntimeContext` | `deadline() / time_remaining() / should_yield() / yield_()` | ◐ | TS 是嵌套对象；Rust **拍平为 ctx 顶层方法**。`yield` 是 Rust 保留字 → 命名 `yield_` |
 | `runtime.deadline?: number` | `deadline() -> Option<i64>` | ✅ | 无 deadline 时 TS 为 `undefined`，Rust 为 `None` |
 | `runtime.timeRemaining()` | `time_remaining() -> u64` | ✅ | 无 deadline：TS `Infinity`，Rust `u64::MAX`（外部可见均为「无限」，值不同） |
-| `runtime.shouldYield(minRemainingMs?)` | `should_yield()` | ◐ | TS 支持按调用传 `minRemainingMs` 覆盖；Rust 只有 RunOptions 级默认值，不支持逐调用覆盖 |
+| `runtime.shouldYield(minRemainingMs?)` | `should_yield()` | ◐ | TS 支持按调用传 `minRemainingMs` 覆盖；Rust 只有 RunWorkflowOptions 级默认值，不支持逐调用覆盖 |
 | `runtime.yield(options?)` | `yield_()` | ◐ | 行为对等：park 在 `"__timer"` 直到 `yieldResumeAt`（缺省 now+1ms），**写 checkpoint 即返回**，由外部 timer 投递放行。差异：TS 可传 `id`/`reason`；Rust 自动派生 `__yield-{n}` key，无 reason |
 | `step(id, fn, options?)` | `step(id, f)` / `step_with(id, f, StepOptions)` | ✅ | |
 | `sleep(ms, options?)` | `sleep(key, ms)` | ◐ | TS `id` 可选；Rust key **必填**（确定性/可重入之需） |
@@ -53,12 +53,12 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunOptions.runtime�
 注：`progress` 在 TS 侧属于 `StepOptions.onProgress` 回调而非 StepContext；Rust
 以 `StepCtx::progress()` 推送，属 API 形状差异（上报渠道不同，行为均为 0..1 进度）。
 
-## RunOptions / engine 层入口对等
+## RunWorkflowOptions / engine 层入口对等
 
 | TanStack | Rust | 备注 |
 | -------- | ---- | ---- |
-| `runId` | `RunOptions::run_id()` | |
-| `input` | `RunOptions::new(input)` | |
+| `runId` | `RunWorkflowOptions::run_id()` | |
+| `input` | `RunWorkflowOptions::new(input)` | |
 | `targetStep` | `target_step()` | |
 | `continueFrom` | `continue_from()` | |
 | `runtime.deadline` | `deadline()` | |
@@ -80,7 +80,7 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunOptions.runtime�
    本来就没有进程在跑。
 3. **step 级 `attempt` / `signal`**：`StepCtx.attempt` 与 `StepCtx::is_cancelled()`
    已暴露（见 StepContext 矩阵）；仍缺的是「可被中断的 await」——只能协作式自检。
-4. **`shouldYield` 逐调用 `minRemainingMs`**：未支持（仅 RunOptions 级）。
+4. **`shouldYield` 逐调用 `minRemainingMs`**：未支持（仅 RunWorkflowOptions 级）。
 5. **`now()/uuid()` 包 `Result`**：设计上仅 store 失败时 Err；正常路径与 TS 等价。
 6. **`approve.description`**：未实现（位置参数缺该项）。
 7. **`state` 写传播（快照 vs in-place 共享）**：TS 中 `ctx.state` 是引擎共享对象

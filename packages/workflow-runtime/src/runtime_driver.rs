@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::{WorkflowExecutionStore, create_run_store_adapter};
-use workflow_core::{RunOptions, Workflow, WorkflowEvent, run_workflow};
+use workflow_core::{RunWorkflowOptions, Workflow, WorkflowEvent, run_workflow};
 
 use crate::types::*;
 
@@ -819,25 +819,24 @@ impl WorkflowRuntime {
 
         // 驱动（core）。signal / approval 的恢复在进入 drive 前已经以
         // StepResume 落盘，重放时由 exec_pause 拾取。
-        let mut opts = RunOptions::new(args.input.clone().unwrap_or(serde_json::Value::Null))
-            .run_id(args.run_id.clone())
-            .min_yield_remaining(
-                args.min_yield_remaining_ms
-                    .unwrap_or(DEFAULT_MIN_YIELD_REMAINING_MS),
-            );
+        let mut opts = RunWorkflowOptions::new(
+            Arc::new(args.workflow.clone()),
+            run_store_for_core(&self.config),
+        )
+        .input(args.input.clone().unwrap_or(serde_json::Value::Null))
+        .run_id(args.run_id.clone())
+        .min_yield_remaining(
+            args.min_yield_remaining_ms
+                .unwrap_or(DEFAULT_MIN_YIELD_REMAINING_MS),
+        );
         if let Some(deadline) = args.deadline {
             opts = opts.deadline(deadline);
         }
         if let Some(at) = args.yield_resume_at {
             opts = opts.yield_resume_at(at);
         }
-        let drive_result = run_workflow(
-            args.workflow,
-            run_store_for_core(&self.config),
-            &opts,
-            Some(publisher),
-        )
-        .await;
+        opts = opts.publisher(Some(publisher));
+        let drive_result = run_workflow(&opts).await;
 
         // 心跳停止 + 释放 lease（无论 drive 成败）。
         let heartbeat_error = heartbeat.stop().await;

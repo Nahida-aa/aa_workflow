@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use aa_workflow_store_sqlx_postgres::SqlxPostgresStore;
 use sqlx::postgres::PgPoolOptions;
-use workflow_core::{RunOptions, RunStatus, create_workflow, run_workflow};
+use workflow_core::{RunStatus, RunWorkflowOptions, create_workflow, run_workflow};
 use workflow_runtime::run_store_adapter::create_run_store_adapter;
 
 fn database_url() -> String {
@@ -112,10 +112,8 @@ fn run_workflow_against_postgres_store() {
     let outcome = rt
         .block_on(async {
             run_workflow(
-                &wf,
-                core_store,
-                &RunOptions::new(serde_json::json!({ "n": 1 })),
-                None,
+                &RunWorkflowOptions::new(Arc::new(wf.clone().into_workflow()), core_store)
+                    .input(serde_json::json!({ "n": 1 })),
             )
             .await
         })
