@@ -6,7 +6,7 @@
 //! 写新的 store adapter **请勿照它**——上游规定 adapter 实现的是
 //! `WorkflowExecutionStore`（见 `docs/api/store-adapters.md` 开篇）。新契约的
 //! 落盘示范见 [`examples/store-file`](../../store-file)，生产级见
-//! `packages/aa-workflow-store-sqlx-postgres`。
+//! `packages/workflow-store-sqlx-postgres`。
 //!
 //! 本文件保留的原因：与上游 `examples/deployment-pocs/shared` 对账。
 //! `RunStore` 本身仍有用途（core 的 `run_workflow` 要它），只是不该被当成

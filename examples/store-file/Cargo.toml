@@ -6,8 +6,8 @@ publish = false
 description = "File-backed durable execution store for aa-workflow (implements WorkflowExecutionStore)"
 
 [dependencies]
-aa-workflow-core = { path = "../../packages/aa-workflow-core" }
-aa-workflow-runtime = { path = "../../packages/aa-workflow-runtime" }
+aa-workflow-core = { path = "../../packages/workflow-core" }
+aa-workflow-runtime = { path = "../../packages/workflow-runtime" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -5,8 +5,8 @@ edition = "2024"
 description = "Postgres durable execution store for aa-workflow, implementing WorkflowExecutionStore"
 
 [dependencies]
-aa-workflow-core = { path = "../aa-workflow-core" }
-aa-workflow-runtime = { path = "../aa-workflow-runtime" }
+aa-workflow-core = { path = "../workflow-core" }
+aa-workflow-runtime = { path = "../workflow-runtime" }
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
     "tls-rustls-ring",

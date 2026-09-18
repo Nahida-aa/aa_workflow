@@ -10,7 +10,7 @@
 所以**写 store adapter 一律实现 [`WorkflowExecutionStore`]**，不是 core 的 `RunStore`。
 两个都叫「store 契约」，差一个后缀，极易看错。
 
-层次（`packages/aa-workflow-runtime/src/run_store_adapter.rs`）：
+层次（`packages/workflow-runtime/src/run_store_adapter.rs`）：
 
 ```text
 aa_workflow_core::RunStore            引擎 replay 用（旧形状）
@@ -20,7 +20,7 @@ WorkflowRunStoreAdapterStore       本仓 runtime 的存储基础：元数据信
 ```
 
 **实现者只写一套方法**。要喂给 core 的 `run_workflow`（入参是 `Arc<dyn RunStore>`），
-用现成的 [`create_run_store_adapter`](packages/aa-workflow-runtime/src/run_store_adapter.rs) 降格转换，
+用现成的 [`create_run_store_adapter`](packages/workflow-runtime/src/run_store_adapter.rs) 降格转换，
 **不要在 store 里另写一份 `impl RunStore`**——那会变成两套几乎相同的方法，且有漂移风险
 （改一套忘另一套 → runtime 与 core 看到的状态不一致）。
 
@@ -121,7 +121,7 @@ if let Some(i) = cut {
 - [ ] 陈旧 lease 的恢复（`claim_stale_runs`）
 - [ ] timeline / list API
 - [ ] 迁移策略（package-owned SQL migration，见 `SCHEMA_MIGRATIONS.md` 体例）
-- [ ] 跑通共享契约测试套件（`packages/aa-workflow-runtime/src/store_contract.rs`）
+- [ ] 跑通共享契约测试套件（`packages/workflow-runtime/src/store_contract.rs`）
 
 ## `RunState` ≠ `ctx.state`（同名，但毫无关系）
 
@@ -223,6 +223,6 @@ now / emit / signal / runtime 各节，**唯独没有 `ctx.state`**——它没�
 
 - 上游 TS：`learn_ls/workflow/packages/workflow-store-drizzle-postgres`（全量实现 19 个方法，
   含 lease/timer/schedule/查询）与 `workflow-store-cloudflare-d1`
-- 本仓 `packages/aa-workflow-runtime/src/in_memory_store.rs`（`InMemoryExecutionStore`）
+- 本仓 `packages/workflow-runtime/src/in_memory_store.rs`（`InMemoryExecutionStore`）
 
 写新 adapter 时**照 TS 参考实现逐方法对照**，schema 也逐列对齐它的 `migrations/*.sql`。

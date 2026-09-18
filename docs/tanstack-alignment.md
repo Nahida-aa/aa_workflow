@@ -72,7 +72,7 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
 - **observability-only（不进日志，走 publisher）**：`RunStarted`、`StepStarted`、`StepProgress`；
 - **checkpoint（进日志，CAS append）**：`StepFinished`、`StepFailed`、`RunFinished`、`RunErrored`。
 
-「进日志」不等于「持久化」：日志怎么存由 [`RunStore`](packages/aa-workflow-core/src/run_store/mod.rs)
+「进日志」不等于「持久化」：日志怎么存由 [`RunStore`](packages/workflow-core/src/run_store/mod.rs)
 实现决定，`InMemoryStore` 进程一退就没了。
 
 ## 为什么第二轮把执行模型换成 handler 重放
@@ -189,7 +189,7 @@ RunWorkflowOptions::new(workflow, run_store)   // 必填两项由 new() 强制
 它不是一个包单独出生，那一个 commit 同时加了：
 
 ```
-packages/aa-workflow-runtime/                    runtime 本体（lease / sweep / timer / schedule）
+packages/workflow-runtime/                    runtime 本体（lease / sweep / timer / schedule）
 packages/workflow-vercel/                     host adapter ×4
 packages/workflow-netlify/
 packages/workflow-cloudflare/                 （次日 ba9cc31）

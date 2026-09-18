@@ -240,7 +240,7 @@ store 必须报 `StoreError::Io`，不许静默 no-op。
 
 采纳其命名与 store/event 契约；执行模型在**第二轮**才换成 handler 重放（第一版是
 显式 `needs` 图 + 调度器，已删除）。完整论证见 [`docs/tanstack-alignment.md`](docs/tanstack-alignment.md)，
-逐 API 对等矩阵见 [`packages/aa-workflow-core/PARITY.md`](packages/aa-workflow-core/PARITY.md)。
+逐 API 对等矩阵见 [`packages/workflow-core/PARITY.md`](packages/workflow-core/PARITY.md)。
 
 **不是差异的地方**（容易误读）：
 
@@ -267,7 +267,7 @@ store 必须报 `StoreError::Io`，不许静默 no-op。
 ## 仓库结构
 
 ```
-packages/aa-workflow-core/     引擎本体
+packages/workflow-core/     引擎本体
   src/define/mod.rs         handler 运行时：BaseCtx / StepCtx / StepOptions / Workflow
   src/define/define_workflow.rs  声明入口：create_workflow / WorkflowBuilder
   src/define/state_handle.rs  共享可变 state（对齐 TS 的 live 引用语义）
@@ -281,7 +281,7 @@ packages/aa-workflow-core/     引擎本体
   src/run_store/mod.rs      RunStore trait + RunState 信封
   src/run_store/in_memory.rs  InMemoryStore
   src/resource.rs           容量-1 的资源门
-packages/aa-workflow-runtime/  执行所有权层（lease / sweep / timer / schedule）
+packages/workflow-runtime/  执行所有权层（lease / sweep / timer / schedule）
   src/types.rs              19 个方法的结构体 + WorkflowExecutionStatus
   src/run_store_adapter.rs  WorkflowRunStoreAdapterStore + 降格适配器
   src/in_memory_store.rs    InMemoryExecutionStore

@@ -1,18 +1,18 @@
 [workspace]
 resolver = "3"
 members = [
-    "packages/aa-workflow-core",
+    "packages/workflow-core",
     "examples/shared",
-    "packages/aa-workflow-runtime",
+    "packages/workflow-runtime",
     "examples/guide",
-    "packages/aa-workflow-store-sqlx-postgres",
+    "packages/workflow-store-sqlx-postgres",
     "examples/store-file",
 ]
 # 裸 `cargo doc / build / test` 只作用于库包；examples 仍可用 `--workspace`
 # 或 `-p` 显式触及。动机：doc 首页默认只出三个库，example 的 crate 文档
 # （契约分界警示等）留给 `cargo doc --workspace` 的人看。
 default-members = [
-    "packages/aa-workflow-core",
-    "packages/aa-workflow-runtime",
-    "packages/aa-workflow-store-sqlx-postgres",
+    "packages/workflow-core",
+    "packages/workflow-runtime",
+    "packages/workflow-store-sqlx-postgres",
 ]

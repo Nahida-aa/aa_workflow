@@ -26,7 +26,7 @@
 
 ## 起点：core 刻意不做的事
 
-`packages/aa-workflow-core` 现在的边界（与上游 core 一致）：
+`packages/workflow-core` 现在的边界（与上游 core 一致）：
 
 - replay 引擎 + 耐久原语 + `RunStore` 契约
 - **不做**：调度、队列、worker 协调、timer 索引、schedule
@@ -356,7 +356,7 @@ runtime 的 lease；等真有 serverless 宿主接进来，那时自然知道 st
 
 #### 实测：上游的行为（2026-09-14，在 `learn_ls/workflow` 实跑）
 
-探针（`packages/aa-workflow-core/tests/probe.suspend.test.ts`，已清理）：
+探针（`packages/workflow-core/tests/probe.suspend.test.ts`，已清理）：
 
 | 挂起点 | 耗时 | 事件流 | 返回后 `RunState` |
 | --- | --- | --- | --- |
@@ -765,7 +765,7 @@ workflow-store-drizzle-postgres → 同一个函数
 其中 `in-memory-store.test.ts` **整个文件只有 8 行**——没有自己的用例，纯粹把
 契约跑在内存实现上。第二、第三个 store 之所以写得出来，就是因为有这份可执行规格。
 
-我们移植为 [`store_contract::run_store_contract`](../packages/aa-workflow-runtime/src/store_contract.rs)，
+我们移植为 [`store_contract::run_store_contract`](../packages/workflow-runtime/src/store_contract.rs)，
 15 条（对照上游 17 条，去掉了 2 条与我们未实现的 `awaiting` 投影相关的）：
 
 | 组 | 条款 |

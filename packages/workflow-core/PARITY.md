@@ -1,6 +1,6 @@
 # BaseCtx API 对等矩阵（aa-workflow Rust 端口 ↔ TanStack aa-workflow-core）
 
-对照真源：`learn_ls/workflow/packages/aa-workflow-core/src/types.ts`（BaseCtx /
+对照真源：`learn_ls/workflow/packages/workflow-core/src/types.ts`（BaseCtx /
 StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunWorkflowOptions.runtime）。
 本矩阵只覆盖 **ctx 层 API 对等**；引擎内部（checkpoint 日志、replay、RunState 信封）
 的对等由各自文档描述，不在本表。

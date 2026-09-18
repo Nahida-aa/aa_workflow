@@ -1,7 +1,7 @@
 //! 共享契约套件的运行入口（第二次兑现「一份规格，N 个实现共用」）。
 //!
 //! 直接调 `aa_workflow_runtime::store_contract::run_store_contract`——**不另写一套**。
-//! 第一个跑它的是 `packages/aa-workflow-store-sqlx-postgres`，这里是第二个。
+//! 第一个跑它的是 `packages/workflow-store-sqlx-postgres`，这里是第二个。
 //!
 //! # 隔离
 //!

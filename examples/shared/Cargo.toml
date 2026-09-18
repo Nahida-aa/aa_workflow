@@ -6,7 +6,7 @@ publish = false
 description = "Host-agnostic example layer for aa-workflow-core (workflows + run-store + runtime glue)"
 
 [dependencies]
-aa-workflow-core = { path = "../../packages/aa-workflow-core" }
+aa-workflow-core = { path = "../../packages/workflow-core" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

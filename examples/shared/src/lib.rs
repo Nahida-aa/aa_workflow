@@ -18,7 +18,7 @@
 //! store adapter 请勿照它**，参考这两个：
 //!
 //! - [`examples/store-file`](../../store-file) — 文件落盘，实现新契约（单进程）
-//! - [`packages/aa-workflow-store-sqlx-postgres`](../../../packages/aa-workflow-store-sqlx-postgres)
+//! - [`packages/workflow-store-sqlx-postgres`](../../../packages/workflow-store-sqlx-postgres)
 //!   — Postgres，实现新契约（生产级 / 多 worker）
 //!
 //! 保留本 crate 的原因：它对齐 TanStack `examples/deployment-pocs/shared` 的位置，

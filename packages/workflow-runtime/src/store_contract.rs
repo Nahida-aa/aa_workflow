@@ -1,6 +1,6 @@
 //! `WorkflowExecutionStore` 契约测试。
 //!
-//! 对齐上游 `packages/aa-workflow-runtime/tests/contracts/workflow-execution-store.contract.ts`
+//! 对齐上游 `packages/workflow-runtime/tests/contracts/workflow-execution-store.contract.ts`
 //! ——那边是一份 657 行的 vitest 套件，被**三个 store** 复用：
 //!
 //! ```text

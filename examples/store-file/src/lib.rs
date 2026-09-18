@@ -20,7 +20,7 @@
 //! | --- | --- | --- |
 //! | `examples/shared`（`FileRunStore`） | `aa_workflow_core::RunStore`（旧） | 与上游示例对账 |
 //! | 本 crate（`FileExecutionStore`） | `WorkflowExecutionStore`（新） | store adapter 的参考实现 |
-//! | `packages/aa-workflow-store-sqlx-postgres` | `WorkflowExecutionStore`（新） | 生产级 / 多 worker |
+//! | `packages/workflow-store-sqlx-postgres` | `WorkflowExecutionStore`（新） | 生产级 / 多 worker |
 //!
 //! # 与 `-sqlx-postgres` 的分工：单进程 vs 多 worker
 //!
@@ -30,7 +30,7 @@
 //!   文件系统没有 `select ... for update skip locked` 那样的原子原语，
 //!   真做跨进程 lease 要引入文件锁（flock），而它在 NFS 等场景不可靠。
 //! - **多 worker / serverless 场景请用
-//!   [`workflow-store-sqlx-postgres`](../../packages/aa-workflow-store-sqlx-postgres)**，
+//!   [`workflow-store-sqlx-postgres`](../../packages/workflow-store-sqlx-postgres)**，
 //!   它用 Postgres 的行锁做 CAS 与 lease。
 //!
 //! 这不是「简化版」的托词：契约套件本来就用**显式时间戳**模拟竞争而非真并发
