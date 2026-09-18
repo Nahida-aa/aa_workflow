@@ -1,4 +1,5 @@
 - 需要有批判性思维(可以质疑)
+- 另外文件可以放项目下的 tmp/ 目录
 
 ## Store adapter 实现哪个契约：`WorkflowExecutionStore`（不是 `RunStore`）
 
@@ -36,10 +37,10 @@ WorkflowRunStoreAdapterStore       本仓 runtime 的存储基础：元数据信
 
 两个契约**不是包含关系，是各有各的**：
 
-| 能力 | core 的 `RunStore`（旧） | `WorkflowExecutionStore`（新） |
-| --- | --- | --- |
+| 能力                                   | core 的 `RunStore`（旧）      | `WorkflowExecutionStore`（新）      |
+| -------------------------------------- | ----------------------------- | ----------------------------------- |
 | `truncate_log_at_step`（**本地扩展**） | ✅ 有 —— `continue_from` 靠它 | ❌ **没有**（它对齐上游，上游没有） |
-| lease / timer / schedule / 查询 | ❌ 没有 | ✅ 有 |
+| lease / timer / schedule / 查询        | ❌ 没有                       | ✅ 有                               |
 
 所以**走新契约的 store，`continue_from` 一定失败**。适配器如实报错而非静默 no-op
 （`run_store_adapter.rs:451`），失败信息指向 `truncate_log_at_step`。实测见
@@ -76,10 +77,10 @@ if let Some(i) = cut {
 因为**引擎没有「step 是否执行过」这种独立状态**——它只认日志里有没有该 step 的终态
 事件。`ctx.step(id)` 在重放时的行为完全由日志决定：
 
-| 日志里 | `ctx.step(id)` 的行为 |
-| --- | --- |
-| **有** `StepFinished/StepFailed(id)` | **短路** —— 返回缓存结果，闭包**不执行** |
-| **没有** | 真正执行闭包，跑完 append 一条新 checkpoint |
+| 日志里                               | `ctx.step(id)` 的行为                       |
+| ------------------------------------ | ------------------------------------------- |
+| **有** `StepFinished/StepFailed(id)` | **短路** —— 返回缓存结果，闭包**不执行**    |
+| **没有**                             | 真正执行闭包，跑完 append 一条新 checkpoint |
 
 所以：
 
@@ -87,7 +88,7 @@ if let Some(i) = cut {
 > 使那段重放时不再短路。**
 
 这也解释了 `continue_from` 为什么放在 **store 层**而不是引擎里
-（`run_workflow.rs:135` 原注释：*"continue_from lives at the store layer"*）——
+（`run_workflow.rs:135` 原注释：_"continue_from lives at the store layer"_）——
 它是**日志操作**，不是引擎操作。
 
 ### 三个常被忽略的推论
@@ -98,8 +99,8 @@ if let Some(i) = cut {
 2. **副作用会真的再发生一次**（闭包被重新调用）。所以 `continue_from` 的语义是
    **重跑**，不是"续命"。有真实副作用的 step 必须用 `stepCtx.id` 做外部系统的幂等键。
 3. **对没有终态 checkpoint 的 step，它是 no-op 且不报错**
-   （`run_store/mod.rs:214-218`：*"there is nothing to cut — resume would re-run it
-   anyway"*）。逻辑自洽：没 checkpoint 的本来就会重跑。
+   （`run_store/mod.rs:214-218`：_"there is nothing to cut — resume would re-run it
+   anyway"_）。逻辑自洽：没 checkpoint 的本来就会重跑。
 
 ### 没有任何东西被「回滚」
 
@@ -127,14 +128,14 @@ if let Some(i) = cut {
 这是本仓**最容易混淆**的一对名字，混淆后会把「持久化的 run 元数据」和「handler 的
 业务状态」当成一回事。区分：
 
-| | `RunState<TInput, TOutput>` | `ctx.state: TState` |
-| --- | --- | --- |
-| 是什么 | run 的**持久化元数据信封**（store 存它） | workflow 的**业务状态**（handler 用） |
-| 定义处 | `workflow-core/src/run_store/mod.rs`（上游 `types.ts:540`） | `BaseCtx<TInput, TState>` 的 `state` 字段 |
-| 怎么声明 | 固定结构，无 schema | `.state::<T>()` + `.initialize(...)` |
-| 谁消费 | **store**（路由 / 恢复 / 审计） | **handler**（`ctx.state.count += 1`） |
-| 存哪 | **持久化**（表 `workflow_run_states` / `workflow_runs`） | **不持久化**，每次 resume 由 `initialize(input)` 重建 |
-| 装什么 | `run_id` / `status` / `input` / `output` / `error` / `waiting_for` / `pending_approval` / 时间戳 | 任意业务字段 |
+|          | `RunState<TInput, TOutput>`                                                                      | `ctx.state: TState`                                   |
+| -------- | ------------------------------------------------------------------------------------------------ | ----------------------------------------------------- |
+| 是什么   | run 的**持久化元数据信封**（store 存它）                                                         | workflow 的**业务状态**（handler 用）                 |
+| 定义处   | `workflow-core/src/run_store/mod.rs`（上游 `types.ts:540`）                                      | `BaseCtx<TInput, TState>` 的 `state` 字段             |
+| 怎么声明 | 固定结构，无 schema                                                                              | `.state::<T>()` + `.initialize(...)`                  |
+| 谁消费   | **store**（路由 / 恢复 / 审计）                                                                  | **handler**（`ctx.state.count += 1`）                 |
+| 存哪     | **持久化**（表 `workflow_run_states` / `workflow_runs`）                                         | **不持久化**，每次 resume 由 `initialize(input)` 重建 |
+| 装什么   | `run_id` / `status` / `input` / `output` / `error` / `waiting_for` / `pending_approval` / 时间戳 | 任意业务字段                                          |
 
 **上游专门写了一句注释来排斥这种混淆**（`workflow-core/src/types.ts:534-536`）：
 
