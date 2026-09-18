@@ -50,7 +50,16 @@
 //! `run.json` 与 `exec.json` 分开存，对应 Postgres 版那两张像似的表
 //! （`workflow_run_states` / `workflow_runs`）——**lease 字段只在后者**，
 //! 因为那是 runtime 的「执行所有权」概念，core 的 `RunState` 里没有。
+//!
+//! # 目录
+//!
+//! - [`file_store`] — `FileExecutionStore` 本体（新契约的落盘实现）
+//! - [`mod@dub_sf_ocr`] — 一个可复用的示例 workflow：LocalDub `dub_sf_ocr` 的
+//!   **两分支并行**形状。放在 `src/` 而非测试里，是为了别人也能
+//!   `use workflow_store_file::dub_sf_ocr` 拿去驱动自己的 store。
 
+pub mod dub_sf_ocr;
 pub mod file_store;
 
+pub use dub_sf_ocr::{DubSfOcrInput, DubSfOcrState, dub_sf_ocr};
 pub use file_store::FileExecutionStore;
