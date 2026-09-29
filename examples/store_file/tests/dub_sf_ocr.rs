@@ -243,15 +243,21 @@ async fn dub_sf_ocr_replay_short_circuits() {
     let _ = std::fs::remove_dir_all(base);
 }
 
-/// 每个 step 都**读 typed state**：产物路径由 `state.video_dir` 派生，译文文件名
-/// 带 `state.target_lang`。换个输入，10 个 step 的产物路径应全变——若哪天有人
-/// 把路径写死成字面量，这条会红。
+/// 每个 step 有**自己的**返回形状，且路径由 typed state 派生。
+///
+/// 这条以前是个循环，断言 10 个 step 的结果都有 `["artifact"]` 和
+/// `["targetLang"]`——那是在强制一个假形状：`target_lang` 出现在每个 step 的
+/// 返回里，只是把 state 回显伪装成产物，而真正的产物差异全压在一个字符串
+/// 字面量里。现在逐步骤钉死完整 JSON。
+///
+/// 换句话说：这张表是「step 返回值形状」的唯一真源，谁改了某个 step 产出什么，
+/// 这里立刻红。
 #[tokio::test]
-async fn dub_sf_ocr_steps_read_typed_state() {
+async fn dub_sf_ocr_each_step_has_its_own_shape() {
     let _guard = DUB_PROBE_LOCK.lock().await;
     dub_probe::reset();
 
-    let base = temp_base("typed_state");
+    let base = temp_base("shapes");
     let rt = get_workflow_runtime(&base);
     let out = rt
         .start_run(WorkflowRuntimeStartRunArgs {
@@ -264,25 +270,124 @@ async fn dub_sf_ocr_steps_read_typed_state() {
         .unwrap();
     assert_eq!(out.kind, RunResultKind::Completed);
 
+    // 10 个 step → 10 份互不相同的产物。`sf_ocr_pre` 的 frames 往下传到
+    // `sf_ocr`，`tts` 的 wavs 决定 `mix_audio` 的时长——所以这张表同时也是
+    // 「数据真的在 step 之间流动」的证据，而不只是形状快照。
+    let expected: [(&str, serde_json::Value); 10] = [
+        (
+            "separate",
+            serde_json::json!({
+                "vocals": "/w/1/separate/target_3_vocals.wav",
+                "bgm": "/w/1/separate/target_bgm.wav",
+            }),
+        ),
+        (
+            "separate_after",
+            serde_json::json!({
+                // 人声轨原样来自 separate 的产物
+                "vocals": "/w/1/separate/target_3_vocals.wav",
+                "bgm": "/w/1/separate_after/target_bgm.wav",
+            }),
+        ),
+        (
+            "sf_ocr_pre",
+            serde_json::json!({ "dir": "/w/1/sf_ocr_pre/frames", "frames": 12 }),
+        ),
+        (
+            "sf_ocr",
+            // segments 来自 sf_ocr_pre 的 frames
+            serde_json::json!({ "srt": "/w/1/sf_ocr/raw.srt", "segments": 12 }),
+        ),
+        (
+            "sf_ocr_fix",
+            serde_json::json!({ "srt": "/w/1/sf_ocr_fix/fixed.srt", "repaired": 2 }),
+        ),
+        (
+            "translate",
+            // path 带 state 的目标语言；segments 来自 sf_ocr_fix 的 repaired
+            serde_json::json!({
+                "path": "/w/1/translate/vi.json",
+                "targetLang": "vi",
+                "segments": 3,
+            }),
+        ),
+        (
+            "split_audio",
+            serde_json::json!({ "path": "/w/1/split_audio/timings.json", "segments": 3 }),
+        ),
+        (
+            "tts",
+            // wavs 来自 split_audio 的 segments
+            serde_json::json!({ "dir": "/w/1/tts/wavs", "wavs": 3 }),
+        ),
+        (
+            "mix_audio",
+            // ms = 1000 + wavs * 120
+            serde_json::json!({ "path": "/w/1/mix_audio/audio_dubbing.wav", "ms": 1360 }),
+        ),
+        (
+            "mix_video",
+            // ms 原样来自 mix_audio
+            serde_json::json!({
+                "path": "/w/1/mix_video/dub_sf_ocr.mp4",
+                "ms": 1360,
+                // 记录 mux 进去的是哪条音轨
+                "audio": "/w/1/mix_audio/audio_dubbing.wav",
+            }),
+        ),
+    ];
+
     let events = events_of(&rt, "dub-1");
-    for step in DUB_ALL_STEPS {
-        let artifact = step_output(&events, step);
-        let path = artifact["artifact"].as_str().unwrap_or_default();
-        assert!(
-            path.starts_with("/w/1/"),
-            "{step} 的产物路径应由 state.video_dir 派生，实际 {path}"
-        );
+    for (step, want) in expected {
         assert_eq!(
-            artifact["targetLang"], "vi",
-            "{step} 应读到 typed state 的 target_lang"
+            step_output(&events, step),
+            want,
+            "{step} 的产物形状/内容不符"
         );
     }
 
-    // translate 的译文文件名带目标语言。
-    assert_eq!(
-        step_output(&events, "translate")["artifact"],
-        "/w/1/translate/vi.json"
-    );
+    let _ = std::fs::remove_dir_all(base);
+}
+
+/// 10 个 step 的产物形状**互不相同**——不是同一个类型换了个字符串。
+///
+/// 唯一的例外是 `separate` / `separate_after`：两轮都产出一对音轨，同形状是
+/// 如实如此，不该硬造第二个形状相同的类型。这条例外显式写在这里，而不是靠
+/// 「碰巧不撞」蒙混。
+#[tokio::test]
+async fn dub_sf_ocr_step_shapes_are_distinct() {
+    let _guard = DUB_PROBE_LOCK.lock().await;
+    dub_probe::reset();
+
+    let base = temp_base("distinct");
+    let rt = get_workflow_runtime(&base);
+    drive(&rt, "dub-1", dub_input()).await;
+
+    let events = events_of(&rt, "dub-1");
+    // 只看 key 集合（值不同是正常的），按 step 名索引。
+    let fields: HashMap<&str, Vec<String>> = DUB_ALL_STEPS
+        .iter()
+        .map(|s| {
+            let v = step_output(&events, s);
+            let obj = v.as_object().unwrap_or_else(|| panic!("{s} 的产物应是对象，实际 {v}"));
+            let mut keys: Vec<String> = obj.keys().cloned().collect();
+            keys.sort();
+            (*s, keys)
+        })
+        .collect();
+
+    for (i, a) in DUB_ALL_STEPS.iter().enumerate() {
+        for b in &DUB_ALL_STEPS[i + 1..] {
+            let both_separate = matches!(*a, "separate" | "separate_after")
+                && matches!(*b, "separate" | "separate_after");
+            assert!(
+                both_separate || fields[a] != fields[b],
+                "{a} 与 {b} 的产物形状不该相同：{:?} vs {:?}",
+                fields[a],
+                fields[b]
+            );
+        }
+    }
 
     let _ = std::fs::remove_dir_all(base);
 }
@@ -300,10 +405,9 @@ async fn dub_sf_ocr_state_defaults_target_lang() {
     assert_eq!(out.kind, RunResultKind::Completed);
 
     let events = events_of(&rt, "dub-1");
-    assert_eq!(
-        step_output(&events, "translate")["artifact"],
-        "/w/2/translate/zh.json"
-    );
+    let tr = step_output(&events, "translate");
+    assert_eq!(tr["path"], "/w/2/translate/zh.json");
+    assert_eq!(tr["targetLang"], "zh");
 
     let _ = std::fs::remove_dir_all(base);
 }

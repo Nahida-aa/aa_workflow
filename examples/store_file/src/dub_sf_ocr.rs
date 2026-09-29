@@ -115,70 +115,238 @@ pub mod dub_probe {
     }
 }
 
-/// 每个桩 step 的产物形状。
-///
-/// `step<T>` 泛型化之前，core 把返回值固定成 `serde_json::Value`，这个结构体
-/// 会在 `step()` 边界上被抹平，handler 侧只能写 `branch_a["vocals"]` 那种无类型
-/// 下标——编译通过，但产物形状错了编译期也不知道。现在 `step` 带上了 `T`，下面
-/// 这行 `let vocals: DubArtifact = ctx.step(..)` 由闭包的返回类型直接推出来。
-///
-/// 注意耐久表示**仍然是** `Value`：日志里存的是 `to_value` 的结果，只有 replay
-/// 时才反序列化回 `T`（`engine/mod.rs` 的 `exec_step`）。所以 `T` 必须能挺过一次
-/// JSON 往返——见 `BaseCtx::step` 的 `# Bound on T`。
-// `Deserialize` 不是可选的：replay 路径要靠它把日志里的 `Value` 还原成 `T`。
-// 即使闭包只「造」这个类型、从不吃它，也得 derive——这是 `step<T>` 的固有成本。
-#[derive(serde::Serialize, serde::Deserialize)]
+// ─── 每个 step 一个返回类型 ────────────────────────────────────────────────
+//
+// 之前 10 个 step 共用一个 `DubArtifact { artifact, target_lang, output_mode }`，
+// 形状对每个 step 都是假的：`target_lang` / `output_mode` 只是把 state 回显一遍，
+// 真正的产物差异全压在一个字符串字面量里。现在每个 step 返回**它实际产出的东西**，
+// 于是 `step<T>` 的泛型才真的在做事——10 个 step 推导出 9 个不同的 `T`。
+//
+// `separate` 和 `separate_after` 共用 `Separated` 是如实反映：两轮都产出
+// 同样的一对音轨，没有必要硬造第二个形状相同的类型。
+
+/// `separate` / `separate_after`：分离出的人声 + 伴奏两条轨。
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DubArtifact {
-    artifact: String,
+struct Separated {
+    vocals: String,
+    bgm: String,
+}
+
+/// `sf_ocr_pre`：subtitle-finder 抽出的关键帧。
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Keyframes {
+    dir: String,
+    frames: u32,
+}
+
+/// `sf_ocr`：关键帧识别出的原始字幕（未校正）。
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawSubtitle {
+    srt: String,
+    segments: u32,
+}
+
+/// `sf_ocr_fix`：校正后的字幕 + 实际改动数。
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FixedSubtitle {
+    srt: String,
+    repaired: u32,
+}
+
+/// `translate`：译文。`target_lang` 属于**这个** step 的结果（之前它出现在
+/// 每个 step 的返回里，那是把 state 回显伪装成产物）。
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Translated {
+    path: String,
     target_lang: String,
-    output_mode: String,
+    segments: u32,
 }
 
-/// 分支 A 的聚合。`tokio::try_join!` 要求两支同类型，所以这里让 A 产出自己的
-/// 具名结构体，而不是 `json!` 现场拼一个 `Value`。handler 侧因此是
-/// `branch_a.vocals` 而不是 `branch_a["vocals"]`。
-#[derive(serde::Serialize, serde::Deserialize)]
+/// `split_audio`：按字幕时间轴切分出的分段表。
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DubBranchA {
-    vocals: DubArtifact,
-    bgm: DubArtifact,
+struct Timings {
+    path: String,
+    segments: u32,
 }
 
-/// 桩 step：**从 typed state 读**字段，拼出它「产出」的产物路径 →
-/// 记录 → 计并发 → 模拟耗时。
+/// `tts`：逐段合成出的一批 wav。
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TtsBatch {
+    dir: String,
+    wavs: u32,
+}
+
+/// `mix_audio`：人声轨被 TTS 替换后的成品音轨。
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MixedAudio {
+    path: String,
+    ms: u64,
+}
+
+/// `mix_video`：成品视频。多带一条 `audio`——记录 mux 进去的是哪条音轨，
+/// 这不是凑形状：混音出问题时这是第一个要看的字段。
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MixedVideo {
+    path: String,
+    ms: u64,
+    audio: String,
+}
+
+/// 桩 step 的公共**行为**：计并发 → 记一行 → 模拟耗时。
 ///
-/// `st` 取**共享引用**而非按值，这样「step 只读 state」这条规则由类型系统保证 ——
-/// `dub_step` 在签名层面就**无法**写 state（`&DubSfOcrState` 没有 `DerefMut` 路径）。
-/// 这与 `docs/concepts/ctx-state.md` 的结论一致：step 闭包的唯一耐久输出通道是
-/// **返回值**，state 不是那条通道，所以这里连类型都不给它留。
+/// 只抽行为，不抽签名。每个 step 的入参（消费上游产物）和返回类型各不相同，
+/// 那正是这个示例要展示的东西——把它们压成一个 `dub_step(&st, "字面量", ms)`
+/// 就等于把 `step<T>` 退化回 `Value`。
 ///
-/// 产物路径**由 state 派生**（而不是硬编码字面量），这正是「每个 step 都读带类型
-/// 的 state」的落点：换个 `videoDir` / `targetLang`，10 个 step 的产物路径全变。
-///
-/// 不落盘、不读 LocalDub（示例层强约束）。
-async fn dub_step(st: &DubSfOcrState, artifact: &str, millis: u64) -> anyhow::Result<DubArtifact> {
+/// 所有入参都以 `&DubSfOcrState` 打头且只取共享引用，于是「step 只读 state」
+/// 这条规则由类型系统保证：`&DubSfOcrState` 没有 `DerefMut` 路径，写不进去。
+/// 这与 `docs/concepts/ctx-state.md` 的结论一致——step 闭包唯一耐久的输出
+/// 通道是返回值，state 不是那条通道，所以这里连类型都不给它留。
+async fn stub(st: &DubSfOcrState, name: &str, millis: u64) {
     dub_probe::enter();
-    let path = format!("{}/{}", st.video_dir, artifact);
     tracing::info!(
         target: "examples",
-        "dub-sf-ocr: {path} (mode={}, source={}, lang={})",
+        "dub-sf-ocr: {name} (mode={}, source={}, lang={})",
         st.output_mode,
         st.subtitle_source,
         st.target_lang
     );
     tokio::time::sleep(std::time::Duration::from_millis(millis)).await;
     dub_probe::leave();
-    Ok(DubArtifact {
-        artifact: path,
-        target_lang: st.target_lang.clone(),
-        output_mode: st.output_mode.clone(),
+}
+
+/// 分支 A 第 1 步：无入参产物，产出两条轨。
+async fn separate(st: &DubSfOcrState) -> anyhow::Result<Separated> {
+    stub(st, "separate", 50).await;
+    Ok(Separated {
+        vocals: format!("{}/separate/target_3_vocals.wav", st.video_dir),
+        bgm: format!("{}/separate/target_bgm.wav", st.video_dir),
     })
 }
 
-/// 每个桩 step 的模拟耗时。两分支并行跑完的总时长 ≈ `max(A, B) + 尾部`，
-/// 明显短于 10 步串行。
-const DUB_STEP_MS: u64 = 50;
+/// 分支 A 第 2 步：**消费**上一轮的分轨。
+async fn separate_after(st: &DubSfOcrState, prev: &Separated) -> anyhow::Result<Separated> {
+    stub(st, "separate_after", 50).await;
+    Ok(Separated {
+        // 人声轨是上一轮的输入，所以这里能看到数据真的流过来了。
+        vocals: prev.vocals.clone(),
+        bgm: format!("{}/separate_after/target_bgm.wav", st.video_dir),
+    })
+}
+
+/// 分支 B 第 1 步：抽关键帧。
+async fn sf_ocr_pre(st: &DubSfOcrState) -> anyhow::Result<Keyframes> {
+    stub(st, "sf_ocr_pre", 50).await;
+    Ok(Keyframes {
+        dir: format!("{}/sf_ocr_pre/frames", st.video_dir),
+        frames: 12,
+    })
+}
+
+/// 分支 B 第 2 步：**消费**关键帧目录，产出字幕。
+async fn sf_ocr(st: &DubSfOcrState, frames: &Keyframes) -> anyhow::Result<RawSubtitle> {
+    stub(st, "sf_ocr", 50).await;
+    Ok(RawSubtitle {
+        srt: format!("{}/sf_ocr/raw.srt", st.video_dir),
+        segments: frames.frames,
+    })
+}
+
+/// 分支 B 第 3 步：**消费**原始字幕，产出校正后的。
+async fn sf_ocr_fix(st: &DubSfOcrState, raw: &RawSubtitle) -> anyhow::Result<FixedSubtitle> {
+    stub(st, "sf_ocr_fix", 50).await;
+    Ok(FixedSubtitle {
+        srt: format!("{}/sf_ocr_fix/fixed.srt", st.video_dir),
+        // 修复数不可能超过原始段数——`raw` 真的参与了计算。
+        repaired: 2.min(raw.segments),
+    })
+}
+
+/// 分支 B 第 4 步：**消费**校正后的字幕 + 读 state 的目标语言。
+///
+/// 这是全流程唯一正当使用 `target_lang` 的地方——译文的目标语言本来就是
+/// translate 这一步的产物。之前它出现在 10 个 step 的返回里，等于把 state
+/// 回显伪装成产物。
+async fn translate(st: &DubSfOcrState, fixed: &FixedSubtitle) -> anyhow::Result<Translated> {
+    stub(st, "translate", 50).await;
+    Ok(Translated {
+        path: format!("{}/translate/{}.json", st.video_dir, st.target_lang),
+        target_lang: st.target_lang.clone(),
+        segments: fixed.repaired + 1,
+    })
+}
+
+/// 汇聚第 1 步：**同时消费两支**——分支 A 的人声轨 + 分支 B 的译文。
+///
+/// 之前这条注释写着「split_audio 吃 A 的人声 + B 的译文」，但签名里两者都没接。
+async fn split_audio(
+    st: &DubSfOcrState,
+    vocals: &Separated,
+    translated: &Translated,
+) -> anyhow::Result<Timings> {
+    stub(st, "split_audio", 50).await;
+    let path = format!("{}/split_audio/timings.json", st.video_dir);
+    tracing::debug!(
+        target: "examples",
+        "按 {} 段译文切分 {}", translated.segments, vocals.vocals
+    );
+    Ok(Timings {
+        path,
+        segments: translated.segments,
+    })
+}
+
+/// 汇聚第 2 步：**消费**分段表，产出逐段 wav。
+async fn tts(st: &DubSfOcrState, timings: &Timings) -> anyhow::Result<TtsBatch> {
+    stub(st, "tts", 50).await;
+    Ok(TtsBatch {
+        dir: format!("{}/tts/wavs", st.video_dir),
+        wavs: timings.segments,
+    })
+}
+
+/// 汇聚第 3 步：**消费**人声轨 + TTS 批次。
+async fn mix_audio(
+    st: &DubSfOcrState,
+    vocals: &Separated,
+    tts: &TtsBatch,
+) -> anyhow::Result<MixedAudio> {
+    stub(st, "mix_audio", 50).await;
+    let path = format!("{}/mix_audio/audio_dubbing.wav", st.video_dir);
+    tracing::debug!(target: "examples", "用 {} 覆盖 {} 段 TTS", vocals.vocals, tts.wavs);
+    Ok(MixedAudio {
+        path,
+        ms: 1_000 + tts.wavs as u64 * 120,
+    })
+}
+
+/// 汇聚第 4 步：**消费**伴奏轨 + 成品音轨，产出成品视频。
+///
+/// 之前这里写的是字面量 `"mix_video/dub_sf_ocr/{id}.mp4"`——那既不是
+/// format string，也没有 `id` 这个变量，是个从 LocalDub 抄过来忘了改的壳。
+async fn mix_video(
+    st: &DubSfOcrState,
+    separated: &Separated,
+    audio: &MixedAudio,
+) -> anyhow::Result<MixedVideo> {
+    stub(st, "mix_video", 50).await;
+    let path = format!("{}/mix_video/dub_sf_ocr.mp4", st.video_dir);
+    tracing::debug!(target: "examples", "{} 叠 {} -> {}", separated.bgm, audio.path, path);
+    Ok(MixedVideo {
+        path,
+        ms: audio.ms,
+        audio: audio.path.clone(),
+    })
+}
 
 /// LocalDub `dub_sf_ocr` pipeline 的形状：**两分支并行 → split_audio 汇聚**。
 ///
@@ -211,100 +379,119 @@ pub fn dub_sf_ocr() -> WorkflowDefinition<DubSfOcrInput, serde_json::Value, DubS
 
         // 只读快照，clone 一次即可。
         //
-        // step 闭包的 bound 是 `FnOnce(StepCtx) -> Fut + Clone + Send + 'static`
-        // （`define/mod.rs:184`），`'static` 只禁止**借用** `ctx`，不禁止共享所有权。
-        // 所以每个 step 各写一遍 `(*ctx.state).clone()` 是不必要的 —— 那是 10 次
-        // 深拷贝（每次 4 个 String）。改成 `Arc` 后：1 次深拷贝 + 10 次引用计数 +1。
+        // step 闭包的 bound 是 `FnOnce(StepCtx) -> Fut + Clone + Send + 'static`，
+        // `'static` 只禁止**借用** `ctx`，不禁止共享所有权。所以每个 step 各写
+        // 一遍 `(*ctx.state).clone()` 是 10 次无谓的深拷贝（每次 4 个 String）。
         //
-        // ⚠️ 这个写法成立的前提是**本 workflow 在 `initialize` 之后不再写 state**。
-        // 若中途有写，早先取的那份快照会变陈旧，必须改成在写之后重新取。
+        // ⚠️ 成立前提：本 workflow 在 `initialize` 之后不再写 state。若中途有写，
+        // 早先取的那份快照会变陈旧，必须在写之后重新取。
         let state = Arc::new((*ctx.state).clone());
 
-        // 两条分支共享同一个 `&ctx`——`step(&self)` 只拿共享借用，并发的
-        // `&ctx` 合法，不需要 `ctx.clone()`。分支块用 `async`（非 `async move`）：
+        // 两条分支共享同一个 `&ctx`——`step(&self)` 只拿共享借用，并发的 `&ctx`
+        // 合法，不需要 `ctx.clone()`。分支块用 `async`（非 `async move`）：
         // `move` 会试图按值捕获 `ctx`，两个块各抢一份就冲突了。
-        let (branch_a, branch_b) = tokio::try_join!(
+        //
+        // `try_join!` 返回 `Result<(A, B), E>`——A / B **不需要**同类型（只有
+        // error 类型要统一），所以这里 A 是 `Separated`、B 是 `Translated`。
+        let (separated, translated) = tokio::try_join!(
             async {
-                // 分支 A：音源分离
+                // 分支 A：分离人声 + 伴奏。
                 let st = Arc::clone(&state);
-                let vocals = ctx
-                    .step("separate", move |_sc: StepCtx| async move {
-                        dub_step(&st, "separate/target_3_vocals.wav", DUB_STEP_MS).await
-                    })
+                let sep = ctx
+                    .step("separate", move |_sc: StepCtx| async move { separate(&st).await })
                     .await?;
                 let st = Arc::clone(&state);
-                let bgm = ctx
-                    .step("separate_after", move |_sc: StepCtx| async move {
-                        dub_step(&st, "separate_after/target_bgm.wav", DUB_STEP_MS).await
-                    })
-                    .await?;
-                Ok::<_, anyhow::Error>(DubBranchA { vocals, bgm })
+                ctx.step("separate_after", move |_sc: StepCtx| {
+                    // 闭包是 `FnOnce + Clone`，重试时会被调用多次，所以上游产物在
+                    // 闭包**体内**克隆（每次 attempt 一份），不能在外面 move 走。
+                    let prev = sep.clone();
+                    async move { separate_after(&st, &prev).await }
+                })
+                .await
             },
             async {
-                // 分支 B：OCR 提字 + 翻译
+                // 分支 B：抽关键帧 → OCR → 校正 → 翻译，四步串成一条链。
                 let st = Arc::clone(&state);
-                ctx.step("sf_ocr_pre", move |_sc: StepCtx| async move {
-                    dub_step(&st, "sf_ocr_pre/frames", DUB_STEP_MS).await
-                })
-                .await?;
+                let frames = ctx
+                    .step("sf_ocr_pre", move |_sc: StepCtx| async move { sf_ocr_pre(&st).await })
+                    .await?;
                 let st = Arc::clone(&state);
-                ctx.step("sf_ocr", move |_sc: StepCtx| async move {
-                    dub_step(&st, "sf_ocr/frames.json", DUB_STEP_MS).await
-                })
-                .await?;
-                let st = Arc::clone(&state);
-                ctx.step("sf_ocr_fix", move |_sc: StepCtx| async move {
-                    dub_step(&st, "sf_ocr_fix/srt.json", DUB_STEP_MS).await
-                })
-                .await?;
-                let st = Arc::clone(&state);
-                let translated = ctx
-                    .step("translate", move |_sc: StepCtx| async move {
-                        // 译文文件名带 state 里的目标语言——typed state 真的被用到。
-                        let name = format!("translate/{}.json", st.target_lang);
-                        dub_step(&st, &name, DUB_STEP_MS).await
+                let raw = ctx
+                    .step("sf_ocr", move |_sc: StepCtx| {
+                        let prev = frames.clone();
+                        async move { sf_ocr(&st, &prev).await }
                     })
                     .await?;
-                Ok::<_, anyhow::Error>(translated)
+                let st = Arc::clone(&state);
+                let fixed = ctx
+                    .step("sf_ocr_fix", move |_sc: StepCtx| {
+                        let prev = raw.clone();
+                        async move { sf_ocr_fix(&st, &prev).await }
+                    })
+                    .await?;
+                let st = Arc::clone(&state);
+                ctx.step("translate", move |_sc: StepCtx| {
+                    let prev = fixed.clone();
+                    async move { translate(&st, &prev).await }
+                })
+                .await
             },
         )?;
 
-        // 汇聚：split_audio 吃 A 的人声 + B 的译文。
+        // workflow 出口要用的副本先留好（下面会把原件 move 进闭包）。克隆的都是
+        // 几个 String，不是深拷贝 state。
+        let out_separated = separated.clone();
+        let out_translated = translated.clone();
+
+        // 汇聚：split_audio 同时吃两支的产物。`separated` 后面还有两个 step 要用。
+        let split_input = separated.clone();
         let st = Arc::clone(&state);
-        let split = ctx
-            .step("split_audio", move |_sc: StepCtx| async move {
-                dub_step(&st, "split_audio/timings.json", DUB_STEP_MS).await
+        let timings = ctx
+            .step("split_audio", move |_sc: StepCtx| {
+                let (sep, tr) = (split_input.clone(), translated.clone());
+                async move { split_audio(&st, &sep, &tr).await }
             })
             .await?;
+        let out_timings = timings.clone();
+
         let st = Arc::clone(&state);
         let tts = ctx
-            .step("tts", move |_sc: StepCtx| async move {
-                dub_step(&st, "tts/wavs", DUB_STEP_MS).await
+            .step("tts", move |_sc: StepCtx| {
+                let prev = timings.clone();
+                async move { tts(&st, &prev).await }
             })
             .await?;
+        let out_tts = tts.clone();
+
+        let split_audio_input = separated.clone();
         let st = Arc::clone(&state);
-        let mix_audio = ctx
-            .step("mix_audio", move |_sc: StepCtx| async move {
-                dub_step(&st, "mix_audio/audio_dubbing.wav", DUB_STEP_MS).await
-            })
-            .await?;
-        let st = Arc::clone(&state);
-        let mix_video = ctx
-            .step("mix_video", move |_sc: StepCtx| async move {
-                // 这里才用上分支 A 的 bgm。
-                dub_step(&st, "mix_video/dub_sf_ocr/{id}.mp4", DUB_STEP_MS).await
+        let mixed_audio = ctx
+            .step("mix_audio", move |_sc: StepCtx| {
+                let (sep, wavs) = (split_audio_input.clone(), tts.clone());
+                async move { mix_audio(&st, &sep, &wavs).await }
             })
             .await?;
 
+        let out_mixed_audio = mixed_audio.clone();
+
+        let st = Arc::clone(&state);
+        let mix_video = ctx
+            .step("mix_video", move |_sc: StepCtx| {
+                let (sep, audio) = (separated.clone(), mixed_audio.clone());
+                async move { mix_video(&st, &sep, &audio).await }
+            })
+            .await?;
+
+        // workflow **出口**仍是 `serde_json::Value`（store 是 `dyn`，装不下泛型）
+        // ——那是 `step<T>` 之外的另一回事，见 docs/quick-start.md 的差异速览。
         Ok(serde_json::json!({
             "videoDir": video_dir,
             "pipeline": "dub_sf_ocr",
-            "vocals": branch_a.vocals,
-            "bgm": branch_a.bgm,
-            "translated": branch_b,
-            "splitAudio": split,
-            "tts": tts,
-            "mixAudio": mix_audio,
+            "separated": out_separated,
+            "translated": out_translated,
+            "timings": out_timings,
+            "tts": out_tts,
+            "mixAudio": out_mixed_audio,
             "mixVideo": mix_video,
         }))
     })
