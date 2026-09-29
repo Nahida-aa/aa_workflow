@@ -182,9 +182,21 @@ impl EngineRuntime {
         }
     }
 
+    /// Best-effort fan-out to the host's publisher. **Never propagates.**
+    ///
+    /// Upstream wraps this in `try { … } catch { /* swallow */ }` with the
+    /// comment *"A misbehaving publisher must not break the run — swallow and
+    /// continue."* (`engine/run-workflow.ts:128-134`). Same contract here: a
+    /// panic in host code must not be able to destroy a durable run that has
+    /// already appended checkpoints.
+    ///
+    /// Swallowed **silently**, like upstream — this crate has no logging
+    /// dependency. Hosts that want diagnostics should catch inside their own
+    /// publisher and record it there; that keeps the logging choice (and the
+    /// dependency) on the host side, where the policy belongs.
     pub(crate) fn publish(&self, ev: &WorkflowEvent) {
         if let Some(p) = &self.publisher {
-            p(ev);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p(ev)));
         }
     }
 

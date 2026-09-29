@@ -95,11 +95,25 @@ pub struct RunWorkflowOptions {
     /// （`tokio::spawn`，或有界 channel + 独立 drain 任务）。引擎不替宿主决定
     /// 扇出语义，但这个成本必须知道。
     ///
+    /// 上游这里是 `await options.publish(…)`，**同样会串行化 run** —— 这不是
+    /// 本仓独有的问题，签名不接受 async 才是我们的取舍。
+    ///
     /// ## 坑 2：进程内回调 = 有丢失窗口
     ///
     /// 崩溃时最后一批事件就没了。所以「自己落盘」得到的是**被观测到的那部分**
     /// 耐久，不是「全部」耐久。拿它当审计日志会得到一份有洞的审计日志——
     /// 审计要耐久就别走这里，该让引擎 append。
+    ///
+    /// ## 坑 3：publisher panic 会被吞掉（与上游一致，刻意如此）
+    ///
+    /// 宿主 publisher 里的 panic **不会**掀掉你的 run —— `publish()` 用
+    /// `catch_unwind` 兜住。上游同形（*"A misbehaving publisher must not break
+    /// the run — swallow and continue."*，`run-workflow.ts:128-134`）：宿主代码
+    /// 不该有能力损毁已经 append 了 checkpoint 的耐久状态。
+    ///
+    /// 代价是**静默** —— 本 crate 没有日志依赖，所以拿不到「publisher 炸了」这
+    /// 条信息。要诊断就在**你自己的 publisher 内部** catch + 记日志，日志策略和
+    /// 依赖都留在宿主那侧。
     pub publisher: Option<Arc<dyn Fn(&WorkflowEvent) + Send + Sync>>,
 }
 
