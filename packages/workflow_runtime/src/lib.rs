@@ -64,7 +64,7 @@ pub use runtime_driver::{
     RunResultKind, SweepSummary, WorkflowRegistration, WorkflowRuntime, WorkflowRuntimeConfig,
     WorkflowRuntimeDeliverApprovalArgs, WorkflowRuntimeDeliverSignalArgs,
     WorkflowRuntimeStartRunArgs, WorkflowRuntimeSweepArgs, WorkflowRuntimeSweepResult,
-    define_aa_workflow_runtime,
+    define_workflow_runtime,
 };
 pub use schedule_materializer::{
     DEFAULT_CRON_LOOKBACK_MS, MaterializeWorkflowSchedulesOptions, MaterializedWorkflowSchedule,

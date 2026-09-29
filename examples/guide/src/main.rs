@@ -26,7 +26,7 @@ use aa_workflow_core::{CreateWorkflowConfig, WorkflowDefinition, create_workflow
 use aa_workflow_runtime::{
     InMemoryExecutionStore, RunResultKind, WorkflowExecutionStatus, WorkflowExecutionStore,
     WorkflowRegistration, WorkflowRuntime, WorkflowRuntimeConfig, WorkflowRuntimeDeliverSignalArgs,
-    WorkflowRuntimeStartRunArgs, define_aa_workflow_runtime,
+    WorkflowRuntimeStartRunArgs, define_workflow_runtime,
 };
 
 // ============================================================
@@ -112,7 +112,7 @@ pub fn fulfillment_workflow() -> WorkflowDefinition<FulfillmentInput, serde_json
 // ============================================================
 //
 // guide 用 `defineWorkflowRuntime({ store, workflows })`；Rust 版
-// `define_aa_workflow_runtime`。in-memory store 仅供测试与演示（进程一退数据
+// `define_workflow_runtime`。in-memory store 仅供测试与演示（进程一退数据
 // 全没）；生产换 DB 后端实现同一套契约即可，workflow 代码不动。
 
 /// 双柄：`mem` 供示例直读内部，`rt` 是给调用方的 runtime。
@@ -137,7 +137,7 @@ pub fn define_runtime() -> Fixture {
     );
 
     Fixture {
-        rt: Arc::new(define_aa_workflow_runtime(WorkflowRuntimeConfig::new(
+        rt: Arc::new(define_workflow_runtime(WorkflowRuntimeConfig::new(
             store, workflows,
         ))),
         mem,

@@ -244,7 +244,7 @@ pub struct WorkflowRuntime {
 }
 
 /// 构造 runtime（对齐上游 `defineWorkflowRuntime`）。
-pub fn define_aa_workflow_runtime(config: WorkflowRuntimeConfig) -> WorkflowRuntime {
+pub fn define_workflow_runtime(config: WorkflowRuntimeConfig) -> WorkflowRuntime {
     WorkflowRuntime { config }
 }
 
@@ -1047,7 +1047,7 @@ mod driver_tests {
             },
         );
         Fixture {
-            rt: Arc::new(define_aa_workflow_runtime(WorkflowRuntimeConfig::new(
+            rt: Arc::new(define_workflow_runtime(WorkflowRuntimeConfig::new(
                 store, workflows,
             ))),
             mem,

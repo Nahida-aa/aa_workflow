@@ -4,7 +4,7 @@
 //!
 //! # 内容
 //!
-//! - [`define_aa_workflow_runtime`]：注册 workflow + 持有 store，返回可驱动的
+//! - [`define_workflow_runtime`]：注册 workflow + 持有 store，返回可驱动的
 //!   runtime。**实现在 `runtime_driver`**（那边是 driver 主体），此处只做
 //!   再导出——上游的 `define-runtime.ts` 也只是 `createRuntimeDriver` 的薄壳。
 //! - [`cron`] / [`every`]：构造 [`WorkflowScheduleSpec`]，对应 guide 里的
@@ -22,7 +22,7 @@
 //! [`WorkflowScheduleSpec`] 目前只是**声明性元数据**，spec → `next_fire_at`
 //! 的换算还在宿主手里。
 
-pub use crate::runtime_driver::define_aa_workflow_runtime;
+pub use crate::runtime_driver::define_workflow_runtime;
 
 use crate::types::WorkflowScheduleSpec;
 
