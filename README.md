@@ -19,7 +19,7 @@ handler，引擎按 `step_id` 短路已成功的 checkpoint。
 > **状态**：实验阶段（edition 2024）。尚未接回 LocalDub，core 里只有 phase-0 的
 > `InMemoryStore`，没有可执行 binary —— 示例通过 `cargo test` 驱动。
 >
-> 对标范围是 TanStack 的 core engine，**不含**它的 `@tanstack/aa-workflow-runtime`
+> 对标范围是 TanStack 的 core engine，**不含**它的 `@tanstack/workflow-runtime`
 > 层（lease / sweep / timer 索引 / schedules）——见[已知边界](#已知边界)。
 
 ---
@@ -27,8 +27,8 @@ handler，引擎按 `step_id` 短路已成功的 checkpoint。
 ## 快速开始
 
 ```bash
-cargo test -p aa-workflow-core              # 引擎级测试
-cargo test -p example-shared   # 示例 workflow e2e
+cargo test -p aa_workflow_core              # 引擎级测试
+cargo test -p example_shared   # 示例 workflow e2e
 cargo clippy --workspace --all-targets
 ```
 
@@ -240,7 +240,7 @@ store 必须报 `StoreError::Io`，不许静默 no-op。
 
 采纳其命名与 store/event 契约；执行模型在**第二轮**才换成 handler 重放（第一版是
 显式 `needs` 图 + 调度器，已删除）。完整论证见 [`docs/tanstack-alignment.md`](docs/tanstack-alignment.md)，
-逐 API 对等矩阵见 [`packages/workflow-core/PARITY.md`](packages/workflow-core/PARITY.md)。
+逐 API 对等矩阵见 [`packages/workflow_core/PARITY.md`](packages/workflow_core/PARITY.md)。
 
 **不是差异的地方**（容易误读）：
 
@@ -267,7 +267,7 @@ store 必须报 `StoreError::Io`，不许静默 no-op。
 ## 仓库结构
 
 ```
-packages/workflow-core/     引擎本体
+packages/workflow_core/     引擎本体
   src/define/mod.rs         handler 运行时：BaseCtx / StepCtx / StepOptions / Workflow
   src/define/define_workflow.rs  声明入口：create_workflow / WorkflowBuilder
   src/define/state_handle.rs  共享可变 state（对齐 TS 的 live 引用语义）
@@ -281,7 +281,7 @@ packages/workflow-core/     引擎本体
   src/run_store/mod.rs      RunStore trait + RunState 信封
   src/run_store/in_memory.rs  InMemoryStore
   src/resource.rs           容量-1 的资源门
-packages/workflow-runtime/  执行所有权层（lease / sweep / timer / schedule）
+packages/workflow_runtime/  执行所有权层（lease / sweep / timer / schedule）
   src/types.rs              19 个方法的结构体 + WorkflowExecutionStatus
   src/run_store_adapter.rs  WorkflowRunStoreAdapterStore + 降格适配器
   src/in_memory_store.rs    InMemoryExecutionStore
@@ -296,7 +296,7 @@ docs/tanstack-alignment.md  对齐决策记录（含推翻第一轮的论证）
 docs/runtime-design.md      runtime 层决策记录（D1-D9）
 ```
 
-示例层强约束：只依赖 `aa-workflow-core` + tokio，**不依赖 LocalDub**。
+示例层强约束：只依赖 `aa_workflow_core` + tokio，**不依赖 LocalDub**。
 
 > `examples/` 下的示例**必须带断言**（`#[cfg(test)]`）：它们不在
 > `cargo test` 的默认视野里，没有断言就只能靠人手动 `cargo run` 发现问题。

@@ -5,7 +5,7 @@ title: RunStatus
 
 # Enum: RunStatus
 
-Defined in: [`packages/workflow-core/src/event.rs:10`](../../../packages/workflow-core/src/event.rs#L10)
+Defined in: [`packages/workflow_core/src/event.rs:10`](../../../packages/workflow_core/src/event.rs#L10)
 
 Overall lifecycle status of a run.
 
@@ -13,35 +13,35 @@ Overall lifecycle status of a run.
 
 ### Running
 
-Defined in: [`packages/workflow-core/src/event.rs:11`](../../../packages/workflow-core/src/event.rs#L11)
+Defined in: [`packages/workflow_core/src/event.rs:11`](../../../packages/workflow_core/src/event.rs#L11)
 
 
 ***
 
 ### Finished
 
-Defined in: [`packages/workflow-core/src/event.rs:12`](../../../packages/workflow-core/src/event.rs#L12)
+Defined in: [`packages/workflow_core/src/event.rs:12`](../../../packages/workflow_core/src/event.rs#L12)
 
 
 ***
 
 ### Errored
 
-Defined in: [`packages/workflow-core/src/event.rs:13`](../../../packages/workflow-core/src/event.rs#L13)
+Defined in: [`packages/workflow_core/src/event.rs:13`](../../../packages/workflow_core/src/event.rs#L13)
 
 
 ***
 
 ### Aborted
 
-Defined in: [`packages/workflow-core/src/event.rs:14`](../../../packages/workflow-core/src/event.rs#L14)
+Defined in: [`packages/workflow_core/src/event.rs:14`](../../../packages/workflow_core/src/event.rs#L14)
 
 
 ***
 
 ### Paused
 
-Defined in: [`packages/workflow-core/src/event.rs:17`](../../../packages/workflow-core/src/event.rs#L17)
+Defined in: [`packages/workflow_core/src/event.rs:17`](../../../packages/workflow_core/src/event.rs#L17)
 
 The run is parked at a durable wait point (`StepPaused`), e.g. an
 approval or a sleep; it resumes when a `StepResume` arrives.

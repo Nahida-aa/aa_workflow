@@ -5,7 +5,7 @@ title: StepAttempt
 
 # Struct: StepAttempt
 
-Defined in: [`packages/workflow-core/src/event.rs:38`](../../../packages/workflow-core/src/event.rs#L38)
+Defined in: [`packages/workflow_core/src/event.rs:38`](../../../packages/workflow_core/src/event.rs#L38)
 
 A single execution attempt of one step (used for retry bookkeeping).
 
@@ -17,7 +17,7 @@ A single execution attempt of one step (used for retry bookkeeping).
 attempt: usize
 ```
 
-Defined in: [`packages/workflow-core/src/event.rs:40`](../../../packages/workflow-core/src/event.rs#L40)
+Defined in: [`packages/workflow_core/src/event.rs:40`](../../../packages/workflow_core/src/event.rs#L40)
 
 1-based attempt number.
 
@@ -30,7 +30,7 @@ Defined in: [`packages/workflow-core/src/event.rs:40`](../../../packages/workflo
 started_at: i64
 ```
 
-Defined in: [`packages/workflow-core/src/event.rs:41`](../../../packages/workflow-core/src/event.rs#L41)
+Defined in: [`packages/workflow_core/src/event.rs:41`](../../../packages/workflow_core/src/event.rs#L41)
 
 
 ***
@@ -41,7 +41,7 @@ Defined in: [`packages/workflow-core/src/event.rs:41`](../../../packages/workflo
 finished_at: i64
 ```
 
-Defined in: [`packages/workflow-core/src/event.rs:42`](../../../packages/workflow-core/src/event.rs#L42)
+Defined in: [`packages/workflow_core/src/event.rs:42`](../../../packages/workflow_core/src/event.rs#L42)
 
 
 ***
@@ -52,7 +52,7 @@ Defined in: [`packages/workflow-core/src/event.rs:42`](../../../packages/workflo
 result: Option<Value>
 ```
 
-Defined in: [`packages/workflow-core/src/event.rs:43`](../../../packages/workflow-core/src/event.rs#L43)
+Defined in: [`packages/workflow_core/src/event.rs:43`](../../../packages/workflow_core/src/event.rs#L43)
 
 
 ***
@@ -63,7 +63,7 @@ Defined in: [`packages/workflow-core/src/event.rs:43`](../../../packages/workflo
 error: Option<RunError>
 ```
 
-Defined in: [`packages/workflow-core/src/event.rs:46`](../../../packages/workflow-core/src/event.rs#L46)
+Defined in: [`packages/workflow_core/src/event.rs:46`](../../../packages/workflow_core/src/event.rs#L46)
 
 结构化错误（对齐 TanStack `StepAttempt.error?: SerializedError`，
 `types.ts:261`）。

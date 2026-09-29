@@ -1,12 +1,12 @@
 [package]
-name = "example-shared"
+name = "example_shared"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Host-agnostic example layer for aa-workflow-core (workflows + run-store + runtime glue)"
+description = "Host-agnostic example layer for aa_workflow_core (workflows + run-store + runtime glue)"
 
 [dependencies]
-aa-workflow-core = { path = "../../packages/workflow-core" }
+aa_workflow_core = { path = "../../packages/workflow_core" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

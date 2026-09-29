@@ -5,7 +5,7 @@ title: GateGuard
 
 # Struct: GateGuard
 
-Defined in: [`packages/workflow-core/src/resource.rs:52`](../../../packages/workflow-core/src/resource.rs#L52)
+Defined in: [`packages/workflow_core/src/resource.rs:52`](../../../packages/workflow_core/src/resource.rs#L52)
 
 Holds one unit of a resource until dropped.
 

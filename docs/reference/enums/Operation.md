@@ -5,7 +5,7 @@ title: Operation
 
 # Enum: Operation
 
-Defined in: [`packages/workflow-core/src/engine/state_diff.rs:17`](../../../packages/workflow-core/src/engine/state_diff.rs#L17)
+Defined in: [`packages/workflow_core/src/engine/state_diff.rs:17`](../../../packages/workflow_core/src/engine/state_diff.rs#L17)
 
 一个 JSON Patch 操作（对齐上游 `Operation`）。
 
@@ -17,7 +17,7 @@ Defined in: [`packages/workflow-core/src/engine/state_diff.rs:17`](../../../pack
 { .. }
 ```
 
-Defined in: [`packages/workflow-core/src/engine/state_diff.rs:18`](../../../packages/workflow-core/src/engine/state_diff.rs#L18)
+Defined in: [`packages/workflow_core/src/engine/state_diff.rs:18`](../../../packages/workflow_core/src/engine/state_diff.rs#L18)
 
 
 ***
@@ -28,7 +28,7 @@ Defined in: [`packages/workflow-core/src/engine/state_diff.rs:18`](../../../pack
 { .. }
 ```
 
-Defined in: [`packages/workflow-core/src/engine/state_diff.rs:19`](../../../packages/workflow-core/src/engine/state_diff.rs#L19)
+Defined in: [`packages/workflow_core/src/engine/state_diff.rs:19`](../../../packages/workflow_core/src/engine/state_diff.rs#L19)
 
 
 ***
@@ -39,7 +39,7 @@ Defined in: [`packages/workflow-core/src/engine/state_diff.rs:19`](../../../pack
 { .. }
 ```
 
-Defined in: [`packages/workflow-core/src/engine/state_diff.rs:20`](../../../packages/workflow-core/src/engine/state_diff.rs#L20)
+Defined in: [`packages/workflow_core/src/engine/state_diff.rs:20`](../../../packages/workflow_core/src/engine/state_diff.rs#L20)
 
 ## Trait Implementations
 

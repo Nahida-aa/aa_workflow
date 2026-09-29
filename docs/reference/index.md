@@ -1,9 +1,9 @@
 ---
-id: aa-workflow-core
-title: aa-workflow-core
+id: aa_workflow_core
+title: aa_workflow_core
 ---
 
-# aa-workflow-core
+# aa_workflow_core
 
 ## Structs
 

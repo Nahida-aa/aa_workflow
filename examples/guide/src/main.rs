@@ -34,7 +34,7 @@ use aa_workflow_runtime::{
 // ============================================================
 //
 // guide 用 zod 声明 input/output；Rust 版用 serde 类型当 schema
-// （`.input::<In>()`），handler 的 `ctx.input` 直接是强类型字段访问。
+// （`.input::<TInput>()`），handler 的 `ctx.input` 直接是强类型字段访问。
 
 /// 对齐 guide 的 `FulfillmentInput { orderId, delayMs }`。
 #[derive(serde::Deserialize, serde::Serialize)]

@@ -5,7 +5,7 @@ title: RunError
 
 # Struct: RunError
 
-Defined in: [`packages/workflow-core/src/error.rs:54`](../../../packages/workflow-core/src/error.rs#L54)
+Defined in: [`packages/workflow_core/src/error.rs:54`](../../../packages/workflow_core/src/error.rs#L54)
 
 跨进程序列化的错误（对齐 TanStack `SerializedError`，`types.ts:16`）。
 
@@ -31,7 +31,7 @@ publisher。存不存、存哪儿，是 [`RunStore`](../traits/RunStore.md)
 name: String
 ```
 
-Defined in: [`packages/workflow-core/src/error.rs:55`](../../../packages/workflow-core/src/error.rs#L55)
+Defined in: [`packages/workflow_core/src/error.rs:55`](../../../packages/workflow_core/src/error.rs#L55)
 
 
 ***
@@ -42,7 +42,7 @@ Defined in: [`packages/workflow-core/src/error.rs:55`](../../../packages/workflo
 message: String
 ```
 
-Defined in: [`packages/workflow-core/src/error.rs:56`](../../../packages/workflow-core/src/error.rs#L56)
+Defined in: [`packages/workflow_core/src/error.rs:56`](../../../packages/workflow_core/src/error.rs#L56)
 
 ## Implementations
 
@@ -52,7 +52,7 @@ Defined in: [`packages/workflow-core/src/error.rs:56`](../../../packages/workflo
 pub fn cancelled() -> Self
 ```
 
-Defined in: [`packages/workflow-core/src/error.rs:61`](../../../packages/workflow-core/src/error.rs#L61)
+Defined in: [`packages/workflow_core/src/error.rs:61`](../../../packages/workflow_core/src/error.rs#L61)
 
 引擎主动中止（`cancel_run`）产生的错误。
 
@@ -69,7 +69,7 @@ Defined in: [`packages/workflow-core/src/error.rs:61`](../../../packages/workflo
 pub fn from_anyhow(e: &Error) -> Self
 ```
 
-Defined in: [`packages/workflow-core/src/error.rs:71`](../../../packages/workflow-core/src/error.rs#L71)
+Defined in: [`packages/workflow_core/src/error.rs:71`](../../../packages/workflow_core/src/error.rs#L71)
 
 从 `anyhow::Error` 提取：能 downcast 到引擎错误类型时给出变体名，
 否则退化为 `"Error"`（见类型文档）。

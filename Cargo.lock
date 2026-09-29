@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "aa-workflow-core"
+name = "aa_workflow_core"
 version = "0.2.0"
 dependencies = [
  "anyhow",
@@ -14,10 +14,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "aa-workflow-runtime"
+name = "aa_workflow_runtime"
 version = "0.1.0"
 dependencies = [
- "aa-workflow-core",
+ "aa_workflow_core",
  "anyhow",
  "serde",
  "serde_json",
@@ -25,11 +25,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "aa-workflow-store-sqlx-postgres"
+name = "aa_workflow_store_sqlx_postgres"
 version = "0.1.0"
 dependencies = [
- "aa-workflow-core",
- "aa-workflow-runtime",
+ "aa_workflow_core",
+ "aa_workflow_runtime",
  "anyhow",
  "serde",
  "serde_json",
@@ -261,11 +261,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "example-guide"
+name = "example_guide"
 version = "0.1.0"
 dependencies = [
- "aa-workflow-core",
- "aa-workflow-runtime",
+ "aa_workflow_core",
+ "aa_workflow_runtime",
  "anyhow",
  "serde",
  "serde_json",
@@ -273,10 +273,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "example-shared"
+name = "example_shared"
 version = "0.1.0"
 dependencies = [
- "aa-workflow-core",
+ "aa_workflow_core",
  "anyhow",
  "serde",
  "serde_json",
@@ -285,11 +285,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "example-store-file"
+name = "example_store_file"
 version = "0.1.0"
 dependencies = [
- "aa-workflow-core",
- "aa-workflow-runtime",
+ "aa_workflow_core",
+ "aa_workflow_runtime",
  "anyhow",
  "serde",
  "serde_json",

@@ -5,7 +5,7 @@ title: InMemoryStore
 
 # Struct: InMemoryStore
 
-Defined in: [`packages/workflow-core/src/run_store/in_memory.rs:28`](../../../packages/workflow-core/src/run_store/in_memory.rs#L28)
+Defined in: [`packages/workflow_core/src/run_store/in_memory.rs:28`](../../../packages/workflow_core/src/run_store/in_memory.rs#L28)
 
 In-memory [`RunStore`](../traits/RunStore.md) for phase 0. Provides the full contract surface
 (CAS append + subscribe) so the engine can be exercised with property
@@ -21,7 +21,7 @@ _（存在非公开字段）_
 pub fn new() -> Self
 ```
 
-Defined in: [`packages/workflow-core/src/run_store/in_memory.rs:33`](../../../packages/workflow-core/src/run_store/in_memory.rs#L33)
+Defined in: [`packages/workflow_core/src/run_store/in_memory.rs:33`](../../../packages/workflow_core/src/run_store/in_memory.rs#L33)
 
 #### Returns
 

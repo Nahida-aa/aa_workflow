@@ -5,7 +5,7 @@ title: WorkflowHandler
 
 # Type Alias: WorkflowHandler
 
-Defined in: [`packages/workflow-core/src/define/mod.rs:36`](../../../packages/workflow-core/src/define/mod.rs#L36)
+Defined in: [`packages/workflow_core/src/define/mod.rs:36`](../../../packages/workflow_core/src/define/mod.rs#L36)
 
 The workflow's orchestrating closure: plain async control flow over
 `ctx.step` / `try_join!`. Decisions (branching, which steps run) are made

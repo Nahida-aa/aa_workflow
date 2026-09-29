@@ -5,7 +5,7 @@ title: RunOutcome
 
 # Struct: RunOutcome
 
-Defined in: [`packages/workflow-core/src/engine/run_workflow.rs:145`](../../../packages/workflow-core/src/engine/run_workflow.rs#L145)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:145`](../../../packages/workflow_core/src/engine/run_workflow.rs#L145)
 
 ## Fields
 
@@ -15,7 +15,7 @@ Defined in: [`packages/workflow-core/src/engine/run_workflow.rs:145`](../../../p
 run_id: String
 ```
 
-Defined in: [`packages/workflow-core/src/engine/run_workflow.rs:146`](../../../packages/workflow-core/src/engine/run_workflow.rs#L146)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:146`](../../../packages/workflow_core/src/engine/run_workflow.rs#L146)
 
 
 ***
@@ -26,7 +26,7 @@ Defined in: [`packages/workflow-core/src/engine/run_workflow.rs:146`](../../../p
 status: RunStatus
 ```
 
-Defined in: [`packages/workflow-core/src/engine/run_workflow.rs:147`](../../../packages/workflow-core/src/engine/run_workflow.rs#L147)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:147`](../../../packages/workflow_core/src/engine/run_workflow.rs#L147)
 
 
 ***
@@ -37,7 +37,7 @@ Defined in: [`packages/workflow-core/src/engine/run_workflow.rs:147`](../../../p
 output: Option<Value>
 ```
 
-Defined in: [`packages/workflow-core/src/engine/run_workflow.rs:148`](../../../packages/workflow-core/src/engine/run_workflow.rs#L148)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:148`](../../../packages/workflow_core/src/engine/run_workflow.rs#L148)
 
 
 ***
@@ -48,7 +48,7 @@ Defined in: [`packages/workflow-core/src/engine/run_workflow.rs:148`](../../../p
 error: Option<RunError>
 ```
 
-Defined in: [`packages/workflow-core/src/engine/run_workflow.rs:154`](../../../packages/workflow-core/src/engine/run_workflow.rs#L154)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:154`](../../../packages/workflow_core/src/engine/run_workflow.rs#L154)
 
 与 [`RunState::error`](RunState.md) 是**同一个类型**——
 一次失败的 run 在「返回值」和「持久化信封」两处描述一致，不要只改一边。

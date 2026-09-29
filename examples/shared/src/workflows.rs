@@ -2,8 +2,8 @@
 //!
 //! 输入用 `create_workflow(CreateWorkflowConfig::new(id).input::<T>())` 声明
 //! （Rust 版 zod `inputSchema`：serde Deserialize 即运行时校验，缺字段/错类型
-//! 在首次恢复时报 schema 错误）；handler 收到 `BaseCtx<In, St, Ext>`，
-//! `ctx.input` 字段直接是 `In`（借用即 `&In`）。
+//! 在首次恢复时报 schema 错误）；handler 收到 `BaseCtx<TInput, TState, TCtxExt>`，
+//! `ctx.input` 字段直接是 `TInput`（借用即 `&TInput`）。
 //! 输出类型从 handler 返回值自动推断（对齐 TanStack 的返回值推断，无 output 声明）。
 //!
 //! - [`fulfillment_saga`]（id `fulfillment-saga`）— 并行（`tokio::try_join!`）+ retry
@@ -34,8 +34,8 @@ use aa_workflow_core::{
 
 // ========================================================================
 // 输入类型 = workflow 的「schema」（Rust 版 zod `inputSchema`）：serde
-// Deserialize 即运行时校验，`create_workflow(config.input::<In>())` 后 handler
-// 拿到 `BaseCtx<In, ...>`，`ctx.input` 直接是 `In`，没有 `.get(...)` 链。
+// Deserialize 即运行时校验，`create_workflow(config.input::<TInput>())` 后 handler
+// 拿到 `BaseCtx<TInput, ...>`，`ctx.input` 直接是 `TInput`，没有 `.get(...)` 链。
 // ========================================================================
 
 /// 履约 saga 输入。
@@ -1249,8 +1249,8 @@ mod tests {
         assert_eq!(timer_sleep, 1, "定时闸门睡过一次");
     }
 
-    /// 静态类型保留：`create_workflow(config.input::<In>())` 的 In 显式声明，
-    /// Out 从 handler 返回类型自动推断（对齐 TanStack 的返回值推断，无需
+    /// 静态类型保留：`create_workflow(config.input::<TInput>())` 的 TInput 显式声明，
+    /// TOutput 从 handler 返回类型自动推断（对齐 TanStack 的返回值推断，无需
     /// output schema 声明）。
     #[test]
     fn typed_workflow_keeps_static_types() {
@@ -1311,8 +1311,8 @@ mod tests {
         );
     }
 
-    /// `state::<St>()` 让 builder 重命名泛型：handler 拿到
-    /// `BaseCtx<In, St>`，`ctx.state` 是 typed 字段直接读写；durable 边界
+    /// `state::<TState>()` 让 builder 重命名泛型：handler 拿到
+    /// `BaseCtx<TInput, TState>`，`ctx.state` 是 typed 字段直接读写；durable 边界
     /// （`step`）把工作副本 flush 回引擎镜像。
     #[tokio::test]
     async fn state_typed_field_roundtrip() {

@@ -25,8 +25,8 @@ from collections import defaultdict
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-CRATE = "aa-workflow-core"
-CRATE_SLUG = "aa-workflow-core"
+CRATE = "aa_workflow_core"
+CRATE_SLUG = "aa_workflow_core"
 JSON_PATH = REPO / "target" / "doc" / f"{CRATE.replace('-', '_')}.json"
 OUT = REPO / "docs" / "reference"
 

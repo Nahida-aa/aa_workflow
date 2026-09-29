@@ -5,7 +5,7 @@ title: EngineRuntime
 
 # Struct: EngineRuntime
 
-Defined in: [`packages/workflow-core/src/engine/mod.rs:121`](../../../packages/workflow-core/src/engine/mod.rs#L121)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:121`](../../../packages/workflow_core/src/engine/mod.rs#L121)
 
 Shared driver state handed to every step (and to the `<WorkflowCtx>`).
 This is the code-as-DAG substrate: the "graph" is just this state plus the
@@ -19,7 +19,7 @@ handler's control flow, discovered as the handler runs.
 run_id: String
 ```
 
-Defined in: [`packages/workflow-core/src/engine/mod.rs:122`](../../../packages/workflow-core/src/engine/mod.rs#L122)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:122`](../../../packages/workflow_core/src/engine/mod.rs#L122)
 
 
 ***
@@ -30,7 +30,7 @@ Defined in: [`packages/workflow-core/src/engine/mod.rs:122`](../../../packages/w
 input: Value
 ```
 
-Defined in: [`packages/workflow-core/src/engine/mod.rs:123`](../../../packages/workflow-core/src/engine/mod.rs#L123)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:123`](../../../packages/workflow_core/src/engine/mod.rs#L123)
 
 
 ***
@@ -41,7 +41,7 @@ Defined in: [`packages/workflow-core/src/engine/mod.rs:123`](../../../packages/w
 state_mirror: Arc<Mutex<Value>>
 ```
 
-Defined in: [`packages/workflow-core/src/engine/mod.rs:132`](../../../packages/workflow-core/src/engine/mod.rs#L132)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:132`](../../../packages/workflow_core/src/engine/mod.rs#L132)
 
 Per-invocation state, rebuilt from `initialize(input)` on every start
 and resume (see `define::Workflow::initialize`). Guarded by a
@@ -61,7 +61,7 @@ handler's `StateHandle`**（handle 在变更语句与 drop 时同步进这里）
 prev_state_snapshot: Mutex<Value>
 ```
 
-Defined in: [`packages/workflow-core/src/engine/mod.rs:136`](../../../packages/workflow-core/src/engine/mod.rs#L136)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:136`](../../../packages/workflow_core/src/engine/mod.rs#L136)
 
 State as of the last flush — the "before" side of the
 [`WorkflowEvent::StateDelta`](../enums/WorkflowEvent.md) diff. Reset at drive start (upstream
@@ -76,7 +76,7 @@ State as of the last flush — the "before" side of the
 store: Arc<dyn RunStore>
 ```
 
-Defined in: [`packages/workflow-core/src/engine/mod.rs:137`](../../../packages/workflow-core/src/engine/mod.rs#L137)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:137`](../../../packages/workflow_core/src/engine/mod.rs#L137)
 
 
 ***
@@ -87,7 +87,7 @@ Defined in: [`packages/workflow-core/src/engine/mod.rs:137`](../../../packages/w
 gate: Arc<Gate>
 ```
 
-Defined in: [`packages/workflow-core/src/engine/mod.rs:138`](../../../packages/workflow-core/src/engine/mod.rs#L138)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:138`](../../../packages/workflow_core/src/engine/mod.rs#L138)
 
 
 ***
@@ -98,7 +98,7 @@ Defined in: [`packages/workflow-core/src/engine/mod.rs:138`](../../../packages/w
 target_step: Option<String>
 ```
 
-Defined in: [`packages/workflow-core/src/engine/mod.rs:144`](../../../packages/workflow-core/src/engine/mod.rs#L144)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:144`](../../../packages/workflow_core/src/engine/mod.rs#L144)
 
 
 ***
@@ -109,7 +109,7 @@ Defined in: [`packages/workflow-core/src/engine/mod.rs:144`](../../../packages/w
 deadline: Option<i64>
 ```
 
-Defined in: [`packages/workflow-core/src/engine/mod.rs:152`](../../../packages/workflow-core/src/engine/mod.rs#L152)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:152`](../../../packages/workflow_core/src/engine/mod.rs#L152)
 
 Runtime budget (TanStack `deadline`): absolute UTC ms for this drive.
 
@@ -122,7 +122,7 @@ Runtime budget (TanStack `deadline`): absolute UTC ms for this drive.
 min_yield_remaining_ms: u64
 ```
 
-Defined in: [`packages/workflow-core/src/engine/mod.rs:154`](../../../packages/workflow-core/src/engine/mod.rs#L154)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:154`](../../../packages/workflow_core/src/engine/mod.rs#L154)
 
 Headroom threshold for `should_yield()` (TanStack `minYieldRemainingMs`).
 
@@ -135,7 +135,7 @@ Headroom threshold for `should_yield()` (TanStack `minYieldRemainingMs`).
 yield_resume_at: Option<i64>
 ```
 
-Defined in: [`packages/workflow-core/src/engine/mod.rs:156`](../../../packages/workflow-core/src/engine/mod.rs#L156)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:156`](../../../packages/workflow_core/src/engine/mod.rs#L156)
 
 Absolute ms at which `ctx.yield_()` re-wakes (TanStack `yieldResumeAt`).
 
@@ -148,7 +148,7 @@ Absolute ms at which `ctx.yield_()` re-wakes (TanStack `yieldResumeAt`).
 publisher: Option<Arc<dyn Fn(&WorkflowEvent) + Send + Sync>>
 ```
 
-Defined in: [`packages/workflow-core/src/engine/mod.rs:159`](../../../packages/workflow-core/src/engine/mod.rs#L159)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:159`](../../../packages/workflow_core/src/engine/mod.rs#L159)
 
 _（存在非公开字段）_
 
@@ -160,7 +160,7 @@ _（存在非公开字段）_
 pub fn publish_progress(&self, step_id: &str, value: f64)
 ```
 
-Defined in: [`packages/workflow-core/src/engine/mod.rs:225`](../../../packages/workflow-core/src/engine/mod.rs#L225)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:225`](../../../packages/workflow_core/src/engine/mod.rs#L225)
 
 #### Parameters
 

@@ -9,7 +9,7 @@ title: select_workflow_version
 pub fn select_workflow_version<'a>(workflow: &'a Workflow, persisted: Option<&str>) -> Option<&'a Workflow>
 ```
 
-Defined in: [`packages/workflow-core/src/registry/select_version.rs:31`](../../../packages/workflow-core/src/registry/select_version.rs#L31)
+Defined in: [`packages/workflow_core/src/registry/select_version.rs:31`](../../../packages/workflow_core/src/registry/select_version.rs#L31)
 
 在 `[current] + current.previous_versions` 中按持久化版本选定义。
 

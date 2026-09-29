@@ -9,7 +9,7 @@ title: run_workflow
 pub async fn run_workflow(opts: &RunWorkflowOptions) -> Result<RunOutcome, WorkflowError>
 ```
 
-Defined in: [`packages/workflow-core/src/engine/run_workflow.rs:176`](../../../packages/workflow-core/src/engine/run_workflow.rs#L176)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:176`](../../../packages/workflow_core/src/engine/run_workflow.rs#L176)
 
 Runs (or resumes) a workflow by driving its async handler.
 

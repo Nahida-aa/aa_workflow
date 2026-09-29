@@ -5,7 +5,7 @@ title: RunStore
 
 # Trait: RunStore
 
-Defined in: [`packages/workflow-core/src/run_store/mod.rs:209`](../../../packages/workflow-core/src/run_store/mod.rs#L209)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:209`](../../../packages/workflow_core/src/run_store/mod.rs#L209)
 
 The store contract, modelled after TanStack Workflow's two-surface design:
 
@@ -23,12 +23,12 @@ log (see [`crate::event::fold_step_states`](../functions/fold_step_states.md)).
 
 | 上游 | 位置 | 是什么 |
 | ---- | ---- | ------ |
-| `RunStore` | `aa-workflow-core/src/types.ts:599` | core 的接口，引擎用；**就是本 trait** |
+| `RunStore` | `workflow-core/src/types.ts:599` | core 的接口，引擎用；**就是本 trait** |
 | `WorkflowRunStoreAdapter = RunStore` | 同上 `:305` 在 runtime 侧 | 一行 `export type` 真别名 |
-| `WorkflowRunStoreAdapterStore` | `aa-workflow-runtime/src/types.ts:290` | **独立 interface，不是别名** |
+| `WorkflowRunStoreAdapterStore` | `workflow-runtime/src/types.ts:290` | **独立 interface，不是别名** |
 | `WorkflowExecutionStore extends …AdapterStore` | `:307` | runtime 的扩展契约 |
 
-后两个本 crate 与 `aa-workflow-runtime` 都**不设对应物**：
+后两个本 crate 与 `aa_workflow_runtime` 都**不设对应物**：
 
 - `WorkflowRunStoreAdapter` 是 TS 的 `type` 别名，零成本。Rust 的 trait
   别名要 `#![feature(trait_alias)]`（仍 unstable），`trait A: B {}` 则是新

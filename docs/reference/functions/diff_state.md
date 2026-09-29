@@ -9,7 +9,7 @@ title: diff_state
 pub fn diff_state(prev: &Value, next: &Value) -> Vec<Operation>
 ```
 
-Defined in: [`packages/workflow-core/src/engine/state_diff.rs:35`](../../../packages/workflow-core/src/engine/state_diff.rs#L35)
+Defined in: [`packages/workflow_core/src/engine/state_diff.rs:35`](../../../packages/workflow_core/src/engine/state_diff.rs#L35)
 
 产出 `prev` → `next` 的 RFC 6902 JSON Patch；无变化返回空数组。
 

@@ -5,7 +5,7 @@ title: WorkflowBuilder
 
 # Struct: WorkflowBuilder
 
-Defined in: [`packages/workflow-core/src/define/define_workflow.rs:202`](../../../packages/workflow-core/src/define/define_workflow.rs#L202)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:202`](../../../packages/workflow_core/src/define/define_workflow.rs#L202)
 
 The typed builder — `TInput`/`TOutput`/`TState` mirror the workflow's schema
 at build time, `TCtxExt` is the ctx extension type declared by the last
@@ -21,7 +21,7 @@ _（存在非公开字段）_
 pub fn middleware<PExt>(self, m: Middleware) -> WorkflowBuilder<TInput, TOutput, TState, PExt>
 ```
 
-Defined in: [`packages/workflow-core/src/define/define_workflow.rs:215`](../../../packages/workflow-core/src/define/define_workflow.rs#L215)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:215`](../../../packages/workflow_core/src/define/define_workflow.rs#L215)
 
 Attach a runtime middleware and re-key `TCtxExt` to `PExt` — the type of
 `ctx.ext` the handler reads (`produce`'s JSON output is deserialized
@@ -48,7 +48,7 @@ bundle; extra `wrap`s still compose in registration order.
 pub fn previous_versions(self, v: Vec<Workflow>) -> Self
 ```
 
-Defined in: [`packages/workflow-core/src/define/define_workflow.rs:230`](../../../packages/workflow-core/src/define/define_workflow.rs#L230)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:230`](../../../packages/workflow_core/src/define/define_workflow.rs#L230)
 
 Older versions of the same workflow to route resumed runs to (see
 [`select_workflow_version`](../functions/select_workflow_version.md)).
@@ -79,7 +79,7 @@ where
     Fut: Future + Send + 'static
 ```
 
-Defined in: [`packages/workflow-core/src/define/define_workflow.rs:239`](../../../packages/workflow-core/src/define/define_workflow.rs#L239)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:239`](../../../packages/workflow_core/src/define/define_workflow.rs#L239)
 
 Finalize with the orchestrating closure. `AOut` is inferred from the
 handler's return value; the engine stores it serialized as JSON, so on

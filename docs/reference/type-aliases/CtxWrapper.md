@@ -5,7 +5,7 @@ title: CtxWrapper
 
 # Type Alias: CtxWrapper
 
-Defined in: [`packages/workflow-core/src/middleware/create_middleware.rs:37`](../../../packages/workflow-core/src/middleware/create_middleware.rs#L37)
+Defined in: [`packages/workflow_core/src/middleware/create_middleware.rs:37`](../../../packages/workflow_core/src/middleware/create_middleware.rs#L37)
 
 Erased around-wrapper: `(ctx, next)` → wrapped handler future.
 

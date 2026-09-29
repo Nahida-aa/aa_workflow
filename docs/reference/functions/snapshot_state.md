@@ -9,7 +9,7 @@ title: snapshot_state
 pub fn snapshot_state(state: &Value) -> Value
 ```
 
-Defined in: [`packages/workflow-core/src/engine/state_diff.rs:27`](../../../packages/workflow-core/src/engine/state_diff.rs#L27)
+Defined in: [`packages/workflow_core/src/engine/state_diff.rs:27`](../../../packages/workflow_core/src/engine/state_diff.rs#L27)
 
 给 state 拍快照，供之后 diff（对齐上游 `snapshotState`）。
 

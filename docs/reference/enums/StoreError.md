@@ -5,7 +5,7 @@ title: StoreError
 
 # Enum: StoreError
 
-Defined in: [`packages/workflow-core/src/error.rs:7`](../../../packages/workflow-core/src/error.rs#L7)
+Defined in: [`packages/workflow_core/src/error.rs:7`](../../../packages/workflow_core/src/error.rs#L7)
 
 Errors produced by a [`crate::run_store::RunStore`](../traits/RunStore.md) implementation.
 
@@ -17,7 +17,7 @@ Errors produced by a [`crate::run_store::RunStore`](../traits/RunStore.md) imple
 { .. }
 ```
 
-Defined in: [`packages/workflow-core/src/error.rs:9`](../../../packages/workflow-core/src/error.rs#L9)
+Defined in: [`packages/workflow_core/src/error.rs:9`](../../../packages/workflow_core/src/error.rs#L9)
 
 `append_event` was called with a stale expected index (CAS violation).
 
@@ -30,7 +30,7 @@ Defined in: [`packages/workflow-core/src/error.rs:9`](../../../packages/workflow
 (String)
 ```
 
-Defined in: [`packages/workflow-core/src/error.rs:15`](../../../packages/workflow-core/src/error.rs#L15)
+Defined in: [`packages/workflow_core/src/error.rs:15`](../../../packages/workflow_core/src/error.rs#L15)
 
 Backing-store I/O or serialization failure.
 

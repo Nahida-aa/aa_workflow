@@ -5,7 +5,7 @@ title: WaitForState
 
 # Struct: WaitForState
 
-Defined in: [`packages/workflow-core/src/run_store/mod.rs:22`](../../../packages/workflow-core/src/run_store/mod.rs#L22)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:22`](../../../packages/workflow_core/src/run_store/mod.rs#L22)
 
 挂起等待中的外部信号（对齐 TanStack `RunState.waitingFor`）。sleep 的
 `due_at` 就是这里的 `deadline` —— host 可用它做时间索引的唤醒调度。
@@ -21,7 +21,7 @@ Defined in: [`packages/workflow-core/src/run_store/mod.rs:22`](../../../packages
 step_id: Option<String>
 ```
 
-Defined in: [`packages/workflow-core/src/run_store/mod.rs:24`](../../../packages/workflow-core/src/run_store/mod.rs#L24)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:24`](../../../packages/workflow_core/src/run_store/mod.rs#L24)
 
 
 ***
@@ -32,7 +32,7 @@ Defined in: [`packages/workflow-core/src/run_store/mod.rs:24`](../../../packages
 signal_name: String
 ```
 
-Defined in: [`packages/workflow-core/src/run_store/mod.rs:25`](../../../packages/workflow-core/src/run_store/mod.rs#L25)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:25`](../../../packages/workflow_core/src/run_store/mod.rs#L25)
 
 
 ***
@@ -43,7 +43,7 @@ Defined in: [`packages/workflow-core/src/run_store/mod.rs:25`](../../../packages
 deadline: Option<i64>
 ```
 
-Defined in: [`packages/workflow-core/src/run_store/mod.rs:26`](../../../packages/workflow-core/src/run_store/mod.rs#L26)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:26`](../../../packages/workflow_core/src/run_store/mod.rs#L26)
 
 ## Trait Implementations
 

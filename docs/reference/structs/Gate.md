@@ -5,7 +5,7 @@ title: Gate
 
 # Struct: Gate
 
-Defined in: [`packages/workflow-core/src/resource.rs:20`](../../../packages/workflow-core/src/resource.rs#L20)
+Defined in: [`packages/workflow_core/src/resource.rs:20`](../../../packages/workflow_core/src/resource.rs#L20)
 
 Per-key async semaphore, used to serialize steps that share a physical
 resource (halving VRAM pressure in LocalDub). `acquire` waits rather than
@@ -22,7 +22,7 @@ _（存在非公开字段）_
 pub fn new() -> Self
 ```
 
-Defined in: [`packages/workflow-core/src/resource.rs:25`](../../../packages/workflow-core/src/resource.rs#L25)
+Defined in: [`packages/workflow_core/src/resource.rs:25`](../../../packages/workflow_core/src/resource.rs#L25)
 
 #### Returns
 
@@ -37,7 +37,7 @@ Defined in: [`packages/workflow-core/src/resource.rs:25`](../../../packages/work
 pub async fn acquire(self: &Arc<Self>, key: &ResourceKey) -> GateGuard
 ```
 
-Defined in: [`packages/workflow-core/src/resource.rs:41`](../../../packages/workflow-core/src/resource.rs#L41)
+Defined in: [`packages/workflow_core/src/resource.rs:41`](../../../packages/workflow_core/src/resource.rs#L41)
 
 Async acquire of one unit for `key`, waiting until the previous holder
 releases. The returned [`GateGuard`](GateGuard.md) (one permit) is released on drop,

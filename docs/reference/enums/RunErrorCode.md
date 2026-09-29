@@ -5,7 +5,7 @@ title: RunErrorCode
 
 # Enum: RunErrorCode
 
-Defined in: [`packages/workflow-core/src/error.rs:109`](../../../packages/workflow-core/src/error.rs#L109)
+Defined in: [`packages/workflow_core/src/error.rs:109`](../../../packages/workflow_core/src/error.rs#L109)
 
 终局错误码（对齐 TanStack `RUN_ERRORED.code`，`types.ts:91`）。
 
@@ -22,7 +22,7 @@ approval_lost | workflow_version_mismatch`。这里只留引擎真能产出的�
 
 ### Error
 
-Defined in: [`packages/workflow-core/src/error.rs:111`](../../../packages/workflow-core/src/error.rs#L111)
+Defined in: [`packages/workflow_core/src/error.rs:111`](../../../packages/workflow_core/src/error.rs#L111)
 
 handler 抛错 / step 失败。
 
@@ -31,7 +31,7 @@ handler 抛错 / step 失败。
 
 ### Aborted
 
-Defined in: [`packages/workflow-core/src/error.rs:113`](../../../packages/workflow-core/src/error.rs#L113)
+Defined in: [`packages/workflow_core/src/error.rs:113`](../../../packages/workflow_core/src/error.rs#L113)
 
 被 `cancel_run` 中止。
 
@@ -40,7 +40,7 @@ Defined in: [`packages/workflow-core/src/error.rs:113`](../../../packages/workfl
 
 ### Validation
 
-Defined in: [`packages/workflow-core/src/error.rs:115`](../../../packages/workflow-core/src/error.rs#L115)
+Defined in: [`packages/workflow_core/src/error.rs:115`](../../../packages/workflow_core/src/error.rs#L115)
 
 `initialize` 失败或 state 形状校验不过（对应他们 zod `.safeParse` 失败）。
 
@@ -49,7 +49,7 @@ Defined in: [`packages/workflow-core/src/error.rs:115`](../../../packages/workfl
 
 ### WorkflowVersionMismatch
 
-Defined in: [`packages/workflow-core/src/error.rs:119`](../../../packages/workflow-core/src/error.rs#L119)
+Defined in: [`packages/workflow_core/src/error.rs:119`](../../../packages/workflow_core/src/error.rs#L119)
 
 版本化 run 的 `workflow_version` 既不是当前版本、也不在
 `previous_versions` 里（对齐上游 `workflow_version_mismatch`
@@ -63,7 +63,7 @@ Defined in: [`packages/workflow-core/src/error.rs:119`](../../../packages/workfl
 pub fn as_str(&self) -> &'static str
 ```
 
-Defined in: [`packages/workflow-core/src/error.rs:123`](../../../packages/workflow-core/src/error.rs#L123)
+Defined in: [`packages/workflow_core/src/error.rs:123`](../../../packages/workflow_core/src/error.rs#L123)
 
 #### Returns
 
