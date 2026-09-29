@@ -127,6 +127,18 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
    不阻塞——与上游 `throw new WorkflowPaused()` / `if (engine.paused) return`
    同形。唤醒一律来自外部（runtime 的 `sweep` / `deliver_signal`）。
    见 `docs/runtime-design.md` D3。
+6. **`StepCtx::progress(f64)`**：**上游没有 progress 原语** ——
+   `rg "progress" packages/workflow-core/src/` 零命中。上游表达这件事的唯一
+   方式是通用的 `ctx.emit(name, value)`，而 `primitives.md:118` 里
+   `ctx.emit('progress', { step: 3, of: 10 })` 只是给 `emit` 起的**举例名字**，
+   不是专用原语。我们把它做成了独立事件变体 `WorkflowEvent::StepProgress`
+   （带 `step_id`、值域收成 `0.0..=1.0`），好处是消费方不必按 name 过滤。
+   **不持久化这一点两边一致**，且上游写得更明确（`primitives.md:113`）：
+   "non-durable observability event… **Don't use for** anything the engine
+   should replay"。
+   上游对齐的写法仍然是 `ctx.emit` → `WorkflowEvent::Custom`；
+   需要 step 归因时用 `progress`。示例见 `examples/store_file/src/progress_report.rs`。
+   背景见 `docs/concepts/ctx-state.md`「那 step 内部的进度呢？」。
 
 ## 驱动入口：`RunWorkflowOptions` 的字段对照
 

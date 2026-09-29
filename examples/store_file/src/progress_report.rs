@@ -19,6 +19,16 @@
 //! | 写 `ctx.state` | ❌ | ❌ | —— 这个组合不存在 |
 //! | 拆成多个 step | ✅ | ✅ | 需要重放正确的粒度 |
 //!
+//! **「即时 + 耐久」这个格子是空的,而且是故意空的。** 上游把它写得更死
+//! （`primitives.md:113`，`ctx.emit` 的契约原文）："non-durable observability
+//! event… **Don't use for** anything the engine should replay"。
+//!
+//! 注意 `progress` **不是上游原语** —— 上游 `rg "progress" workflow-core/src/`
+//! 零命中，只有 `primitives.md:118` 里 `ctx.emit('progress', …)` 那个举例名字。
+//! 我们把它做成了独立变体（带 `step_id`、值域 `0.0..=1.0`），消费方不必按
+//! name 过滤；不需要 step 归因时上游对齐写法仍是 `ctx.emit`。见
+//! `docs/tanstack-alignment.md` 分歧 6。
+//!
 //! **为什么不耐久,以及为什么这是对的**：事件定义上写死了
 //! `/// Observability only (not persisted)`，`publish()` 只调 publisher 回调、
 //! **从不 `append` 到日志**。假设某个 step 报了 50% 然后崩了——resume 时闭包
