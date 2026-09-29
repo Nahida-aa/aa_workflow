@@ -9,12 +9,33 @@ title: create_workflow
 pub fn create_workflow<TInput, TOutput, TState>(config: CreateWorkflowConfig<TInput, TOutput, TState>) -> WorkflowBuilder<TInput, TOutput, TState, ()>
 ```
 
-Defined in: [`packages/workflow-core/src/define/define_workflow.rs:167`](../../../packages/workflow-core/src/define/define_workflow.rs#L167)
+Defined in: [`packages/workflow-core/src/define/define_workflow.rs:188`](../../../packages/workflow-core/src/define/define_workflow.rs#L188)
 
-Build a typed workflow the TanStack way: declaration config → builder →
-`handler()`. `In`/`Out`/`St` come from the config's
-[`input`](../structs/CreateWorkflowConfig.md)/[`output`](../structs/CreateWorkflowConfig.md)/[`state`](../structs/CreateWorkflowConfig.md) re-types; the
-handler's output type is inferred from the closure return value.
+Define a workflow. Returns a builder chain:
+
+```rust,ignore
+let onboard = create_workflow(
+    CreateWorkflowConfig::new("onboard").input::<OnboardInput>(),
+)
+.middleware(traced)
+.handler(|ctx| async move {
+    let profile = ctx.step("load", |_| async { load_profile(&ctx.input.user_id) }).await?;
+    ctx.sleep("cooloff", std::time::Duration::from_secs(60)).await?;
+    let decision = ctx.approve("continue", "Continue?").await?;
+    Ok(serde_json::json!({ "ok": decision["approved"] }))
+});
+```
+
+The handler's `ctx` argument (a [`BaseCtx`](../structs/BaseCtx.md)) carries everything: the
+typed input, state, durable primitives ([`step`](../structs/BaseCtx.md),
+[`sleep`](../structs/BaseCtx.md), [`approve`](../structs/BaseCtx.md), ...), and any
+fields added by registered middleware (`ctx.ext`). Helpers should accept
+a typed `BaseCtx<...>` argument to compose cleanly.
+
+`In`/`Out`/`St` are fixed by the config: [`input`](../structs/CreateWorkflowConfig.md)
+/ [`output`](../structs/CreateWorkflowConfig.md) / [`state`](../structs/CreateWorkflowConfig.md)
+pin the generics; the handler's output type is inferred from the closure
+return value.
 
 ## Type Parameters
 
