@@ -136,14 +136,11 @@ async fn async_publisher_can_await_without_blocking_the_runtime() {
             .input(serde_json::json!({}))
             .run_id("r")
             .async_publisher(move |e| {
-                // 先取出再进 async：返回的 future 是 `BoxFuture<'static, _>`，
-                // 不能借用 `&WorkflowEvent`（见 async_publisher 的文档）。
-                let name = e.type_name().to_string();
                 let sink = sink.clone();
                 async move {
-                    // 真 await：让出执行权
+                    // 真 await：让出执行权。事件按值进来，整条 move 进 async。
                     tokio::time::sleep(Duration::from_millis(5)).await;
-                    sink.lock().unwrap().push(name);
+                    sink.lock().unwrap().push(e.type_name().to_string());
                 }
             }),
     )
@@ -167,16 +164,13 @@ async fn delivery_order_matches_production_order() {
             .input(serde_json::json!({}))
             .run_id("r")
             .async_publisher(move |e| {
-                let step_id = match e {
-                    WorkflowEvent::StepFinished { step_id, .. } => Some(step_id.clone()),
-                    _ => None,
-                };
+                // 按值传入 ⇒ 可以直接 `async move` 整个事件，不需要先取值。
                 let sink = sink.clone();
                 async move {
                     // 抖动一下：若实现有并发投递，顺序就会乱
                     tokio::time::sleep(Duration::from_millis(1)).await;
-                    if let Some(id) = step_id {
-                        sink.lock().unwrap().push(id);
+                    if let WorkflowEvent::StepFinished { step_id, .. } = &e {
+                        sink.lock().unwrap().push(step_id.clone());
                     }
                 }
             }),
@@ -203,12 +197,11 @@ async fn terminal_event_is_delivered_before_run_workflow_returns() {
             .input(serde_json::json!({}))
             .run_id("r")
             .async_publisher(move |e| {
-                let name = e.type_name().to_string();
                 let sink = sink.clone();
                 async move {
                     // 每个事件都睡一会儿，让「还没排空就返回」变得容易暴露
                     tokio::time::sleep(Duration::from_millis(20)).await;
-                    sink.lock().unwrap().push(name);
+                    sink.lock().unwrap().push(e.type_name().to_string());
                 }
             }),
     )
@@ -251,11 +244,10 @@ async fn paused_path_also_drains_the_queue() {
             .input(serde_json::json!({}))
             .run_id("r")
             .async_publisher(move |e| {
-                let name = e.type_name().to_string();
                 let sink = sink.clone();
                 async move {
                     tokio::time::sleep(Duration::from_millis(10)).await;
-                    sink.lock().unwrap().push(name);
+                    sink.lock().unwrap().push(e.type_name().to_string());
                 }
             }),
     )
@@ -268,5 +260,43 @@ async fn paused_path_also_drains_the_queue() {
         got.last().map(String::as_str),
         Some("STEP_PAUSED"),
         "Paused 早退也必须排空 drain，终态事件应是 STEP_PAUSED，实际：{got:?}",
+    );
+}
+
+/// **按值语义的意义**：事件能整条 move 进 async block，不需要「先取值再进
+/// async」那套（`&WorkflowEvent` + `BoxFuture<'static, _>` 的组合做不到这点）。
+///
+/// 顺带钉住「引擎侧只克隆一次」：publisher 拿到的是**独占所有权**，所以它可以
+/// 把事件 move 进 `tokio::spawn` —— 若是 `&`，这里就得自己再克隆。
+#[tokio::test]
+async fn event_moves_into_the_future_with_no_extra_clone() {
+    let store = store_of("move");
+    let done = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = done.clone();
+
+    run_workflow(
+        &RunWorkflowOptions::new(three_steps(), create_run_store_adapter(store))
+            .input(serde_json::json!({}))
+            .run_id("r")
+            .async_publisher(move |ev| {
+                let sink = sink.clone();
+                async move {
+                    // 整条 move 进独立 task：只有按值传才做得到
+                    tokio::spawn(async move {
+                        sink.lock().unwrap().push(ev.type_name().to_string());
+                    })
+                    .await
+                    .expect("spawn 成功");
+                }
+            }),
+    )
+    .await
+    .unwrap();
+
+    let got = done.lock().unwrap().clone();
+    assert_eq!(got.last().map(String::as_str), Some("RUN_FINISHED"), "{got:?}");
+    assert!(
+        got.iter().filter(|t| *t == "STEP_FINISHED").count() == 3,
+        "三个 step 的 Finished 都应送达：{got:?}"
     );
 }

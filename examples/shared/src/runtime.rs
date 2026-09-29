@@ -11,7 +11,7 @@ use aa_workflow_core::{
 };
 
 /// 可选的事件订阅者（每个 `ctx.step` 落盘事件都会回调）。
-pub type EventSubscriber = Arc<dyn Fn(&WorkflowEvent) + Send + Sync>;
+pub type EventSubscriber = Arc<dyn Fn(WorkflowEvent) + Send + Sync>;
 
 /// 把事件打到 tracing 的默认订阅者（`examples.runtime` target）。
 pub fn tracing_publisher() -> EventSubscriber {

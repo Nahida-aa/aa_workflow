@@ -212,6 +212,10 @@ impl EngineRuntime {
     /// (upstream: *"A misbehaving publisher must not break the run — swallow
     /// and continue."*). Swallowed **silently** — this crate has no logging
     /// dependency; hosts that want diagnostics catch inside their own publisher.
+    ///
+    /// `ev.clone()` 是**必需**的（调用点只有 `&self`，事件要活过本次调用）；
+    /// 但它也是**唯一**一次克隆——drain task 拿到所有权后按值交给 publisher，
+    /// 引擎侧不再有任何额外拷贝。
     pub(crate) fn publish(&self, ev: &WorkflowEvent) {
         if let Some(tx) = &self.publish_tx {
             let _ = tx.send(Fanout::Event(ev.clone()));
@@ -1518,7 +1522,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
             .run_id("prog_run")
-            .publisher(Some(Arc::new(move |e: &WorkflowEvent| {
+            .publisher(Some(Arc::new(move |e: WorkflowEvent| {
                 sink.lock().unwrap().push(e.clone())
             }))),
         )
@@ -2150,7 +2154,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
             .run_id("em1")
-            .publisher(Some(Arc::new(move |e: &WorkflowEvent| {
+            .publisher(Some(Arc::new(move |e: WorkflowEvent| {
                 sink.lock().unwrap().push(e.clone())
             }))),
         )
@@ -2794,7 +2798,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
             .run_id("sd")
-            .publisher(Some(Arc::new(move |e: &WorkflowEvent| {
+            .publisher(Some(Arc::new(move |e: WorkflowEvent| {
                 sink.lock().unwrap().push(e.clone())
             }))),
         )
@@ -2866,7 +2870,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
             .run_id("tail:1")
-            .publisher(Some(Arc::new(move |e: &WorkflowEvent| {
+            .publisher(Some(Arc::new(move |e: WorkflowEvent| {
                 sink.lock().unwrap().push(e.clone())
             }))),
         )

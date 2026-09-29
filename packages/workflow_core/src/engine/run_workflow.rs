@@ -47,8 +47,19 @@ use crate::run_store::{RunState, RunStore};
 /// 引用计数自增，同时避免给结构体引入生命周期参数（那会让 builder 链很难写）。
 /// 事件回调的**已擦除**类型：返回 future 而非直接调用，所以宿主可以给异步实现
 /// （对齐上游 `publish?: (runId, event) => void | Promise<void>`）。
+///
+/// **按值收 `WorkflowEvent`**，不是 `&WorkflowEvent`。这不是口味问题：
+/// `publish()` 走队列时本来就要克隆一份（调用点只有 `&self`），drain task 已经
+/// 持有一份完整副本。传引用就得让返回的 future 借用它，于是被迫用
+/// `BoxFuture<'static, _>` + HRTB 兜（`for<'a> Fn(&'a E) -> BoxFuture<'a, ()>`
+/// 在 `dyn` 上是噩梦），代价是 async block **不能借用事件**。
+/// 按值传则一次克隆都不浪费、生命周期问题直接消失：
+///
+/// ```ignore
+/// .async_publisher(|ev| async move { sink.send(ev).await })   // 借用不了，但也不需要
+/// ```
 pub type Publisher =
-    Arc<dyn Fn(&WorkflowEvent) -> crate::define::BoxFuture<'static, ()> + Send + Sync>;
+    Arc<dyn Fn(WorkflowEvent) -> crate::define::BoxFuture<'static, ()> + Send + Sync>;
 
 pub struct RunWorkflowOptions {
     /// 要驱动的 workflow。**必填**（由 [`Self::new`] 保证）。
@@ -86,7 +97,7 @@ pub struct RunWorkflowOptions {
     /// 不需要，产品 UI 可能需要。所以要留就自己在这里写：
     ///
     /// ```ignore
-    /// .publisher(Some(Arc::new(move |e: &WorkflowEvent| {
+    /// .publisher(Some(Arc::new(move |e: WorkflowEvent| {
     ///     if let WorkflowEvent::StepProgress { step_id, value, .. } = e {
     ///         my_db.insert_progress(run_id, step_id, *value);
     ///     }
@@ -196,12 +207,16 @@ impl RunWorkflowOptions {
 
     /// 事件回调（上游 `publish`）。收 `Option`，便于直接对接旧的四参数签名。
     ///
-    /// 同步版：内部包装成一个**立即完成**的 future，所以调用方形态不变
-    /// （`Arc::new(move |ev| …)`），实际投递发生在 drain task 上（见字段文档
-    /// 「publisher 不会拖慢引擎」）。要真正异步请用 [`Self::async_publisher`]。
-    pub fn publisher(mut self, v: Option<Arc<dyn Fn(&WorkflowEvent) + Send + Sync>>) -> Self {
+    /// 同步版：内部包装成一个**立即完成**的 future，实际投递发生在 drain task
+    /// 上（见字段文档「publisher 不拖慢引擎」）。要真正 `await` 请用
+    /// [`Self::async_publisher`]。
+    ///
+    /// 事件**按值**传入，与 `async_publisher` 同一套所有权语义（只有投递时机
+    /// 不同），这样两条路径的心智模型是一致的：`ev` 归你，随便 move 进
+    /// `async move`、随便丢给线程、随便 `join()`。
+    pub fn publisher(mut self, v: Option<Arc<dyn Fn(WorkflowEvent) + Send + Sync>>) -> Self {
         self.publisher = v.map(|f| {
-            Arc::new(move |ev: &WorkflowEvent| -> crate::define::BoxFuture<'static, ()> {
+            Arc::new(move |ev: WorkflowEvent| -> crate::define::BoxFuture<'static, ()> {
                 let out = f(ev);
                 Box::pin(async move { out })
             }) as Publisher
@@ -214,30 +229,21 @@ impl RunWorkflowOptions {
     /// 与 [`Self::publisher`] 的差别只是**允许 `await`**：投递在 drain task 上
     /// 串行进行，但引擎执行不受它阻塞。要落盘/发网络而不想卡住引擎，就用这个。
     ///
-    /// ## 注意：返回的 future 是 `BoxFuture<'static, ()>`
-    ///
-    /// 所以 async block **不能借用** `&WorkflowEvent` —— 必须先把要用的字段取
-    /// 出来再进 async：
+    /// 事件**按值**传入，所以 async block 可以直接 `async move` 整个事件 ——
+    /// 不需要「先取值再进 async」那套：
     ///
     /// ```ignore
-    /// // ✗ 编译不过：future 借用了 `ev`，活不过 `'static`
-    /// .async_publisher(|ev| async move { sink.send(ev.clone()).await })
-    ///
-    /// // ✓ 先取值，再进 async
-    /// .async_publisher(|ev| {
-    ///     let name = ev.type_name().to_string();
-    ///     async move { sink.send(name).await }
-    /// })
+    /// .async_publisher(|ev| async move { sink.send(ev).await })
     /// ```
     ///
-    /// 这个约束来自「publisher 可能活过本次 drive」（drain task 在 `run_workflow`
-    /// 之外被 spawn），换来的是 publisher 可以持有自己的状态、跨事件复用。
+    /// 想留一份自己用就克隆（事件不大，且 `publish()` 已经为了入队克隆过一次，
+    /// 这里不会再多一次引擎侧克隆）。
     pub fn async_publisher<F, Fut>(mut self, f: F) -> Self
     where
-        F: Fn(&WorkflowEvent) -> Fut + Send + Sync + 'static,
+        F: Fn(WorkflowEvent) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
-        self.publisher = Some(Arc::new(move |ev: &WorkflowEvent| {
+        self.publisher = Some(Arc::new(move |ev: WorkflowEvent| {
             Box::pin(f(ev)) as crate::define::BoxFuture<'static, ()>
         }));
         self
@@ -414,8 +420,10 @@ pub async fn run_workflow(
                     };
                     // 逐个兜住：宿主 panic 不得掀掉 run（上游同形，见 publish 文档）。
                     // future 在构造时才 panic，所以只能连 future 一起 catch。
+                    // 按值移交：drain task 独占这份事件，publisher 也独占它，
+                    // 所以全程只有 publish() 那一次克隆。
                     let fut = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        publisher(&ev)
+                        publisher(ev)
                     }));
                     if let Ok(fut) = fut {
                         // `await` 期间的 panic 由 task 级隔离兜住（见收尾 join）。
@@ -585,7 +593,7 @@ async fn init_failed(
             code: RunErrorCode::Validation,
         };
         if let Ok(fut) =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| publish(&ev)))
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| publish(ev)))
         {
             let _ = fut.await;
         }
@@ -782,9 +790,9 @@ mod tests {
     async fn init_failure_publishes_validation_code_without_appending() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let seen: Arc<Mutex<Vec<WorkflowEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let publisher: Arc<dyn Fn(&WorkflowEvent) + Send + Sync> = {
+        let publisher: Arc<dyn Fn(WorkflowEvent) + Send + Sync> = {
             let seen = seen.clone();
-            Arc::new(move |ev| seen.lock().unwrap().push(ev.clone()))
+            Arc::new(move |ev| seen.lock().unwrap().push(ev))
         };
         let wf = Workflow::new("bad-init")
             .initialize(|_| Err(anyhow::anyhow!("nope")))

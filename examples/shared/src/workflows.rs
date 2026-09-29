@@ -1588,7 +1588,7 @@ mod tests {
         // Drive #1：挂起在 price-wait。
         let first = run_workflow(
             &opts(Arc::new(wf.clone()), store.clone()).publisher(Some(Arc::new(
-                move |e: &WorkflowEvent| sink.lock().unwrap().push(e.clone()),
+                move |e: WorkflowEvent| sink.lock().unwrap().push(e.clone()),
             ))),
         )
         .await

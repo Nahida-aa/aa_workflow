@@ -44,7 +44,7 @@ async fn panicking_publisher_does_not_break_the_run() {
         &RunWorkflowOptions::new(Arc::new(wf.into_workflow()), create_run_store_adapter(store.clone()))
             .input(serde_json::json!({}))
             .run_id("r")
-            .publisher(Some(Arc::new(|_e: &WorkflowEvent| {
+            .publisher(Some(Arc::new(|_e: WorkflowEvent| {
                 panic!("publisher 炸了");
             }))),
     )
@@ -85,7 +85,7 @@ async fn publisher_keeps_working_after_one_panic() {
         &RunWorkflowOptions::new(Arc::new(wf.into_workflow()), create_run_store_adapter(store))
             .input(serde_json::json!({}))
             .run_id("r")
-            .publisher(Some(Arc::new(move |e: &WorkflowEvent| {
+            .publisher(Some(Arc::new(move |e: WorkflowEvent| {
                 let t = e.type_name();
                 // 只炸 RUN_STARTED（第一个事件），后面的必须照常送达。
                 assert_ne!(t, "RUN_STARTED", "这一步就是要 panic");

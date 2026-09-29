@@ -833,18 +833,18 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         let max_events = args.max_events;
         let run_id = args.run_id.to_string();
         let runtime_publish = self.config.publish.clone();
-        let publisher: Arc<dyn Fn(&WorkflowEvent) + Send + Sync> = {
+        let publisher: Arc<dyn Fn(WorkflowEvent) + Send + Sync> = {
             let collected = collected.clone();
             let total = total.clone();
             let run_id = run_id.clone();
-            Arc::new(move |event: &WorkflowEvent| {
+            Arc::new(move |event: WorkflowEvent| {
                 let count = total.fetch_add(1, Ordering::Relaxed);
                 let keep = include_events && max_events.map(|m| count < m).unwrap_or(true);
                 if keep {
                     collected.lock().unwrap().push(event.clone());
                 }
                 if let Some(publish) = &runtime_publish {
-                    publish(&run_id, event);
+                    publish(&run_id, &event);
                 }
             })
         };
