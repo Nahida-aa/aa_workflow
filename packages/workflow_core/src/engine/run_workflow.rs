@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use crate::define::Workflow;
 use crate::engine::{
-    DEFAULT_MIN_YIELD_REMAINING_MS, EngineRuntime, StepHalt, WorkflowCancelled, WorkflowParked,
-    now_ms,
+    DEFAULT_MIN_YIELD_REMAINING_MS, EngineRuntime, Fanout, StepHalt, WorkflowCancelled,
+    WorkflowParked, now_ms,
 };
 use crate::error::{RunError, RunErrorCode, WorkflowError};
 use crate::event::{RunStatus, StepStatus, WorkflowEvent, fold_step_states};
@@ -45,6 +45,11 @@ use crate::run_store::{RunState, RunStore};
 /// `Workflow` 内含 `Vec<Workflow>`（`previous_versions`）与若干 `Arc`，
 /// 直接持有所有权会让每次 builder 调用都要 clone 一遍。`Arc` 让 clone 变成
 /// 引用计数自增，同时避免给结构体引入生命周期参数（那会让 builder 链很难写）。
+/// 事件回调的**已擦除**类型：返回 future 而非直接调用，所以宿主可以给异步实现
+/// （对齐上游 `publish?: (runId, event) => void | Promise<void>`）。
+pub type Publisher =
+    Arc<dyn Fn(&WorkflowEvent) -> crate::define::BoxFuture<'static, ()> + Send + Sync>;
+
 pub struct RunWorkflowOptions {
     /// 要驱动的 workflow。**必填**（由 [`Self::new`] 保证）。
     pub workflow: Arc<Workflow>,
@@ -88,23 +93,34 @@ pub struct RunWorkflowOptions {
     /// })))
     /// ```
     ///
-    /// ## 坑 1：这是 `Fn`，不是 async —— 同步阻塞在热路径上
+    /// ## publisher 不拖慢引擎（对齐上游的 async generator）
     ///
-    /// `publish()` 是**内联调用**的，没锁、但也没让出执行权。在这里做 DB 写 /
-    /// 网络 IO 会**卡住每一步的状态转换**。要异步扇出得自己套一层
-    /// （`tokio::spawn`，或有界 channel + 独立 drain 任务）。引擎不替宿主决定
-    /// 扇出语义，但这个成本必须知道。
+    /// 投递是「同步调用点 + 独立 drain task」两段：调用点只做一次
+    /// `UnboundedSender::send`（非阻塞），真正 await publisher 的是 drain task。
     ///
-    /// 上游这里是 `await options.publish(…)`，**同样会串行化 run** —— 这不是
-    /// 本仓独有的问题，签名不接受 async 才是我们的取舍。
+    /// 上游是同一个形状：`runWorkflow` 是个 `async function*`，它在
+    /// `queue.shift()` 之后 `await publish` 再 `yield`，而**执行在另一个 task**
+    /// 里继续往那个 queue 推（`run-workflow.ts:85-134`）。所以「publisher 慢」
+    /// 在两边都只拖慢**消费端吞吐**，不拖慢**引擎进度**。
     ///
-    /// ## 坑 2：进程内回调 = 有丢失窗口
+    /// 队列是**无界**的（上游就是个裸数组），所以慢 publisher 涨内存而不是卡住
+    /// run；要背压就在宿主自己的 publisher 里做。
+    ///
+    /// **「返回前终态已投递」是守住的旧语义**：收尾发 shutdown 并 join drain，
+    /// 所以 `RUN_FINISHED` / `RUN_ERRORED` / `STEP_PAUSED` 一定在
+    /// `run_workflow` 返回前送达（Paused 早退路径也排空）。代价是慢 publisher 会
+    /// 延迟**返回**，但执行早已结束。
+    ///
+    /// 死锁风险与改造前相同：publisher 若 `await` 依赖本次 run 完成的东西，仍会
+    /// 挂——旧语义下内联调用时也会挂。不是回归。
+    ///
+    /// ## 坑 1：进程内回调 = 有丢失窗口
     ///
     /// 崩溃时最后一批事件就没了。所以「自己落盘」得到的是**被观测到的那部分**
     /// 耐久，不是「全部」耐久。拿它当审计日志会得到一份有洞的审计日志——
     /// 审计要耐久就别走这里，该让引擎 append。
     ///
-    /// ## 坑 3：publisher panic 会被吞掉（与上游一致，刻意如此）
+    /// ## 坑 2：publisher panic 会被吞掉（与上游一致，刻意如此）
     ///
     /// 宿主 publisher 里的 panic **不会**掀掉你的 run —— `publish()` 用
     /// `catch_unwind` 兜住。上游同形（*"A misbehaving publisher must not break
@@ -114,7 +130,9 @@ pub struct RunWorkflowOptions {
     /// 代价是**静默** —— 本 crate 没有日志依赖，所以拿不到「publisher 炸了」这
     /// 条信息。要诊断就在**你自己的 publisher 内部** catch + 记日志，日志策略和
     /// 依赖都留在宿主那侧。
-    pub publisher: Option<Arc<dyn Fn(&WorkflowEvent) + Send + Sync>>,
+    /// 可选的事件回调（上游 `publish`）。多数宿主用同步的 [`Self::publisher`]；
+    /// 需要 `await` 落盘/发网络的用 [`Self::async_publisher`]。
+    pub publisher: Option<Publisher>,
 }
 
 impl RunWorkflowOptions {
@@ -177,11 +195,57 @@ impl RunWorkflowOptions {
     }
 
     /// 事件回调（上游 `publish`）。收 `Option`，便于直接对接旧的四参数签名。
-    pub fn publisher(
-        mut self,
-        v: Option<Arc<dyn Fn(&WorkflowEvent) + Send + Sync>>,
-    ) -> Self {
-        self.publisher = v;
+    ///
+    /// 同步版：内部包装成一个**立即完成**的 future，所以调用方形态不变
+    /// （`Arc::new(move |ev| …)`），实际投递发生在 drain task 上（见字段文档
+    /// 「publisher 不会拖慢引擎」）。要真正异步请用 [`Self::async_publisher`]。
+    pub fn publisher(mut self, v: Option<Arc<dyn Fn(&WorkflowEvent) + Send + Sync>>) -> Self {
+        self.publisher = v.map(|f| {
+            Arc::new(move |ev: &WorkflowEvent| -> crate::define::BoxFuture<'static, ()> {
+                let out = f(ev);
+                Box::pin(async move { out })
+            }) as Publisher
+        });
+        self
+    }
+
+    /// 异步事件回调（上游 `publish` 的 `Promise<void>` 那一支）。
+    ///
+    /// 与 [`Self::publisher`] 的差别只是**允许 `await`**：投递在 drain task 上
+    /// 串行进行，但引擎执行不受它阻塞。要落盘/发网络而不想卡住引擎，就用这个。
+    ///
+    /// ## 注意：返回的 future 是 `BoxFuture<'static, ()>`
+    ///
+    /// 所以 async block **不能借用** `&WorkflowEvent` —— 必须先把要用的字段取
+    /// 出来再进 async：
+    ///
+    /// ```ignore
+    /// // ✗ 编译不过：future 借用了 `ev`，活不过 `'static`
+    /// .async_publisher(|ev| async move { sink.send(ev.clone()).await })
+    ///
+    /// // ✓ 先取值，再进 async
+    /// .async_publisher(|ev| {
+    ///     let name = ev.type_name().to_string();
+    ///     async move { sink.send(name).await }
+    /// })
+    /// ```
+    ///
+    /// 这个约束来自「publisher 可能活过本次 drive」（drain task 在 `run_workflow`
+    /// 之外被 spawn），换来的是 publisher 可以持有自己的状态、跨事件复用。
+    pub fn async_publisher<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(&WorkflowEvent) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.publisher = Some(Arc::new(move |ev: &WorkflowEvent| {
+            Box::pin(f(ev)) as crate::define::BoxFuture<'static, ()>
+        }));
+        self
+    }
+
+    /// 清掉事件回调。
+    pub fn no_publisher(mut self) -> Self {
+        self.publisher = None;
         self
     }
 }
@@ -309,12 +373,12 @@ pub async fn run_workflow(
     // shares that source for consistency.
     let state = match (active.initialize)(&opts.input) {
         Ok(s) => s,
-        Err(e) => return init_failed(&store, run_state, &run_id, &e, publisher.as_ref()),
+        Err(e) => return init_failed(&store, run_state, &run_id, &e, publisher.as_ref()).await,
     };
     if let Some(validate) = &active.state_validator
         && let Err(e) = validate(&state)
     {
-        return init_failed(&store, run_state, &run_id, &e, publisher.as_ref());
+        return init_failed(&store, run_state, &run_id, &e, publisher.as_ref()).await;
     }
 
     let events = store.get_events(&run_id)?;
@@ -330,6 +394,39 @@ pub async fn run_workflow(
     };
 
     let state_mirror: Arc<Mutex<serde_json::Value>> = Arc::new(Mutex::new(state.clone()));
+
+    // 事件扇出：同步调用点只 `send`（非阻塞），drain task 独立 await publisher。
+    // 上游等价物是 `runWorkflow` 这个 async generator：它在 `queue.shift()` 之后
+    // `await publish`，而执行在**另一个** task 里往 queue 推 —— 所以慢 publisher
+    // 拖慢的是消费端吞吐，不是引擎进度（`run-workflow.ts:85-134`）。
+    let (publish_tx, drain) = match opts.publisher.clone() {
+        None => (None, None),
+        Some(publisher) => {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Fanout>();
+            let drain = tokio::spawn(async move {
+                // 串行 await，保证投递顺序 = 产生顺序（无界队列不会重排）。
+                while let Some(msg) = rx.recv().await {
+                    let ev = match msg {
+                        Fanout::Event(ev) => ev,
+                        // 显式收尾信号：保证「run_workflow 返回前最后一条事件
+                        // （RUN_FINISHED / RUN_ERRORED）也已投递」。
+                        Fanout::Shutdown => break,
+                    };
+                    // 逐个兜住：宿主 panic 不得掀掉 run（上游同形，见 publish 文档）。
+                    // future 在构造时才 panic，所以只能连 future 一起 catch。
+                    let fut = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        publisher(&ev)
+                    }));
+                    if let Ok(fut) = fut {
+                        // `await` 期间的 panic 由 task 级隔离兜住（见收尾 join）。
+                        let _ = fut.await;
+                    }
+                }
+            });
+            (Some(tx), Some(drain))
+        }
+    };
+
     let inner = Arc::new(EngineRuntime {
         run_id: run_id.clone(),
         input: opts.input.clone(),
@@ -341,7 +438,7 @@ pub async fn run_workflow(
         lives: Mutex::new(lives),
         target_step: opts.target_step.clone(),
         target_reached: AtomicBool::new(target_reached),
-        publisher,
+        publish_tx: publish_tx.clone(),
         now_counter: AtomicUsize::new(0),
         uuid_counter: AtomicUsize::new(0),
         deadline: opts.deadline,
@@ -377,6 +474,7 @@ pub async fn run_workflow(
         Ok(output) => (RunStatus::Finished, Some(output), None),
         Err(e) if e.downcast_ref::<StepHalt>().is_some() => (RunStatus::Finished, None, None),
         Err(e) if e.downcast_ref::<WorkflowParked>().is_some() => {
+            finish_fanout(publish_tx.as_ref(), drain).await;
             return Ok(RunOutcome {
                 run_id,
                 status: RunStatus::Paused,
@@ -409,7 +507,10 @@ pub async fn run_workflow(
             output: output.clone(),
         },
     };
-    inner.append(&terminal)?;
+    if let Err(e) = inner.append(&terminal) {
+        finish_fanout(publish_tx.as_ref(), drain).await;
+        return Err(e);
+    }
     inner.publish(&terminal);
 
     let mut st = run_state;
@@ -419,12 +520,38 @@ pub async fn run_workflow(
     st.updated_at = now_ms();
     store.set_run_state(&run_id, &st)?;
 
+    finish_fanout(publish_tx.as_ref(), drain).await;
+
     Ok(RunOutcome {
         run_id,
         status,
         output,
         error: failure.map(|(e, _)| e),
     })
+}
+
+/// 收尾事件扇出：发 shutdown 信号并等 drain task 把队列排空。
+///
+/// **必须在每条 return 路径上调用**（Paused 早退、正常收尾、以及 append 失败
+/// 的 `?` 传播）——否则最后一条事件（`RUN_FINISHED` / `RUN_ERRORED`）可能还
+/// 在队列里，`run_workflow` 就返回了，宿主会漏掉终态。
+///
+/// 注意这会让「慢 publisher」延迟 **run_workflow 的返回**，但不会延迟引擎执行
+/// （执行早已结束）。这和改造前一致：原先 publisher 是内联同步调用，返回前必然
+/// 已投递完毕——语义是守住的，没有静默削弱成 fire-and-forget。
+///
+/// 死锁风险与改造前相同：publisher 若 `await` 依赖本次 run 完成的东西，仍会挂。
+/// 那在旧语义下也会挂（内联调用时挂），所以不是回归。
+async fn finish_fanout(
+    tx: Option<&tokio::sync::mpsc::UnboundedSender<Fanout>>,
+    drain: Option<tokio::task::JoinHandle<()>>,
+) {
+    if let Some(tx) = tx {
+        let _ = tx.send(Fanout::Shutdown);
+    }
+    if let Some(drain) = drain {
+        let _ = drain.await;
+    }
 }
 
 /// Persists a run that failed during pre-handler initialization (state
@@ -436,12 +563,12 @@ pub async fn run_workflow(
 /// **只 publish，不 append**：什么都没跑，不该在日志里留下半条记录——TanStack
 /// 同理，他们的 validation 失败走 `emit(...)`（只进内存队列），不是
 /// `emitAndAppend`（`run-workflow.ts:215`）。
-fn init_failed(
+async fn init_failed(
     store: &Arc<dyn RunStore>,
     mut run_state: RunState,
     run_id: &str,
     err: &anyhow::Error,
-    publisher: Option<&Arc<dyn Fn(&WorkflowEvent) + Send + Sync>>,
+    publisher: Option<&Publisher>,
 ) -> Result<RunOutcome, WorkflowError> {
     let run_err = RunError::from_anyhow(err);
     run_state.status = RunStatus::Errored;
@@ -449,12 +576,19 @@ fn init_failed(
     run_state.updated_at = now_ms();
     store.set_run_state(run_id, &run_state)?;
     if let Some(publish) = publisher {
-        publish(&WorkflowEvent::RunErrored {
+        // 这条路径在 drain task 建立**之前**返回（handler 都没跑起来），所以直接
+        // await 即可——没有引擎执行会被拖慢。panic 仍然吞掉，与 publish 同策略。
+        let ev = WorkflowEvent::RunErrored {
             ts: now_ms(),
             run_id: run_id.to_string(),
             error: run_err.clone(),
             code: RunErrorCode::Validation,
-        });
+        };
+        if let Ok(fut) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| publish(&ev)))
+        {
+            let _ = fut.await;
+        }
     }
     Ok(RunOutcome {
         run_id: run_id.to_string(),

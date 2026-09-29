@@ -118,6 +118,14 @@ pub fn cancel_run(store: &dyn RunStore, run_id: &str) -> Result<(), WorkflowErro
 /// Shared driver state handed to every step (and to the `<WorkflowCtx>`).
 /// This is the code-as-DAG substrate: the "graph" is just this state plus the
 /// handler's control flow, discovered as the handler runs.
+/// 事件扇出通道的载荷。用显式的 [`Fanout::Shutdown`] 而不是「关通道」来收尾：
+/// sender 藏在 `Arc<EngineRuntime>` 里，靠 drop 关不掉；而在 `publish` 热路径上
+/// 加锁/take 也不划算。
+pub(crate) enum Fanout {
+    Event(WorkflowEvent),
+    Shutdown,
+}
+
 pub struct EngineRuntime {
     pub run_id: String,
     pub input: serde_json::Value,
@@ -156,7 +164,11 @@ pub struct EngineRuntime {
     pub yield_resume_at: Option<i64>,
     /// Positional counter for `__yield-{n}` pause keys (per-invocation).
     pub(crate) yield_counter: AtomicUsize,
-    pub publisher: Option<Arc<dyn Fn(&WorkflowEvent) + Send + Sync>>,
+    /// 事件扇出通道。**同步调用点只做一次 `send`**（非阻塞），真正 await
+    /// publisher 的 drain task 独立于引擎执行 —— 对齐上游 `runWorkflow` 的
+    /// async generator：`queue.shift()` 后 `await publish`，而执行在另一个 task
+    /// 里继续往 queue 推（`run-workflow.ts:85-134`）。
+    pub(crate) publish_tx: Option<tokio::sync::mpsc::UnboundedSender<Fanout>>,
     /// Workflow-level fallback retry (TanStack `defaultStepRetry`); steps that
     /// declare their own [`StepOptions::retry`](crate::define::StepOptions::retry)
     /// win.
@@ -182,21 +194,27 @@ impl EngineRuntime {
         }
     }
 
-    /// Best-effort fan-out to the host's publisher. **Never propagates.**
+    /// Best-effort fan-out to the host's publisher. **Never propagates**, and
+    /// **never blocks the engine** — this only hands the event to the drain task
+    /// (see [`Self::publish_tx`]); awaiting the publisher happens there.
     ///
-    /// Upstream wraps this in `try { … } catch { /* swallow */ }` with the
-    /// comment *"A misbehaving publisher must not break the run — swallow and
-    /// continue."* (`engine/run-workflow.ts:128-134`). Same contract here: a
-    /// panic in host code must not be able to destroy a durable run that has
-    /// already appended checkpoints.
+    /// Upstream's shape is an `async function*` whose loop does
+    /// `queue.shift()` → `await publish` → `yield`, while execution runs in a
+    /// *separate* task pushing into that queue (`run-workflow.ts:85-134`). So a
+    /// slow publisher costs upstream throughput, not progress — we match that
+    /// by not awaiting on the engine's path.
     ///
-    /// Swallowed **silently**, like upstream — this crate has no logging
-    /// dependency. Hosts that want diagnostics should catch inside their own
-    /// publisher and record it there; that keeps the logging choice (and the
-    /// dependency) on the host side, where the policy belongs.
+    /// The queue is **unbounded**, like upstream's plain array: a slow
+    /// publisher grows memory rather than stalling the run. Hosts that need
+    /// backpressure should apply it inside their own publisher.
+    ///
+    /// Panics are swallowed so host code cannot destroy a durable run
+    /// (upstream: *"A misbehaving publisher must not break the run — swallow
+    /// and continue."*). Swallowed **silently** — this crate has no logging
+    /// dependency; hosts that want diagnostics catch inside their own publisher.
     pub(crate) fn publish(&self, ev: &WorkflowEvent) {
-        if let Some(p) = &self.publisher {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p(ev)));
+        if let Some(tx) = &self.publish_tx {
+            let _ = tx.send(Fanout::Event(ev.clone()));
         }
     }
 
