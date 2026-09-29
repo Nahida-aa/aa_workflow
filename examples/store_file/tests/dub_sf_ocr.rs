@@ -48,8 +48,8 @@ fn get_workflow_runtime(base: &std::path::Path) -> WorkflowRuntimeDefinition {
     workflows.insert(
         "dub_sf_ocr".to_string(),
         WorkflowRegistration {
-            workflow: dub_sf_ocr().into_workflow(),
-            previous_versions: vec![],
+            load: Arc::new(|| dub_sf_ocr().into_workflow()),
+            previous_versions: HashMap::new(),
             version_override: None,
             schedules: vec![],
         },

@@ -52,17 +52,27 @@ pub const DEFAULT_MIN_YIELD_REMAINING_MS: u64 = 1_000;
 // ============================================================
 
 /// 一个 workflow 的注册项（对齐上游 `WorkflowRegistration`）。
+/// workflow loader（对齐上游 `WorkflowLoader<TWorkflow>`，types.ts:345）。
 ///
-/// 上游用异步 `load()` 闭包（JS 代码分割）；Rust 直接持有构建好的
-/// [`Workflow`] 值。上游还带 `schedules`（注册期声明 cron）——随 materializer
-/// 一起暂缓。
+/// 上游是**异步**闭包（JS 代码分割 + 模块形态归一化：`default`/`workflow`
+/// 包装，见 `WorkflowLoaderResult`）；Rust 无此需求，收敛为同步闭包直接返回
+/// 构建好的 [`Workflow`]——需要异步取数的场景在使用者闭包内自行预取。
+/// 上游 `loadWorkflow` 不 memoize（JS 模块缓存吸收成本）——这里同样不缓存：
+/// loader 应廉价；昂贵加载在使用者侧闭包内自行记忆化。
+pub type WorkflowLoader = Arc<dyn Fn() -> Workflow + Send + Sync>;
+
+/// 单个 workflow 的注册项（对齐上游 `WorkflowRegistration<TWorkflow>`，
+/// types.ts:349）。
 #[derive(Clone)]
 pub struct WorkflowRegistration {
-    pub workflow: Workflow,
-    /// resume 时按持久化版本路由（对齐上游 `previousVersions`）。
-    pub previous_versions: Vec<Workflow>,
+    /// 构建本 workflow 的 loader——每次 load 重新调用（不做 memoize）。
+    pub load: WorkflowLoader,
     /// 覆盖 workflow 自身的 version（对齐上游 `version?`）。
     pub version_override: Option<String>,
+    /// 历史版本的 loader（对齐上游 `previousVersions?: Record<版本, loader>`）。
+    /// key 目前只是声明——`loadWorkflow` 只合并 values 进
+    /// `workflow.previous_versions`，供引擎按持久化版本路由。
+    pub previous_versions: HashMap<String, WorkflowLoader>,
     /// 注册期声明的 schedule（对齐上游 `schedules?`）。
     ///
     /// 由 [`materialize_workflow_schedules`](crate::schedule_materializer::materialize_workflow_schedules)
@@ -339,22 +349,25 @@ fn count_kinds(results: &[RunResult]) -> KindCounts {
 }
 
 impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
-    /// 按 id 加载 workflow：注册项的 version 覆盖自身、合并 previous_versions
-    /// （对齐上游 `loadWorkflow`）。
+    /// 按 id 加载 workflow：调 loader 构建本体、合并 previous_versions 的
+    /// loader 产物、应用 version 覆盖（对齐上游 `loadWorkflow`，
+    /// runtime-driver.ts:856——上游每次都重新 `await load()`，这里同样不缓存）。
     fn load_workflow(&self, workflow_id: &WorkflowId) -> anyhow::Result<Workflow> {
         let registration = self
             .config
             .workflows
             .get(workflow_id)
             .ok_or_else(|| anyhow::anyhow!("Workflow \"{workflow_id}\" is not registered."))?;
-        let mut workflow = registration.workflow.clone();
-        if registration.version_override.is_some() || !registration.previous_versions.is_empty() {
+        let mut workflow = (registration.load)();
+        let mut prevs = workflow.previous_versions.clone();
+        for load_previous in registration.previous_versions.values() {
+            prevs.push((load_previous)());
+        }
+        if registration.version_override.is_some() || !prevs.is_empty() {
             workflow.version = registration
                 .version_override
                 .clone()
                 .or_else(|| workflow.version.clone());
-            let mut prevs = workflow.previous_versions.clone();
-            prevs.extend(registration.previous_versions.iter().cloned());
             workflow.previous_versions = prevs;
         }
         Ok(workflow)
@@ -1069,8 +1082,8 @@ mod driver_tests {
         workflows.insert(
             workflow_id.to_string(),
             WorkflowRegistration {
-                workflow,
-                previous_versions: vec![],
+                load: Arc::new(move || workflow.clone()),
+                previous_versions: HashMap::new(),
                 version_override: None,
                 schedules: vec![],
             },

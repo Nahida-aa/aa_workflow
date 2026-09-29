@@ -129,8 +129,8 @@ pub fn define_runtime() -> Fixture {
     workflows.insert(
         "fulfillment".to_string(),
         WorkflowRegistration {
-            workflow: fulfillment_workflow().into_workflow(),
-            previous_versions: vec![],
+            load: Arc::new(|| fulfillment_workflow().into_workflow()),
+            previous_versions: HashMap::new(),
             version_override: None,
             schedules: vec![],
         },

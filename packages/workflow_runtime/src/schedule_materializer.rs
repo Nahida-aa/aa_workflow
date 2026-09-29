@@ -622,8 +622,8 @@ mod tests {
         workflows.insert(
             "digest".to_string(),
             WorkflowRegistration {
-                workflow: Workflow::new("digest"),
-                previous_versions: vec![],
+                load: std::sync::Arc::new(|| Workflow::new("digest")),
+                previous_versions: HashMap::new(),
                 version_override: Some("v1".into()),
                 schedules,
             },
