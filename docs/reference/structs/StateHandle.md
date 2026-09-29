@@ -5,7 +5,7 @@ title: StateHandle
 
 # Struct: StateHandle
 
-Defined in: `packages/workflow-core/src/define/state_handle.rs:55`
+Defined in: [`packages/workflow-core/src/define/state_handle.rs:55`](../../../packages/workflow-core/src/define/state_handle.rs#L55)
 
 共享可变的 typed workflow state（对齐 TS 的 `ctx.state === engine.state`）。
 
@@ -16,26 +16,51 @@ _（存在非公开字段）_
 
 ## Implementations
 
-### `new`
+### new()
 
 ```rust
 pub fn new(st: St, mirror: Arc<Mutex<Value>>, to_value: Arc<dyn Fn(&St) -> Value + Send + Sync>) -> Self
 ```
 
+Defined in: [`packages/workflow-core/src/define/state_handle.rs:84`](../../../packages/workflow-core/src/define/state_handle.rs#L84)
+
 构造：`to_value` 捕获 `St: Serialize` 的序列化行为（在调用点确定），
 guard / drop 的同步无需 trait bound。
 
-Defined in: `packages/workflow-core/src/define/state_handle.rs:84`
+#### Parameters
 
-### `snapshot`
+##### st
+
+`St`
+
+##### mirror
+
+`Arc<Mutex<Value>>`
+
+##### to_value
+
+`Arc<dyn Fn(&St) -> Value + Send + Sync>`
+
+#### Returns
+
+`Self`
+
+
+***
+
+### snapshot()
 
 ```rust
 pub fn snapshot(&self) -> Value
 ```
 
+Defined in: [`packages/workflow-core/src/define/state_handle.rs:117`](../../../packages/workflow-core/src/define/state_handle.rs#L117)
+
 当前 state 的序列化快照（构造 `EngineRuntime` / schema 校验用）。
 
-Defined in: `packages/workflow-core/src/define/state_handle.rs:117`
+#### Returns
+
+`Value`
 
 ## Trait Implementations
 

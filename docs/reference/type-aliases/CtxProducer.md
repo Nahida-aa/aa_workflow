@@ -5,7 +5,7 @@ title: CtxProducer
 
 # Type Alias: CtxProducer
 
-Defined in: `packages/workflow-core/src/middleware/create_middleware.rs:34`
+Defined in: [`packages/workflow-core/src/middleware/create_middleware.rs:34`](../../../packages/workflow-core/src/middleware/create_middleware.rs#L34)
 
 Erased ctx-extension producer: `&WorkflowCtx` → JSON ext value.
 

@@ -3,7 +3,8 @@
 
 Mirrors the layout of the upstream TanStack Workflow docs/reference/
 (typedoc-plugin-markdown output): one file per item, frontmatter
-`id`/`title`, `index.md` with per-kind sections.
+`id`/`title`, `index.md` with per-kind sections, and per-item
+Type Parameters / Parameters / Returns sections with cross-item links.
 
 Usage:
     python3 scripts/generate-docs.py [--no-build]
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -28,6 +30,8 @@ CRATE_SLUG = "aa-workflow-core"
 JSON_PATH = REPO / "target" / "doc" / f"{CRATE.replace('-', '_')}.json"
 OUT = REPO / "docs" / "reference"
 
+EMPTY_G = {"params": [], "where_predicates": []}
+
 # inner kind -> (dirname, page title prefix)
 KIND_DIRS = {
     "struct": ("structs", "Struct"),
@@ -38,6 +42,9 @@ KIND_DIRS = {
     "constant": ("constants", "Constant"),
     "static": ("constants", "Static"),
 }
+
+# item id -> (dirname, name)，渲染期填充
+LINK_TARGETS: dict[int, tuple[str, str]] = {}
 
 
 def build_json(no_build: bool) -> None:
@@ -58,7 +65,22 @@ def last_seg(path: str) -> str:
     return path.rsplit("::", 1)[-1]
 
 
-def render_type(t: dict | None) -> str:
+def sub_level(level: str) -> str:
+    return "#" + level
+
+
+def resolve_link(tgt, here: str) -> str | None:
+    """item id → 相对本页的 markdown 链接；解析不了返回 None。"""
+    hit = LINK_TARGETS.get(tgt) if isinstance(tgt, int) else None
+    if not hit:
+        return None
+    d, name = hit
+    if d == here:
+        return f"{name}.md"
+    return f"{d}/{name}.md" if not here else f"../{d}/{name}.md"
+
+
+def render_type(t) -> str:
     """Best-effort signature rendering from a rustdoc-json type tree."""
     if t is None:
         return "()"
@@ -77,7 +99,9 @@ def render_type(t: dict | None) -> str:
                     parts.append(render_type(a["type"]))
                 elif "lifetime" in a:
                     lt = a["lifetime"]
-                    parts.append(lt if isinstance(lt, str) else (lt.get("args") or ["'_"])[0] if isinstance(lt.get("args"), list) and lt.get("args") else "'_")
+                    parts.append(lt if isinstance(lt, str)
+                                 else ((lt.get("args") or ["'_"])[0]
+                                       if isinstance(lt.get("args"), list) and lt.get("args") else "'_"))
             if parts:
                 s += "<" + ", ".join(parts) + ">"
         return s
@@ -87,7 +111,7 @@ def render_type(t: dict | None) -> str:
         lt = br.get("lifetime") or ""
         return f"&{lt + ' ' if lt else ''}{mut}{render_type(br['type'])}"
     if "tuple" in t:
-        types = t["tuple"]
+        types = t["tuple"] if isinstance(t["tuple"], list) else t["tuple"].get("types") or []
         return "()" if not types else "(" + ", ".join(render_type(x) for x in types) + ")"
     if "slice" in t:
         s = t["slice"]
@@ -107,7 +131,7 @@ def render_type(t: dict | None) -> str:
         # format 60 里 impl_trait 直接是 bounds 数组（旧版是 {"trait_bounds": [...]}）
         bounds = t["impl_trait"] if isinstance(t["impl_trait"], list) else t["impl_trait"]["trait_bounds"]
         return "impl " + " + ".join(
-            last_seg(b["trait"]["path"]) if isinstance(b, dict) and "trait" in b else "?"
+            render_type({"resolved_path": b["trait"]}) if isinstance(b, dict) and "trait" in b else "?"
             for b in bounds
         )
     if "function_pointer" in t:
@@ -129,46 +153,54 @@ def render_args_paren(args) -> str:
     return f"({ins})" + (f" -> {render_type(out)}" if out else "")
 
 
-def render_generics(g: dict) -> tuple[str, str]:
-    """返回 (<>内参数, where 子句) 的 best-effort 渲染。"""
-    params = []
-    for p in g.get("params") or []:
-        k = p.get("kind") or ("generic" if "generic" in p else None)
-        if isinstance(k, dict) and "lifetime" in str(k):
-            pass
-        name = p.get("name") or ""
-        if "lifetime" in (p.get("kind") or {}):
-            params.append(name)
-            continue
-        bounds = render_bounds(p.get("bounds") or [])
-        params.append(f"{name}: {bounds}" if bounds else name)
-    wheres = []
-    for wp in g.get("where_predicates") or []:
-        b = wp.get("bound") or {}
-        if "trait_bound" in b:
-            tb = b["trait_bound"]
-            tr = tb["trait"]["path"] if "trait" in tb else "?"
-            wheres.append(f"{wp.get('path', '?')}: {last_seg(tr)}")
-        elif "outlives" in b:
-            wheres.append(f"{b['outlives']}: '_")
-    gen = f"<{', '.join(params)}>" if params else ""
-    where = f"\nwhere\n    {',\n    '.join(wheres)}\n" if wheres else ""
-    return gen, where
+def render_type_linked(t, here: str) -> str:
+    """Section（代码块外）用：可解析到本 reference 页的类型渲染成链接。"""
+    if isinstance(t, dict) and "resolved_path" in t:
+        tgt = resolve_link(t["resolved_path"].get("id"), here)
+        if tgt:
+            return f"[`{render_type(t)}`]({tgt})"
+    return f"`{render_type(t)}`"
 
 
-def render_bounds(bounds: list) -> str:
+def render_bounds_linked(bounds: list, here: str) -> str:
     parts = []
-    for b in bounds:
+    for b in bounds or []:
         if not isinstance(b, dict):
             parts.append(str(b))
-        elif "trait_bound" in b:
-            tb = b["trait_bound"]
-            parts.append(last_seg(tb["trait"]["path"]) + render_args_paren(tb["trait"].get("args")))
-        elif "trait" in b:
-            parts.append(last_seg(b["trait"]["path"]))
+            continue
+        tb = b.get("trait_bound") or (b if "trait" in b else None)
+        if tb and "trait" in tb:
+            tr = tb["trait"]
+            txt = last_seg(tr["path"]) + render_args_paren(tr.get("args"))
+            tgt = resolve_link(tr.get("id"), here)
+            parts.append(f"[`{txt}`]({tgt})" if tgt else f"`{txt}`")
         elif "outlives" in b:
             parts.append(b["outlives"])
     return " + ".join(parts)
+
+
+def render_generics(g: dict) -> tuple[str, str]:
+    """返回 (<>内参数, where 子句) 的 best-effort 渲染（代码块内纯文本）。"""
+    params = []
+    for p in g.get("params") or []:
+        k = p.get("kind") or {}
+        name = p.get("name") or ""
+        if "lifetime" in k:
+            params.append(name)
+            continue
+        bounds = render_bounds_linked(k.get("type", {}).get("bounds") if "type" in k else [], "")
+        bounds = bounds.replace("`", "")
+        params.append(f"{name}: {bounds}" if bounds else name)
+    wheres = []
+    for wp in g.get("where_predicates") or []:
+        bp = wp.get("bound_predicate") or wp.get("bound") or {}
+        ty = render_type(bp.get("type"))
+        bs = render_bounds_linked(bp.get("bounds") or [], "").replace("`", "")
+        if bs:
+            wheres.append(f"{ty}: {bs}")
+    gen = f"<{', '.join(params)}>" if params else ""
+    where = f"\nwhere\n    {',\n    '.join(wheres)}\n" if wheres else ""
+    return gen, where
 
 
 def render_fn_sig(name: str, sig: dict, header: dict | None) -> str:
@@ -198,6 +230,11 @@ def render_fn_sig(name: str, sig: dict, header: dict | None) -> str:
     out = sig.get("output")
     ret = f" -> {render_type(out)}" if out else ""
     return f"{kw}fn {name}({args}){ret}"
+
+
+def non_self_inputs(sig: dict) -> list:
+    return [(n, t) for i, (n, t) in enumerate(sig.get("inputs") or [])
+            if not (i == 0 and n == "self")]
 
 
 class Docs:
@@ -245,23 +282,69 @@ class Docs:
         return {k: sorted(v.values(), key=lambda x: x["name"] or "") for k, v in found.items()}
 
 
-def frontmatter(name: str) -> str:
-    return f"---\nid: {name}\ntitle: {name}\n---\n\n"
+def build_link_targets(docs: Docs, found: dict[str, list[dict]]) -> None:
+    """item id → (dirname, name)。方法/变体等子 item 指到父页面。"""
+    for kind, items in found.items():
+        d = KIND_DIRS[kind][0]
+        for it in items:
+            LINK_TARGETS[it["id"]] = (d, it["name"])
+            inner = it["inner"][kind]
+            if kind in ("struct", "enum"):
+                for iid in inner.get("impls") or []:
+                    imp = docs.idx[iid]["inner"]["impl"]
+                    for mid in imp.get("items") or []:
+                        m = docs.idx[mid]
+                        if "function" in m["inner"]:
+                            LINK_TARGETS[m["id"]] = (d, it["name"])
+                if kind == "enum":
+                    for vid in inner.get("variants") or []:
+                        LINK_TARGETS[vid] = (d, it["name"])
+            elif kind == "trait":
+                for iid in inner.get("items") or []:
+                    LINK_TARGETS[iid] = (d, it["name"])
 
 
-def defined_in(it: dict) -> str:
+def expand_docs(it: dict, here: str) -> str:
+    """把 doc 注释里的 rustdoc intra-doc link 展开成相对 markdown 链接。
+
+    links 字典的 key 有两种存法（value 都是目标 item id）：
+    - shortcut 形式 `[`Foo`]`：key 就是 "`Foo`"（含反引号）
+    - 带路径形式 `[`text`](Foo::bar)`：key 是路径部分 "Foo::bar"
+    解析不了的目标退化为纯 code 文本（去掉方括号/链接）。
+    """
+    text = it.get("docs")
+    if not text:
+        return ""
+    for key, tgt in (it.get("links") or {}).items():
+        target = resolve_link(tgt, here)
+        esc = re.escape(key)
+        if target:
+            # 带路径形式：保留原文本，换 url
+            text = re.sub(r"\[([^\]]+)\]\(" + esc + r"\)",
+                          lambda m: f"[{m.group(1)}]({target})", text)
+            # shortcut 形式
+            text = text.replace("[" + key + "]", f"[{key}]({target})")
+        else:
+            text = re.sub(r"\[([^\]]+)\]\(" + esc + r"\)", lambda m: m.group(1), text)
+            text = text.replace("[" + key + "]", key)
+    return text.rstrip() + "\n\n"
+
+
+def defined_in(it: dict, here: str) -> str:
     sp = it.get("span")
     if not sp:
         return ""
-    return f"Defined in: `{sp['filename']}:{sp['begin'][0]}`\n"
+    fname, line = sp["filename"], sp["begin"][0]
+    prefix = "../../" if not here else "../../../"
+    return f"Defined in: [`{fname}:{line}`]({prefix}{fname}#L{line})\n"
 
 
 def write_page(path: Path, name: str, title: str, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(frontmatter(name) + f"# {title}\n\n" + body, encoding="utf-8")
+    path.write_text(f"---\nid: {name}\ntitle: {name}\n---\n\n# {title}\n\n{body}", encoding="utf-8")
 
 
-def methods_of(docs: Docs, it: dict) -> tuple[list[dict], list[str]]:
+def methods_of(docs: Docs, it: dict) -> tuple[list[dict], list[str], list[str]]:
     """返回 (固有方法 items, 非合成 trait impl 名列表, 合成 trait 名列表)。"""
     inner = it["inner"].get("struct") or it["inner"].get("enum") or {}
     methods, trait_impls, synthetic = [], [], []
@@ -283,45 +366,72 @@ def methods_of(docs: Docs, it: dict) -> tuple[list[dict], list[str]]:
     return methods, trait_impls, synthetic
 
 
-def fn_section(docs: Docs, it: dict, level: str = "###") -> str:
+def fn_section(docs: Docs, it: dict, here: str, level: str = "###") -> str:
+    """方法/函数条目：标题 + 签名 + Defined in + docs + Parameters + Returns。"""
     f = it["inner"]["function"]
-    gen, where = render_generics(f.get("generics") or {"params": [], "where_predicates": []})
-    sig = render_fn_sig(it["name"] or "_", f["sig"], f.get("header"))
-    # 把 <gen> 和 where 塞进签名
+    name = it["name"] or "_"
+    gen, where = render_generics(f.get("generics") or EMPTY_G)
+    sig = render_fn_sig(name, f["sig"], f.get("header"))
     if gen:
-        sig = sig.replace(f"fn {it['name']}(", f"fn {it['name']}{gen}(", 1)
+        sig = sig.replace(f"fn {name}(", f"fn {name}{gen}(", 1)
     if where:
-        sig = sig + where.rstrip("\n")
-    out = f"{level} `{it['name']}`\n\n```rust\npub {sig}\n```\n\n"
-    if it.get("docs"):
-        out += it["docs"].rstrip() + "\n\n"
-    di = defined_in(it)
+        sig += where.rstrip("\n")
+    out = f"{level} {name}()\n\n```rust\npub {sig}\n```\n\n"
+    di = defined_in(it, here)
     if di:
         out += di + "\n"
+    out += expand_docs(it, here)
+    sub, entry = sub_level(level), sub_level(sub_level(level))
+    params = non_self_inputs(f["sig"])
+    if params:
+        out += f"{sub} Parameters\n\n"
+        for n, t in params:
+            out += f"{entry} {n}\n\n{render_type_linked(t, here)}\n\n"
+    o = f["sig"].get("output")
+    if o:
+        out += f"{sub} Returns\n\n{render_type_linked(o, here)}\n\n"
     return out
 
 
-def render_item_page(docs: Docs, kind: str, it: dict) -> str:
-    _, prefix = KIND_DIRS[kind]
-    body = defined_in(it) + "\n"
-    if it.get("docs"):
-        body += it["docs"].rstrip() + "\n\n"
+def type_params_section(g: dict, here: str, level: str = "##") -> str:
+    ps = []
+    for p in g.get("params") or []:
+        k = p.get("kind") or {}
+        name = p.get("name") or ""
+        if "type" in k:
+            ps.append((name, render_bounds_linked(k["type"].get("bounds") or [], here)))
+        elif "const" in k:
+            ps.append((name, ""))
+    if not ps:
+        return ""
+    out = f"{level} Type Parameters\n\n"
+    for n, b in ps:
+        out += f"{sub_level(level)} {n}\n\n`{n}`" + (f" *extends* {b}" if b else "") + "\n\n"
+    return out
+
+
+def render_item_page(docs: Docs, kind: str, it: dict, here: str) -> str:
     inner = it["inner"][kind]
+    body = defined_in(it, here) + "\n" + expand_docs(it, here)
 
     if kind == "struct":
         sk = inner.get("kind") or {}
         if "plain" in sk:
             fields = sk["plain"].get("fields") or []
             if fields:
-                body += "## Fields\n\n"
+                entries = []
                 for fid in fields:
                     fl = docs.idx[fid]
                     sf = fl["inner"].get("struct_field")
                     # format 60：struct_field 直接是类型；旧版是 {"type": ...}
                     ft = sf.get("type") if isinstance(sf, dict) and "type" in sf else sf
-                    body += f"### `{fl['name']}`\n\n```rust\n{fl['name']}: {render_type(ft)}\n```\n\n"
-                    if fl.get("docs"):
-                        body += fl["docs"].rstrip() + "\n\n"
+                    e = f"### {fl['name']}\n\n```rust\n{fl['name']}: {render_type(ft)}\n```\n\n"
+                    di = defined_in(fl, here)
+                    if di:
+                        e += di + "\n"
+                    e += expand_docs(fl, here)
+                    entries.append(e)
+                body += "## Fields\n\n" + "\n***\n\n".join(entries)
             if sk["plain"].get("has_stripped_fields"):
                 body += "_（存在非公开字段）_\n\n"
         methods, trait_impls, synthetic = methods_of(docs, it)
@@ -329,10 +439,10 @@ def render_item_page(docs: Docs, kind: str, it: dict) -> str:
     elif kind == "enum":
         variants = inner.get("variants") or []
         if variants:
-            body += "## Variants\n\n"
+            entries = []
             for vid in variants:
                 v = docs.idx[vid]
-                body += f"### `{v['name']}`\n\n"
+                e = f"### {v['name']}\n\n"
                 vk = v["inner"].get("variant", {}).get("kind") or {}
                 if "tuple" in vk:
                     fields = vk["tuple"] if isinstance(vk["tuple"], list) else vk["tuple"].get("fields") or []
@@ -344,39 +454,48 @@ def render_item_page(docs: Docs, kind: str, it: dict) -> str:
                             tys.append(render_type(sf.get("type") if isinstance(sf, dict) and "type" in sf else sf))
                         else:
                             tys.append(render_type(x))
-                    body += "```rust\n(" + ", ".join(tys) + ")\n```\n\n"
+                    e += "```rust\n(" + ", ".join(tys) + ")\n```\n\n"
                 elif "struct" in vk:
-                    body += "```rust\n{ .. }\n```\n\n"
-                if v.get("docs"):
-                    body += v["docs"].rstrip() + "\n\n"
+                    e += "```rust\n{ .. }\n```\n\n"
+                di = defined_in(v, here)
+                if di:
+                    e += di + "\n"
+                e += expand_docs(v, here)
+                entries.append(e)
+            body += "## Variants\n\n" + "\n***\n\n".join(entries)
         methods, trait_impls, synthetic = methods_of(docs, it)
 
     elif kind == "trait":
-        methods = []
         required, provided = [], []
         for iid in inner.get("items") or []:
             m = docs.idx[iid]
             if "function" not in m["inner"] or m["visibility"] != "public":
                 continue
-            f = m["inner"]["function"]
-            (provided if f.get("has_body") else required).append(m)
+            (provided if m["inner"]["function"].get("has_body") else required).append(m)
         if required:
-            body += "## Required Methods\n\n"
-            body += "".join(fn_section(docs, m) for m in required)
+            body += "## Required Methods\n\n" + "\n***\n\n".join(fn_section(docs, m, here) for m in required)
         if provided:
-            body += "## Provided Methods\n\n"
-            body += "".join(fn_section(docs, m) for m in provided)
-        trait_impls, synthetic = [], []
+            body += "## Provided Methods\n\n" + "\n***\n\n".join(fn_section(docs, m, here) for m in provided)
+        methods, trait_impls, synthetic = [], [], []
 
     else:  # function / type_alias / constant / static
         if kind == "function":
-            gen, where = render_generics(inner.get("generics") or {"params": [], "where_predicates": []})
+            gen, where = render_generics(inner.get("generics") or EMPTY_G)
             sig = render_fn_sig(it["name"] or "_", inner["sig"], inner.get("header"))
             if gen:
                 sig = sig.replace(f"fn {it['name']}(", f"fn {it['name']}{gen}(", 1)
             if where:
                 sig += where.rstrip("\n")
-            body += "## Signature\n\n```rust\npub " + sig + "\n```\n\n"
+            body += "```rust\npub " + sig + "\n```\n\n"
+            body += type_params_section(inner.get("generics") or EMPTY_G, here)
+            params = non_self_inputs(inner["sig"])
+            if params:
+                body += "## Parameters\n\n"
+                for n, t in params:
+                    body += f"### {n}\n\n{render_type_linked(t, here)}\n\n"
+            o = inner["sig"].get("output")
+            if o:
+                body += f"## Returns\n\n{render_type_linked(o, here)}\n\n"
             return body
         if kind == "type_alias":
             body += "## Definition\n\n```rust\npub type " + (it["name"] or "?") + " = " + render_type(inner.get("type")) + "\n```\n\n"
@@ -390,7 +509,7 @@ def render_item_page(docs: Docs, kind: str, it: dict) -> str:
 
     if kind in ("struct", "enum"):
         if methods:
-            body += "## Implementations\n\n" + "".join(fn_section(docs, m) for m in methods)
+            body += "## Implementations\n\n" + "\n***\n\n".join(fn_section(docs, m, here) for m in methods)
         if trait_impls:
             body += "## Trait Implementations\n\n"
             body += "".join(f"- `impl {t} for {it['name']}`\n" for t in trait_impls)
@@ -410,6 +529,7 @@ def main() -> None:
     data = json.loads(JSON_PATH.read_text())
     docs = Docs(data)
     found = docs.collect_public()
+    build_link_targets(docs, found)
 
     if OUT.exists():
         shutil.rmtree(OUT)
@@ -425,14 +545,15 @@ def main() -> None:
                   "type_alias": "Type Aliases", "constant": "Constants", "static": "Statics"}[kind]
         section = f"## {plural}\n\n"
         for it in items:
-            page = render_item_page(docs, kind, it)
-            write_page(OUT / dirname / f"{it['name']}.md", it["name"], f"{prefix}: {it['name']}", page)
+            # 上游函数页标题带 ()：# Function: createWorkflow()
+            title = f"{prefix}: {it['name']}()" if kind == "function" else f"{prefix}: {it['name']}"
+            page = render_item_page(docs, kind, it, here=dirname)
+            write_page(OUT / dirname / f"{it['name']}.md", it["name"], title, page)
             section += f"- [{it['name']}]({dirname}/{it['name']}.md)\n"
         index_sections.append(section)
 
     (OUT / "index.md").write_text(
-        frontmatter(CRATE_SLUG)
-        + f"# {CRATE_SLUG}\n\n"
+        f"---\nid: {CRATE_SLUG}\ntitle: {CRATE_SLUG}\n---\n\n# {CRATE_SLUG}\n\n"
         + "".join(index_sections),
         encoding="utf-8",
     )

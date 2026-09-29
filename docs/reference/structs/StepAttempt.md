@@ -5,43 +5,65 @@ title: StepAttempt
 
 # Struct: StepAttempt
 
-Defined in: `packages/workflow-core/src/event.rs:38`
+Defined in: [`packages/workflow-core/src/event.rs:38`](../../../packages/workflow-core/src/event.rs#L38)
 
 A single execution attempt of one step (used for retry bookkeeping).
 
 ## Fields
 
-### `attempt`
+### attempt
 
 ```rust
 attempt: usize
 ```
 
+Defined in: [`packages/workflow-core/src/event.rs:40`](../../../packages/workflow-core/src/event.rs#L40)
+
 1-based attempt number.
 
-### `started_at`
+
+***
+
+### started_at
 
 ```rust
 started_at: i64
 ```
 
-### `finished_at`
+Defined in: [`packages/workflow-core/src/event.rs:41`](../../../packages/workflow-core/src/event.rs#L41)
+
+
+***
+
+### finished_at
 
 ```rust
 finished_at: i64
 ```
 
-### `result`
+Defined in: [`packages/workflow-core/src/event.rs:42`](../../../packages/workflow-core/src/event.rs#L42)
+
+
+***
+
+### result
 
 ```rust
 result: Option<Value>
 ```
 
-### `error`
+Defined in: [`packages/workflow-core/src/event.rs:43`](../../../packages/workflow-core/src/event.rs#L43)
+
+
+***
+
+### error
 
 ```rust
 error: Option<RunError>
 ```
+
+Defined in: [`packages/workflow-core/src/event.rs:46`](../../../packages/workflow-core/src/event.rs#L46)
 
 结构化错误（对齐 TanStack `StepAttempt.error?: SerializedError`，
 `types.ts:261`）。

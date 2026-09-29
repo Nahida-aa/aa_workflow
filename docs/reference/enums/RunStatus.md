@@ -5,21 +5,43 @@ title: RunStatus
 
 # Enum: RunStatus
 
-Defined in: `packages/workflow-core/src/event.rs:10`
+Defined in: [`packages/workflow-core/src/event.rs:10`](../../../packages/workflow-core/src/event.rs#L10)
 
 Overall lifecycle status of a run.
 
 ## Variants
 
-### `Running`
+### Running
 
-### `Finished`
+Defined in: [`packages/workflow-core/src/event.rs:11`](../../../packages/workflow-core/src/event.rs#L11)
 
-### `Errored`
 
-### `Aborted`
+***
 
-### `Paused`
+### Finished
+
+Defined in: [`packages/workflow-core/src/event.rs:12`](../../../packages/workflow-core/src/event.rs#L12)
+
+
+***
+
+### Errored
+
+Defined in: [`packages/workflow-core/src/event.rs:13`](../../../packages/workflow-core/src/event.rs#L13)
+
+
+***
+
+### Aborted
+
+Defined in: [`packages/workflow-core/src/event.rs:14`](../../../packages/workflow-core/src/event.rs#L14)
+
+
+***
+
+### Paused
+
+Defined in: [`packages/workflow-core/src/event.rs:17`](../../../packages/workflow-core/src/event.rs#L17)
 
 The run is parked at a durable wait point (`StepPaused`), e.g. an
 approval or a sleep; it resumes when a `StepResume` arrives.

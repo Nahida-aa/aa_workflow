@@ -5,9 +5,9 @@ title: InMemoryStore
 
 # Struct: InMemoryStore
 
-Defined in: `packages/workflow-core/src/run_store/in_memory.rs:28`
+Defined in: [`packages/workflow-core/src/run_store/in_memory.rs:28`](../../../packages/workflow-core/src/run_store/in_memory.rs#L28)
 
-In-memory [`RunStore`] for phase 0. Provides the full contract surface
+In-memory [`RunStore`](../traits/RunStore.md) for phase 0. Provides the full contract surface
 (CAS append + subscribe) so the engine can be exercised with property
 tests before a real filesystem store is written.
 
@@ -15,13 +15,17 @@ _（存在非公开字段）_
 
 ## Implementations
 
-### `new`
+### new()
 
 ```rust
 pub fn new() -> Self
 ```
 
-Defined in: `packages/workflow-core/src/run_store/in_memory.rs:33`
+Defined in: [`packages/workflow-core/src/run_store/in_memory.rs:33`](../../../packages/workflow-core/src/run_store/in_memory.rs#L33)
+
+#### Returns
+
+`Self`
 
 ## Trait Implementations
 

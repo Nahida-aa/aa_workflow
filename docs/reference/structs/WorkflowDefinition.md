@@ -5,26 +5,30 @@ title: WorkflowDefinition
 
 # Struct: WorkflowDefinition
 
-Defined in: `packages/workflow-core/src/define/define_workflow.rs:326`
+Defined in: [`packages/workflow-core/src/define/define_workflow.rs:326`](../../../packages/workflow-core/src/define/define_workflow.rs#L326)
 
 A workflow whose `In`/`Out`/`St`/`Ext` are statically known at the
 declaration site. `Deref<Target = Workflow>` lets it be handed to
-[`crate::engine::run_workflow`] / the registry directly; explicit erasure is
-[`into_workflow`](Self::into_workflow).
+[`crate::engine::run_workflow`](../functions/run_workflow.md) / the registry directly; explicit erasure is
+[`into_workflow`](WorkflowDefinition.md).
 
 _（存在非公开字段）_
 
 ## Implementations
 
-### `into_workflow`
+### into_workflow()
 
 ```rust
 pub fn into_workflow(self) -> Workflow
 ```
 
-Type-erase back to the engine's [`Workflow`] view.
+Defined in: [`packages/workflow-core/src/define/define_workflow.rs:336`](../../../packages/workflow-core/src/define/define_workflow.rs#L336)
 
-Defined in: `packages/workflow-core/src/define/define_workflow.rs:336`
+Type-erase back to the engine's [`Workflow`](Workflow.md) view.
+
+#### Returns
+
+[`Workflow`](Workflow.md)
 
 ## Trait Implementations
 

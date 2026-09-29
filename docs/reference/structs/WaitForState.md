@@ -5,7 +5,7 @@ title: WaitForState
 
 # Struct: WaitForState
 
-Defined in: `packages/workflow-core/src/run_store/mod.rs:22`
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:22`](../../../packages/workflow-core/src/run_store/mod.rs#L22)
 
 挂起等待中的外部信号（对齐 TanStack `RunState.waitingFor`）。sleep 的
 `due_at` 就是这里的 `deadline` —— host 可用它做时间索引的唤醒调度。
@@ -15,23 +15,35 @@ Defined in: `packages/workflow-core/src/run_store/mod.rs:22`
 
 ## Fields
 
-### `step_id`
+### step_id
 
 ```rust
 step_id: Option<String>
 ```
 
-### `signal_name`
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:24`](../../../packages/workflow-core/src/run_store/mod.rs#L24)
+
+
+***
+
+### signal_name
 
 ```rust
 signal_name: String
 ```
 
-### `deadline`
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:25`](../../../packages/workflow-core/src/run_store/mod.rs#L25)
+
+
+***
+
+### deadline
 
 ```rust
 deadline: Option<i64>
 ```
+
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:26`](../../../packages/workflow-core/src/run_store/mod.rs#L26)
 
 ## Trait Implementations
 

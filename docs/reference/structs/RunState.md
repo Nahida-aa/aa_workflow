@@ -5,7 +5,7 @@ title: RunState
 
 # Struct: RunState
 
-Defined in: `packages/workflow-core/src/run_store/mod.rs:86`
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:86`](../../../packages/workflow-core/src/run_store/mod.rs#L86)
 
 Minimal, durable metadata for a run. The heavy state lives in the event
 log; this is just the envelope the launcher needs to locate runs.
@@ -15,7 +15,7 @@ log; this is just the envelope the launcher needs to locate runs.
 ## 谁写、谁存
 
 **内容由引擎写，介质由 store 定**。引擎在每次 drive 的收尾、以及挂起时
-（[`crate::engine`] 的 pause 投影）调用 [`RunStore::set_run_state`] 更新信封；
+（`crate::engine` 的 pause 投影）调用 [`RunStore::set_run_state`](../traits/RunStore.md) 更新信封；
 store 只负责把它放哪儿——内存 map、JSON 文件、数据库行都行。TanStack 同样
 如此：`run-workflow.ts` 有 7 处调 `setRunState`，挂起投影那处的注释就是
 “Persist waitingFor on the run state so out-of-process workers can
@@ -49,91 +49,150 @@ reconstructed from `initialize(input)` + log replay on every resume.”
   修改会随闭包短路而丢失，并行分支经 `ctx.clone()` 各持快照互不可见。
   跨分支传数据要走 **step 的返回值**（durable 结果），不要走 state。
 
-`In` / `Out` 默认擦除为 [`serde_json::Value`]，因为 [`RunStore`] 的契约面
+`In` / `Out` 默认擦除为 `serde_json::Value`，因为 [`RunStore`](../traits/RunStore.md) 的契约面
 必须能装下任意 workflow 的 input/output（store 是 `dyn`，无法带泛型）。
-想要具体类型的调用方用 [`RunState::into_typed`] 窄化。
+想要具体类型的调用方用 [`RunState::into_typed`](RunState.md) 窄化。
 
 ## Fields
 
-### `run_id`
+### run_id
 
 ```rust
 run_id: String
 ```
 
-### `workflow_id`
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:87`](../../../packages/workflow-core/src/run_store/mod.rs#L87)
+
+
+***
+
+### workflow_id
 
 ```rust
 workflow_id: String
 ```
 
-### `workflow_version`
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:88`](../../../packages/workflow-core/src/run_store/mod.rs#L88)
+
+
+***
+
+### workflow_version
 
 ```rust
 workflow_version: Option<String>
 ```
 
-### `status`
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:89`](../../../packages/workflow-core/src/run_store/mod.rs#L89)
+
+
+***
+
+### status
 
 ```rust
 status: RunStatus
 ```
 
-### `input`
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:90`](../../../packages/workflow-core/src/run_store/mod.rs#L90)
+
+
+***
+
+### input
 
 ```rust
 input: In
 ```
 
-### `output`
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:91`](../../../packages/workflow-core/src/run_store/mod.rs#L91)
+
+
+***
+
+### output
 
 ```rust
 output: Option<Out>
 ```
 
-### `error`
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:92`](../../../packages/workflow-core/src/run_store/mod.rs#L92)
+
+
+***
+
+### error
 
 ```rust
 error: Option<RunError>
 ```
 
-### `waiting_for`
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:93`](../../../packages/workflow-core/src/run_store/mod.rs#L93)
+
+
+***
+
+### waiting_for
 
 ```rust
 waiting_for: Option<WaitForState>
 ```
 
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:96`](../../../packages/workflow-core/src/run_store/mod.rs#L96)
+
 挂起等待外部 signal / sleep 到期（sleep 有 deadline）。
 
-### `pending_approval`
+
+***
+
+### pending_approval
 
 ```rust
 pending_approval: Option<PendingApproval>
 ```
 
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:99`](../../../packages/workflow-core/src/run_store/mod.rs#L99)
+
 挂起等待审批。
 
-### `created_at`
+
+***
+
+### created_at
 
 ```rust
 created_at: i64
 ```
 
-### `updated_at`
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:100`](../../../packages/workflow-core/src/run_store/mod.rs#L100)
+
+
+***
+
+### updated_at
 
 ```rust
 updated_at: i64
 ```
 
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:101`](../../../packages/workflow-core/src/run_store/mod.rs#L101)
+
 ## Implementations
 
-### `into_typed`
+### into_typed()
 
 ```rust
 pub fn into_typed<In, Out>(self) -> Result<RunState<In, Out>>
+where
+    In: DeserializeOwned,
+    Out: DeserializeOwned
 ```
 
-Defined in: `packages/workflow-core/src/run_store/mod.rs:112`
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:112`](../../../packages/workflow-core/src/run_store/mod.rs#L112)
+
+#### Returns
+
+`Result<RunState<In, Out>>`
 
 ## Trait Implementations
 

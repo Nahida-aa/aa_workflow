@@ -5,9 +5,9 @@ title: WorkflowCancelled
 
 # Struct: WorkflowCancelled
 
-Defined in: `packages/workflow-core/src/engine/mod.rs:69`
+Defined in: [`packages/workflow-core/src/engine/mod.rs:69`](../../../packages/workflow-core/src/engine/mod.rs#L69)
 
-Internal sentinel: [`cancel_run`] set the run to `Aborted` while the
+Internal sentinel: [`cancel_run`](../functions/cancel_run.md) set the run to `Aborted` while the
 handler was driving. Step closures are not interruptible mid-`await`,
 so the error surfaces at the next engine boundary (step entry / attempt
 boundary). Becomes an `Aborted` run, never `Errored`.

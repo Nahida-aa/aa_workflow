@@ -5,25 +5,32 @@ title: StoreError
 
 # Enum: StoreError
 
-Defined in: `packages/workflow-core/src/error.rs:7`
+Defined in: [`packages/workflow-core/src/error.rs:7`](../../../packages/workflow-core/src/error.rs#L7)
 
-Errors produced by a [`crate::run_store::RunStore`] implementation.
+Errors produced by a [`crate::run_store::RunStore`](../traits/RunStore.md) implementation.
 
 ## Variants
 
-### `Conflict`
+### Conflict
 
 ```rust
 { .. }
 ```
 
+Defined in: [`packages/workflow-core/src/error.rs:9`](../../../packages/workflow-core/src/error.rs#L9)
+
 `append_event` was called with a stale expected index (CAS violation).
 
-### `Io`
+
+***
+
+### Io
 
 ```rust
 (String)
 ```
+
+Defined in: [`packages/workflow-core/src/error.rs:15`](../../../packages/workflow-core/src/error.rs#L15)
 
 Backing-store I/O or serialization failure.
 

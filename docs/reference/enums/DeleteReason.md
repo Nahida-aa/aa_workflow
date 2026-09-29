@@ -5,28 +5,44 @@ title: DeleteReason
 
 # Enum: DeleteReason
 
-Defined in: `packages/workflow-core/src/run_store/mod.rs:137`
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:137`](../../../packages/workflow-core/src/run_store/mod.rs#L137)
 
 删除 run 的原因（对齐 TanStack `DeleteReason`，`types.ts:576`）。Store
 可据此决定保留策略：比如终态归档 vs 中途废弃走不同的清理路径。
 
 ## Variants
 
-### `Finished`
+### Finished
 
-### `Errored`
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:138`](../../../packages/workflow-core/src/run_store/mod.rs#L138)
 
-### `Aborted`
+
+***
+
+### Errored
+
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:139`](../../../packages/workflow-core/src/run_store/mod.rs#L139)
+
+
+***
+
+### Aborted
+
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:140`](../../../packages/workflow-core/src/run_store/mod.rs#L140)
 
 ## Implementations
 
-### `as_str`
+### as_str()
 
 ```rust
 pub fn as_str(&self) -> &'static str
 ```
 
-Defined in: `packages/workflow-core/src/run_store/mod.rs:144`
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:144`](../../../packages/workflow-core/src/run_store/mod.rs#L144)
+
+#### Returns
+
+`&'static str`
 
 ## Trait Implementations
 

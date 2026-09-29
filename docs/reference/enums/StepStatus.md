@@ -5,23 +5,45 @@ title: StepStatus
 
 # Enum: StepStatus
 
-Defined in: `packages/workflow-core/src/event.rs:25`
+Defined in: [`packages/workflow-core/src/event.rs:25`](../../../packages/workflow-core/src/event.rs#L25)
 
 Per-step lifecycle status, derived from the event log via
-[`fold_step_states`]. This is a *projection* of the log, never stored
+[`fold_step_states`](../functions/fold_step_states.md). This is a *projection* of the log, never stored
 independently.
 
 ## Variants
 
-### `Pending`
+### Pending
 
-### `Running`
+Defined in: [`packages/workflow-core/src/event.rs:27`](../../../packages/workflow-core/src/event.rs#L27)
 
-### `Success`
 
-### `Failed`
+***
 
-### `Paused`
+### Running
+
+Defined in: [`packages/workflow-core/src/event.rs:28`](../../../packages/workflow-core/src/event.rs#L28)
+
+
+***
+
+### Success
+
+Defined in: [`packages/workflow-core/src/event.rs:29`](../../../packages/workflow-core/src/event.rs#L29)
+
+
+***
+
+### Failed
+
+Defined in: [`packages/workflow-core/src/event.rs:30`](../../../packages/workflow-core/src/event.rs#L30)
+
+
+***
+
+### Paused
+
+Defined in: [`packages/workflow-core/src/event.rs:33`](../../../packages/workflow-core/src/event.rs#L33)
 
 Derived from a `StepPaused` checkpoint: the step is parked at a durable
 wait (approval / sleep) until a matching `StepResume` arrives.

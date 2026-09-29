@@ -5,28 +5,35 @@ title: StepCtx
 
 # Struct: StepCtx
 
-Defined in: `packages/workflow-core/src/define/mod.rs:43`
+Defined in: [`packages/workflow-core/src/define/mod.rs:43`](../../../packages/workflow-core/src/define/mod.rs#L43)
 
 Per-invocation view handed step closures. Mirrors TanStack's `StepContext`
 member-for-member: `id` / `attempt` / `runtime` helpers, with the per-attempt
-`signal` exposed as a cooperative [`is_cancelled`](Self::is_cancelled) poll.
+`signal` exposed as a cooperative [`is_cancelled`](StepCtx.md) poll.
 
 ## Fields
 
-### `id`
+### id
 
 ```rust
 id: String
 ```
 
+Defined in: [`packages/workflow-core/src/define/mod.rs:47`](../../../packages/workflow-core/src/define/mod.rs#L47)
+
 Deterministic step ID. Stable across retries *and* replays of the same
 run — the idempotency-key candidate for external systems (`id`).
 
-### `attempt`
+
+***
+
+### attempt
 
 ```rust
 attempt: usize
 ```
+
+Defined in: [`packages/workflow-core/src/define/mod.rs:50`](../../../packages/workflow-core/src/define/mod.rs#L50)
 
 Current attempt number (1-indexed). 0 only for internal probes (e.g.
 the `up_to_date` make-check).
@@ -35,75 +42,123 @@ _（存在非公开字段）_
 
 ## Implementations
 
-### `run_id`
+### run_id()
 
 ```rust
 pub fn run_id(&self) -> &str
 ```
 
-Defined in: `packages/workflow-core/src/define/mod.rs:54`
+Defined in: [`packages/workflow-core/src/define/mod.rs:54`](../../../packages/workflow-core/src/define/mod.rs#L54)
 
-### `input`
+#### Returns
+
+`&str`
+
+
+***
+
+### input()
 
 ```rust
 pub fn input(&self) -> &Value
 ```
 
-Defined in: `packages/workflow-core/src/define/mod.rs:57`
+Defined in: [`packages/workflow-core/src/define/mod.rs:57`](../../../packages/workflow-core/src/define/mod.rs#L57)
 
-### `progress`
+#### Returns
+
+`&Value`
+
+
+***
+
+### progress()
 
 ```rust
 pub fn progress(&self, value: f64)
 ```
 
-Defined in: `packages/workflow-core/src/define/mod.rs:60`
+Defined in: [`packages/workflow-core/src/define/mod.rs:60`](../../../packages/workflow-core/src/define/mod.rs#L60)
 
-### `is_cancelled`
+#### Parameters
+
+##### value
+
+`f64`
+
+
+***
+
+### is_cancelled()
 
 ```rust
 pub fn is_cancelled(&self) -> bool
 ```
 
-Whether this run was cancelled via [`cancel_run`](crate::engine::cancel_run).
+Defined in: [`packages/workflow-core/src/define/mod.rs:67`](../../../packages/workflow-core/src/define/mod.rs#L67)
+
+Whether this run was cancelled via [`cancel_run`](../functions/cancel_run.md).
 Cooperative poll counterpart to TanStack's per-attempt `signal` — Rust
 cannot interrupt an in-flight future, so long steps must self-check on
 their own cadence (same granularity as `BaseCtx::is_cancelled`).
 
-Defined in: `packages/workflow-core/src/define/mod.rs:67`
+#### Returns
 
-### `deadline`
+`bool`
+
+
+***
+
+### deadline()
 
 ```rust
 pub fn deadline(&self) -> Option<i64>
 ```
 
+Defined in: [`packages/workflow-core/src/define/mod.rs:78`](../../../packages/workflow-core/src/define/mod.rs#L78)
+
 Absolute UTC ms runtime budget for this drive (TanStack
 `runtime.deadline`); `None` when unbudgeted.
 
-Defined in: `packages/workflow-core/src/define/mod.rs:78`
+#### Returns
 
-### `time_remaining`
+`Option<i64>`
+
+
+***
+
+### time_remaining()
 
 ```rust
 pub fn time_remaining(&self) -> u64
 ```
 
+Defined in: [`packages/workflow-core/src/define/mod.rs:82`](../../../packages/workflow-core/src/define/mod.rs#L82)
+
 Ms of runtime budget left (`u64::MAX` when no deadline).
 
-Defined in: `packages/workflow-core/src/define/mod.rs:82`
+#### Returns
 
-### `should_yield`
+`u64`
+
+
+***
+
+### should_yield()
 
 ```rust
 pub fn should_yield(&self) -> bool
 ```
 
+Defined in: [`packages/workflow-core/src/define/mod.rs:91`](../../../packages/workflow-core/src/define/mod.rs#L91)
+
 True once the budget is nearly exhausted (`time_remaining() <
 min_yield_remaining_ms`); the step should `?` fast or orchestrate
 yielding via `WorkflowCtx::yield_`.
 
-Defined in: `packages/workflow-core/src/define/mod.rs:91`
+#### Returns
+
+`bool`
 
 ## Trait Implementations
 

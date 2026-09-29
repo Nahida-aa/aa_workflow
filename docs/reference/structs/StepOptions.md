@@ -5,7 +5,7 @@ title: StepOptions
 
 # Struct: StepOptions
 
-Defined in: `packages/workflow-core/src/define/mod.rs:409`
+Defined in: [`packages/workflow-core/src/define/mod.rs:409`](../../../packages/workflow-core/src/define/mod.rs#L409)
 
 Per-step configuration. `retry`/`timeout`/`resource`/`up_to_date` are
 per-call-site options (v2), whereas TanStack passes them as inline
@@ -13,38 +13,60 @@ per-call-site options (v2), whereas TanStack passes them as inline
 
 ## Fields
 
-### `label`
+### label
 
 ```rust
 label: Option<String>
 ```
 
-### `retry`
+Defined in: [`packages/workflow-core/src/define/mod.rs:410`](../../../packages/workflow-core/src/define/mod.rs#L410)
+
+
+***
+
+### retry
 
 ```rust
 retry: Option<RetryPolicy>
 ```
 
-### `timeout`
+Defined in: [`packages/workflow-core/src/define/mod.rs:411`](../../../packages/workflow-core/src/define/mod.rs#L411)
+
+
+***
+
+### timeout
 
 ```rust
 timeout: Option<Duration>
 ```
 
-### `resource`
+Defined in: [`packages/workflow-core/src/define/mod.rs:412`](../../../packages/workflow-core/src/define/mod.rs#L412)
+
+
+***
+
+### resource
 
 ```rust
 resource: Option<String>
 ```
 
+Defined in: [`packages/workflow-core/src/define/mod.rs:415`](../../../packages/workflow-core/src/define/mod.rs#L415)
+
 Resource key this step contends on (e.g. `"gpu:0"`). Steps with the
 same key are serialized (capacity-1 gate, sibling of a mutex).
 
-### `up_to_date`
+
+***
+
+### up_to_date
 
 ```rust
 up_to_date: Option<Arc<dyn Fn(&StepCtx, &StepState) -> bool + Send + Sync>>
 ```
+
+Defined in: [`packages/workflow-core/src/define/mod.rs:420`](../../../packages/workflow-core/src/define/mod.rs#L420)
 
 Make-style freshness check against the *derived* step state. `Ok(true)`
 while a successful checkpoint exists ⇒ the step short-circuits; if it
@@ -53,45 +75,101 @@ durable checkpoint only.
 
 ## Implementations
 
-### `new`
+### new()
 
 ```rust
 pub fn new() -> Self
 ```
 
-Defined in: `packages/workflow-core/src/define/mod.rs:424`
+Defined in: [`packages/workflow-core/src/define/mod.rs:424`](../../../packages/workflow-core/src/define/mod.rs#L424)
 
-### `retry`
+#### Returns
+
+`Self`
+
+
+***
+
+### retry()
 
 ```rust
 pub fn retry(self, retry: RetryPolicy) -> Self
 ```
 
-Defined in: `packages/workflow-core/src/define/mod.rs:428`
+Defined in: [`packages/workflow-core/src/define/mod.rs:428`](../../../packages/workflow-core/src/define/mod.rs#L428)
 
-### `timeout`
+#### Parameters
+
+##### retry
+
+[`RetryPolicy`](RetryPolicy.md)
+
+#### Returns
+
+`Self`
+
+
+***
+
+### timeout()
 
 ```rust
 pub fn timeout(self, timeout: Duration) -> Self
 ```
 
-Defined in: `packages/workflow-core/src/define/mod.rs:433`
+Defined in: [`packages/workflow-core/src/define/mod.rs:433`](../../../packages/workflow-core/src/define/mod.rs#L433)
 
-### `resource`
+#### Parameters
+
+##### timeout
+
+`Duration`
+
+#### Returns
+
+`Self`
+
+
+***
+
+### resource()
 
 ```rust
-pub fn resource<impl Into<String>>(self, resource: impl ?) -> Self
+pub fn resource<impl Into<String>: Into>(self, resource: impl ?) -> Self
 ```
 
-Defined in: `packages/workflow-core/src/define/mod.rs:438`
+Defined in: [`packages/workflow-core/src/define/mod.rs:438`](../../../packages/workflow-core/src/define/mod.rs#L438)
 
-### `up_to_date`
+#### Parameters
+
+##### resource
+
+`impl ?`
+
+#### Returns
+
+`Self`
+
+
+***
+
+### up_to_date()
 
 ```rust
-pub fn up_to_date<impl Fn(&StepCtx, &StepState) -> bool + Send + Sync + 'static>(self, up_to_date: impl ? + ? + ? + ?) -> Self
+pub fn up_to_date<impl Fn(&StepCtx, &StepState) -> bool + Send + Sync + 'static: Fn(&StepCtx, &StepState) -> bool + Send + Sync + 'static>(self, up_to_date: impl ? + ? + ? + ?) -> Self
 ```
 
-Defined in: `packages/workflow-core/src/define/mod.rs:443`
+Defined in: [`packages/workflow-core/src/define/mod.rs:443`](../../../packages/workflow-core/src/define/mod.rs#L443)
+
+#### Parameters
+
+##### up_to_date
+
+`impl ? + ? + ? + ?`
+
+#### Returns
+
+`Self`
 
 ## Trait Implementations
 

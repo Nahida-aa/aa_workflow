@@ -5,7 +5,7 @@ title: Workflow
 
 # Struct: Workflow
 
-Defined in: `packages/workflow-core/src/define/mod.rs:466`
+Defined in: [`packages/workflow-core/src/define/mod.rs:466`](../../../packages/workflow-core/src/define/mod.rs#L466)
 
 A declared workflow: id, optional version, the async handler, plus the
 builder-derived extras (`description`, `default_step_retry`, `middlewares`,
@@ -14,164 +14,309 @@ workflow object.
 
 ## Fields
 
-### `id`
+### id
 
 ```rust
 id: String
 ```
 
-### `version`
+Defined in: [`packages/workflow-core/src/define/mod.rs:467`](../../../packages/workflow-core/src/define/mod.rs#L467)
+
+
+***
+
+### version
 
 ```rust
 version: Option<String>
 ```
 
-### `description`
+Defined in: [`packages/workflow-core/src/define/mod.rs:468`](../../../packages/workflow-core/src/define/mod.rs#L468)
+
+
+***
+
+### description
 
 ```rust
 description: Option<String>
 ```
 
-### `default_step_retry`
+Defined in: [`packages/workflow-core/src/define/mod.rs:469`](../../../packages/workflow-core/src/define/mod.rs#L469)
+
+
+***
+
+### default_step_retry
 
 ```rust
 default_step_retry: Option<RetryPolicy>
 ```
 
-Fallback retry policy for steps that declare none
-(TanStack `defaultStepRetry`). Per-step [`StepOptions::retry`] wins.
+Defined in: [`packages/workflow-core/src/define/mod.rs:472`](../../../packages/workflow-core/src/define/mod.rs#L472)
 
-### `middlewares`
+Fallback retry policy for steps that declare none
+(TanStack `defaultStepRetry`). Per-step [`StepOptions::retry`](StepOptions.md) wins.
+
+
+***
+
+### middlewares
 
 ```rust
 middlewares: Vec<Middleware>
 ```
 
+Defined in: [`packages/workflow-core/src/define/mod.rs:475`](../../../packages/workflow-core/src/define/mod.rs#L475)
+
 Middleware list, in the order TanStack's `composeMiddlewares` chains
 them (first = outermost wrapping of the typed handler).
 
-### `previous_versions`
+
+***
+
+### previous_versions
 
 ```rust
 previous_versions: Vec<Workflow>
 ```
 
+Defined in: [`packages/workflow-core/src/define/mod.rs:479`](../../../packages/workflow-core/src/define/mod.rs#L479)
+
 Older versions of the same workflow. Resume routes by the persisted
 `workflow_version` to the matching entry (see
-[`select_workflow_version`](crate::engine::select_workflow_version)).
+[`select_workflow_version`](../functions/select_workflow_version.md)).
 
-### `handler`
+
+***
+
+### handler
 
 ```rust
 handler: WorkflowHandler
 ```
 
-### `initialize`
+Defined in: [`packages/workflow-core/src/define/mod.rs:480`](../../../packages/workflow-core/src/define/mod.rs#L480)
+
+
+***
+
+### initialize
 
 ```rust
 initialize: Arc<dyn Fn(&Value) -> Result<Value> + Send + Sync>
 ```
 
-### `state_validator`
+Defined in: [`packages/workflow-core/src/define/mod.rs:481`](../../../packages/workflow-core/src/define/mod.rs#L481)
+
+
+***
+
+### state_validator
 
 ```rust
 state_validator: Option<Arc<dyn Fn(&Value) -> Result<()> + Send + Sync>>
 ```
 
-### `output_validator`
+Defined in: [`packages/workflow-core/src/define/mod.rs:482`](../../../packages/workflow-core/src/define/mod.rs#L482)
+
+
+***
+
+### output_validator
 
 ```rust
 output_validator: Option<Arc<dyn Fn(&Value) -> Result<()> + Send + Sync>>
 ```
 
+Defined in: [`packages/workflow-core/src/define/mod.rs:484`](../../../packages/workflow-core/src/define/mod.rs#L484)
+
 Shape-check for the handler's `Out` value (config `output` schema).
 
 ## Implementations
 
-### `new`
+### new()
 
 ```rust
-pub fn new<impl Into<String>>(id: impl ?) -> Self
+pub fn new<impl Into<String>: Into>(id: impl ?) -> Self
 ```
 
-Defined in: `packages/workflow-core/src/define/mod.rs:488`
+Defined in: [`packages/workflow-core/src/define/mod.rs:488`](../../../packages/workflow-core/src/define/mod.rs#L488)
 
-### `version`
+#### Parameters
+
+##### id
+
+`impl ?`
+
+#### Returns
+
+`Self`
+
+
+***
+
+### version()
 
 ```rust
-pub fn version<impl Into<String>>(self, version: impl ?) -> Self
+pub fn version<impl Into<String>: Into>(self, version: impl ?) -> Self
 ```
 
-Defined in: `packages/workflow-core/src/define/mod.rs:503`
+Defined in: [`packages/workflow-core/src/define/mod.rs:503`](../../../packages/workflow-core/src/define/mod.rs#L503)
 
-### `description`
+#### Parameters
+
+##### version
+
+`impl ?`
+
+#### Returns
+
+`Self`
+
+
+***
+
+### description()
 
 ```rust
-pub fn description<impl Into<String>>(self, description: impl ?) -> Self
+pub fn description<impl Into<String>: Into>(self, description: impl ?) -> Self
 ```
 
-Defined in: `packages/workflow-core/src/define/mod.rs:508`
+Defined in: [`packages/workflow-core/src/define/mod.rs:508`](../../../packages/workflow-core/src/define/mod.rs#L508)
 
-### `default_step_retry`
+#### Parameters
+
+##### description
+
+`impl ?`
+
+#### Returns
+
+`Self`
+
+
+***
+
+### default_step_retry()
 
 ```rust
 pub fn default_step_retry(self, retry: RetryPolicy) -> Self
 ```
 
+Defined in: [`packages/workflow-core/src/define/mod.rs:515`](../../../packages/workflow-core/src/define/mod.rs#L515)
+
 Fallback retry policy for steps that declare no
-[`StepOptions::retry`](StepOptions::retry).
+[`StepOptions::retry`](StepOptions.md).
 
-Defined in: `packages/workflow-core/src/define/mod.rs:515`
+#### Parameters
 
-### `previous_versions`
+##### retry
+
+[`RetryPolicy`](RetryPolicy.md)
+
+#### Returns
+
+`Self`
+
+
+***
+
+### previous_versions()
 
 ```rust
 pub fn previous_versions(self, v: Vec<Workflow>) -> Self
 ```
 
+Defined in: [`packages/workflow-core/src/define/mod.rs:523`](../../../packages/workflow-core/src/define/mod.rs#L523)
+
 Same as
-[`WorkflowBuilder::previous_versions`](WorkflowBuilder::previous_versions) —
+[`WorkflowBuilder::previous_versions`](WorkflowBuilder.md) —
 the erased-`Workflow` variant for engine-facing construction.
 
-Defined in: `packages/workflow-core/src/define/mod.rs:523`
+#### Parameters
 
-### `initialize`
+##### v
+
+`Vec<Workflow>`
+
+#### Returns
+
+`Self`
+
+
+***
+
+### initialize()
 
 ```rust
-pub fn initialize<impl Fn(&serde_json::Value) -> anyhow::Result<serde_json::Value> + Send + Sync + 'static>(self, f: impl ? + ? + ? + ?) -> Self
+pub fn initialize<impl Fn(&serde_json::Value) -> anyhow::Result<serde_json::Value> + Send + Sync + 'static: Fn(&Value) -> Result<Value> + Send + Sync + 'static>(self, f: impl ? + ? + ? + ?) -> Self
 ```
+
+Defined in: [`packages/workflow-core/src/define/mod.rs:532`](../../../packages/workflow-core/src/define/mod.rs#L532)
 
 Declare the initial per-invocation state, derived from the frozen run
 input (TanStack `initialize`). Called on every invocation — start and
 resume — and the handler re-runs from scratch, so mutations written
 *outside* step closures re-execute deterministically.
 
-Defined in: `packages/workflow-core/src/define/mod.rs:532`
+#### Parameters
 
-### `state_schema`
+##### f
+
+`impl ? + ? + ? + ?`
+
+#### Returns
+
+`Self`
+
+
+***
+
+### state_schema()
 
 ```rust
-pub fn state_schema<T>(self) -> Self
+pub fn state_schema<T: DeserializeOwned + Send + Sync + 'static>(self) -> Self
 ```
 
+Defined in: [`packages/workflow-core/src/define/mod.rs:545`](../../../packages/workflow-core/src/define/mod.rs#L545)
+
 Declare a typed state (serde `Deserialize` type = schema). The initial
-state built by [`initialize`](Self::initialize) is shape-checked against
+state built by [`initialize`](Workflow.md) is shape-checked against
 `T` on every invocation; a mismatch errors the run (zod `.safeParse`
 counterpart for `stateSchema`). Typed access at runtime is the `ctx.state`
 field.
 
-Defined in: `packages/workflow-core/src/define/mod.rs:545`
+#### Returns
 
-### `handler`
+`Self`
+
+
+***
+
+### handler()
 
 ```rust
 pub fn handler<F, Fut>(self, handler: F) -> Self
+where
+    F: Fn(WorkflowCtx) -> Fut + Send + Sync + 'static,
+    Fut: Future + Send + 'static
 ```
+
+Defined in: [`packages/workflow-core/src/define/mod.rs:555`](../../../packages/workflow-core/src/define/mod.rs#L555)
 
 Installs the orchestrating closure. Branching/parallelism/order are
 plain async code; only durable side effects go through `ctx.step`.
 
-Defined in: `packages/workflow-core/src/define/mod.rs:555`
+#### Parameters
+
+##### handler
+
+`F`
+
+#### Returns
+
+`Self`
 
 ## Trait Implementations
 

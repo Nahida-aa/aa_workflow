@@ -5,17 +5,17 @@ title: RunStore
 
 # Trait: RunStore
 
-Defined in: `packages/workflow-core/src/run_store/mod.rs:209`
+Defined in: [`packages/workflow-core/src/run_store/mod.rs:209`](../../../packages/workflow-core/src/run_store/mod.rs#L209)
 
 The store contract, modelled after TanStack Workflow's two-surface design:
 
-1. **Metadata surface** — `get/set/delete` a small [`RunState`] envelope.
+1. **Metadata surface** — `get/set/delete` a small [`RunState`](../structs/RunState.md) envelope.
 2. **Append-only event-log surface** — `append_event` with a CAS
    `expected_next_index`, `get_events` for resume, and `subscribe` for live
    fan-out.
 
 The engine never mutates events; state is always derived by replaying the
-log (see [`crate::event::fold_step_states`]).
+log (see [`crate::event::fold_step_states`](../functions/fold_step_states.md)).
 
 ## 与 TanStack 的对应
 
@@ -53,7 +53,7 @@ log (see [`crate::event::fold_step_states`]).
 | ---- | -------- | ---- |
 | `get_run_state` / `set_run_state` / `delete_run` | ✅ | 一一对应 |
 | `append_event` / `get_events` / `subscribe` | ✅ | 一一对应 |
-| [`truncate_log_at_step`](Self::truncate_log_at_step) | ❌ **本地扩展** | 支撑 `continue_from`；上游连 `continueFrom` 都没有 |
+| [`truncate_log_at_step`](RunStore.md) | ❌ **本地扩展** | 支撑 `continue_from`；上游连 `continueFrom` 都没有 |
 
 详见 `docs/tanstack-alignment.md` 的「保留了分歧（本地扩展 / 一等公民）」。
 这也是为什么 runtime 的新契约 `WorkflowExecutionStore` 没有截断能力——它对齐的

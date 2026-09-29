@@ -5,12 +5,12 @@ title: RunError
 
 # Struct: RunError
 
-Defined in: `packages/workflow-core/src/error.rs:54`
+Defined in: [`packages/workflow-core/src/error.rs:54`](../../../packages/workflow-core/src/error.rs#L54)
 
 跨进程序列化的错误（对齐 TanStack `SerializedError`，`types.ts:16`）。
 
 「序列化」不等于「持久化」：它可能进 `RunState.error`，也可能只随事件投给
-publisher。存不存、存哪儿，是 [`RunStore`](crate::run_store::RunStore)
+publisher。存不存、存哪儿，是 [`RunStore`](../traits/RunStore.md)
 实现者的事。
 
 两处刻意不对等：
@@ -20,45 +20,69 @@ publisher。存不存、存哪儿，是 [`RunStore`](crate::run_store::RunStore)
   逻辑没有帮助。
 - **`name` 常常只是 `"Error"`**。JS 的 `Error.name` 是错误类名；Rust 的
   `anyhow::Error` 是类型擦除的，拿不到类名。只有引擎自身的
-  [`WorkflowError`] 变体与
-  [`WorkflowCancelled`](crate::engine::WorkflowCancelled) 能给出有意义的名字。
+  [`WorkflowError`](../enums/WorkflowError.md) 变体与
+  [`WorkflowCancelled`](WorkflowCancelled.md) 能给出有意义的名字。
 
 ## Fields
 
-### `name`
+### name
 
 ```rust
 name: String
 ```
 
-### `message`
+Defined in: [`packages/workflow-core/src/error.rs:55`](../../../packages/workflow-core/src/error.rs#L55)
+
+
+***
+
+### message
 
 ```rust
 message: String
 ```
 
+Defined in: [`packages/workflow-core/src/error.rs:56`](../../../packages/workflow-core/src/error.rs#L56)
+
 ## Implementations
 
-### `cancelled`
+### cancelled()
 
 ```rust
 pub fn cancelled() -> Self
 ```
 
+Defined in: [`packages/workflow-core/src/error.rs:61`](../../../packages/workflow-core/src/error.rs#L61)
+
 引擎主动中止（`cancel_run`）产生的错误。
 
-Defined in: `packages/workflow-core/src/error.rs:61`
+#### Returns
 
-### `from_anyhow`
+`Self`
+
+
+***
+
+### from_anyhow()
 
 ```rust
 pub fn from_anyhow(e: &Error) -> Self
 ```
 
+Defined in: [`packages/workflow-core/src/error.rs:71`](../../../packages/workflow-core/src/error.rs#L71)
+
 从 `anyhow::Error` 提取：能 downcast 到引擎错误类型时给出变体名，
 否则退化为 `"Error"`（见类型文档）。
 
-Defined in: `packages/workflow-core/src/error.rs:71`
+#### Parameters
+
+##### e
+
+`&Error`
+
+#### Returns
+
+`Self`
 
 ## Trait Implementations
 

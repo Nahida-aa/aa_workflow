@@ -5,33 +5,54 @@ title: RetryPolicy
 
 # Struct: RetryPolicy
 
-Defined in: `packages/workflow-core/src/define/mod.rs:390`
+Defined in: [`packages/workflow-core/src/define/mod.rs:390`](../../../packages/workflow-core/src/define/mod.rs#L390)
 
 ## Fields
 
-### `max_attempts`
+### max_attempts
 
 ```rust
 max_attempts: usize
 ```
 
+Defined in: [`packages/workflow-core/src/define/mod.rs:392`](../../../packages/workflow-core/src/define/mod.rs#L392)
+
 Total attempts, including the first. 1 == no retry.
 
-### `backoff`
+
+***
+
+### backoff
 
 ```rust
 backoff: Backoff
 ```
 
+Defined in: [`packages/workflow-core/src/define/mod.rs:393`](../../../packages/workflow-core/src/define/mod.rs#L393)
+
 ## Implementations
 
-### `new`
+### new()
 
 ```rust
 pub fn new(max_attempts: usize, backoff: Backoff) -> Self
 ```
 
-Defined in: `packages/workflow-core/src/define/mod.rs:397`
+Defined in: [`packages/workflow-core/src/define/mod.rs:397`](../../../packages/workflow-core/src/define/mod.rs#L397)
+
+#### Parameters
+
+##### max_attempts
+
+`usize`
+
+##### backoff
+
+[`Backoff`](../enums/Backoff.md)
+
+#### Returns
+
+`Self`
 
 ## Trait Implementations
 
