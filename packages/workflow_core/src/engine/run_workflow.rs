@@ -69,6 +69,37 @@ pub struct RunWorkflowOptions {
     pub yield_resume_at: Option<i64>,
     /// 每个事件都会回调（上游 `publish`）——host 可以接到 Redis / Durable Streams
     /// 之类的扇出通道，让别的节点能 tail 这个 run。
+    ///
+    /// # 这是「可观测」与「耐久」的分界
+    ///
+    /// 引擎只把**事实**落盘（`append`）：`STEP_FINISHED` / `STEP_FAILED` /
+    /// `STEP_PAUSED` / `NOW_RECORDED` / `UUID_RECORDED`。其余事件——`STEP_PROGRESS`、
+    /// `STEP_STARTED`、`CUSTOM`、`STATE_DELTA`——**只**走到这里，**从不**写盘
+    /// （`EngineRuntime::publish` 没有任何落盘路径）。
+    ///
+    /// 「要不要把 progress 落盘」是**宿主的策略**，引擎不替所有人决定：devtools
+    /// 不需要，产品 UI 可能需要。所以要留就自己在这里写：
+    ///
+    /// ```ignore
+    /// .publisher(Some(Arc::new(move |e: &WorkflowEvent| {
+    ///     if let WorkflowEvent::StepProgress { step_id, value, .. } = e {
+    ///         my_db.insert_progress(run_id, step_id, *value);
+    ///     }
+    /// })))
+    /// ```
+    ///
+    /// ## 坑 1：这是 `Fn`，不是 async —— 同步阻塞在热路径上
+    ///
+    /// `publish()` 是**内联调用**的，没锁、但也没让出执行权。在这里做 DB 写 /
+    /// 网络 IO 会**卡住每一步的状态转换**。要异步扇出得自己套一层
+    /// （`tokio::spawn`，或有界 channel + 独立 drain 任务）。引擎不替宿主决定
+    /// 扇出语义，但这个成本必须知道。
+    ///
+    /// ## 坑 2：进程内回调 = 有丢失窗口
+    ///
+    /// 崩溃时最后一批事件就没了。所以「自己落盘」得到的是**被观测到的那部分**
+    /// 耐久，不是「全部」耐久。拿它当审计日志会得到一份有洞的审计日志——
+    /// 审计要耐久就别走这里，该让引擎 append。
     pub publisher: Option<Arc<dyn Fn(&WorkflowEvent) + Send + Sync>>,
 }
 
