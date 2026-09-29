@@ -153,6 +153,56 @@ step 闭包**不是**严格意义上的纯函数 —— 上游自己的例子就
 上游没有用「pure / 纯」这个措辞，也没把这条规则写进 Authoring rules
 （见文末「上游文档的缺口」），所以本文把它显式记录在此。
 
+## 那 step 内部的进度呢？
+
+常被接着问的一句：**step 跑 10 分钟，外面看得到跑到哪了吗？**
+
+`ctx.state` 看不到，两个**独立**原因叠加：
+
+1. **没有中途 flush 点。** `flush_state()` 只在 5 个耐久边界调用（`define/mod.rs`
+   的 222 / 265 / 283 / 355 / 383 行），全部在 step **之外**。step 执行期间
+   driver 手上没有可刷新的 mirror。
+2. **就算有 flush 点也写不进去。** 闭包拿到的是 `ctx` 的引用（TS）或克隆的
+   `StateHandle`（Rust），改不到 driver 那份 —— 就是本文前面讲的那件事。
+
+所以「step 内进度」有个专门的第三条通道：`StepCtx::progress(f64)`
+（`engine/mod.rs:60`），发 `WorkflowEvent::StepProgress`。它和上面两个都不同：
+
+| | 即时 | 耐久 |
+| --- | --- | --- |
+| `StepCtx::progress` | ✅ | ❌ |
+| step 内写 `ctx.state` | ❌ | ❌ |
+| 把子阶段拆成独立 step | ✅ | ✅ |
+
+**「即时 + 耐久」这个格子是空的，而且是故意空的。** 事件定义上写死了
+`/// Observability only (not persisted)`（`event.rs:121`），`publish()` 只调
+publisher 回调、从不 `append`。
+
+为什么不耐久、为什么这是对的：假设 step 报了 50% 然后崩了。resume 时闭包**整个
+被跳过**（上游 `replay-and-resume.md:31`），那 50% 从没进过日志，恢复后是 0%。
+于是「step 内进度」和「step 内写 state」是**同一个错误**，只是写进了另一个载体 ——
+都会在 resume 后静默回到 0%。把它做成耐久的，等于造出一个会骗人的半吊子事实。
+
+结论：**实时观测用 `progress`，需要重放正确的粒度用 step 拆分。** 前者是尽力而为的
+观测值，后者才是耐久单元。
+
+### 顺带：哪些事件落盘，哪些不落
+
+查这个问题时容易误以为「Started/Finished 都记着」。实际只有 5 类事件 `append`
+进日志（`engine/mod.rs` 里的 5 处 `inner.append`）：
+
+| 落盘 | 仅 `publish`（emit-only） |
+| --- | --- |
+| `STEP_FINISHED` / `STEP_FAILED` / `STEP_PAUSED` | `RUN_STARTED` / `STEP_STARTED` |
+| `NOW_RECORDED` / `UUID_RECORDED` | `STEP_PROGRESS` / `CUSTOM` / `STATE_DELTA` |
+
+后果值得知道：**进程在 step 中途被杀，日志里查不到「当时在跑哪个 step」** ——
+最后一条只是上一个 step 的 Finished。这不违反一致性（那个 step 重来即可），但想诊断
+「上次崩在哪」不能只靠事件日志。
+
+可执行验证：`examples/store_file/src/progress_report.rs` 及其测试
+（`tests/progress_report.rs`，4 个测试钉住「publisher 收到 / 日志里没有」这条对比）。
+
 本文引用分两类，路径前缀区分：
 
 - **上游** `learn_ls/workflow/` —— TanStack Workflow 仓库
