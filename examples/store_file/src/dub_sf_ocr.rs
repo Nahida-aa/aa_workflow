@@ -154,19 +154,16 @@ pub fn dub_sf_ocr() -> WorkflowDefinition<DubSfOcrInput, serde_json::Value, DubS
             .input::<DubSfOcrInput>()
             .state::<DubSfOcrState>()
             // state 不落盘：每次 start / resume 都从这里重建。
-            .initialize(|input| {
-                let video_dir = input["videoDir"].as_str().unwrap_or_default().to_string();
-                let target_lang = input["targetLang"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("zh")
-                    .to_string();
-                Ok(serde_json::json!({
-                    "videoDir": video_dir,
-                    "targetLang": target_lang,
-                    "outputMode": "dub",
-                    "subtitleSource": "sf_ocr",
-                }))
+            .initialize(|input: &DubSfOcrInput| {
+                Ok(DubSfOcrState {
+                    video_dir: input.video_dir.clone(),
+                    target_lang: input
+                        .target_lang
+                        .clone()
+                        .unwrap_or_else(|| "zh".to_string()),
+                    output_mode: "dub".to_string(),
+                    subtitle_source: "sf_ocr".to_string(),
+                })
             }),
     )
     .handler(|ctx: BaseCtx<DubSfOcrInput, DubSfOcrState>| async move {

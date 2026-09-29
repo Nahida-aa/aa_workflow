@@ -158,7 +158,7 @@ let wf = create_workflow(
     CreateWorkflowConfig::new("counter")
         .input::<serde_json::Value>()
         .state::<CounterState>()
-        .initialize(|_input| Ok(serde_json::json!({ "total": 0 }))),
+        .initialize(|_input| Ok(CounterState { total: 0 })),
 )
 // 写 state 需要 `|mut ctx|`（DerefMut 要可变借用）；参数类型照旧可推断。
 .handler(|mut ctx| async move {

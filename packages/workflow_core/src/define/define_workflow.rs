@@ -68,11 +68,24 @@ impl<TInput, TOutput, TState> CreateWorkflowConfig<TInput, TOutput, TState> {
     /// `initialize({ input })` — rebuild the per-invocation state on every
     /// start and resume (state is never persisted, see
     /// [`Workflow::initialize`](Workflow::initialize)).
+    ///
+    /// typed：闭包吃 `&TInput`、产 `TState`（对齐上游——`TState` 由
+    /// `.state::<T>()` 声明、编译期钉死）。内部 serde 桥接到运行时的擦除
+    /// 表示（`Workflow` 持 `Fn(&Value) -> Result<Value>`）；input 反序列化
+    /// 失败 / state 序列化失败都算 run 错误。
     pub fn initialize(
         mut self,
-        f: impl Fn(&serde_json::Value) -> anyhow::Result<serde_json::Value> + Send + Sync + 'static,
-    ) -> Self {
-        self.initialize = Arc::new(f);
+        f: impl Fn(&TInput) -> anyhow::Result<TState> + Send + Sync + 'static,
+    ) -> Self
+    where
+        TInput: serde::de::DeserializeOwned,
+        TState: serde::Serialize,
+    {
+        self.initialize = Arc::new(move |input: &serde_json::Value| {
+            let typed_input: TInput = serde_json::from_value(input.clone())?;
+            let typed_state = f(&typed_input)?;
+            Ok(serde_json::to_value(typed_state)?)
+        });
         self
     }
 

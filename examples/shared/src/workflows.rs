@@ -584,12 +584,11 @@ pub fn state_demo() -> WorkflowDefinition<StateDemoInput, serde_json::Value, Cou
         CreateWorkflowConfig::new("state-demo")
             .input::<StateDemoInput>()
             .state::<CounterState>()
-            .initialize(|input| {
-                let amount = input["amount"].as_i64().unwrap_or(0);
-                Ok(serde_json::json!({
-                    "total": amount,
-                    "settleEvents": serde_json::Value::Array(vec![]),
-                }))
+            .initialize(|input: &StateDemoInput| {
+                Ok(CounterState {
+                    total: input.amount,
+                    settle_events: Vec::new(),
+                })
             }),
     )
     .handler(
@@ -1321,8 +1320,11 @@ mod tests {
             CreateWorkflowConfig::new("state-roundtrip")
                 .input::<serde_json::Value>()
                 .state::<CounterState>()
-                .initialize(|_input| {
-                    Ok(serde_json::json!({ "total": 7, "settleEvents": ["seed"] }))
+                .initialize(|_input: &serde_json::Value| {
+                    Ok(CounterState {
+                        total: 7,
+                        settle_events: vec!["seed".to_string()],
+                    })
                 }),
         )
         .handler(
