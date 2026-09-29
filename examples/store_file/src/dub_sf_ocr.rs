@@ -401,11 +401,8 @@ pub fn dub_sf_ocr() -> WorkflowDefinition<DubSfOcrInput, serde_json::Value, DubS
                     .step("separate", move |_sc: StepCtx| async move { separate(&st).await })
                     .await?;
                 let st = Arc::clone(&state);
-                ctx.step("separate_after", move |_sc: StepCtx| {
-                    // 闭包是 `FnOnce + Clone`，重试时会被调用多次，所以上游产物在
-                    // 闭包**体内**克隆（每次 attempt 一份），不能在外面 move 走。
-                    let prev = sep.clone();
-                    async move { separate_after(&st, &prev).await }
+                ctx.step("separate_after", move |_sc: StepCtx| async move {
+                    separate_after(&st, &sep).await
                 })
                 .await
             },
@@ -417,22 +414,17 @@ pub fn dub_sf_ocr() -> WorkflowDefinition<DubSfOcrInput, serde_json::Value, DubS
                     .await?;
                 let st = Arc::clone(&state);
                 let raw = ctx
-                    .step("sf_ocr", move |_sc: StepCtx| {
-                        let prev = frames.clone();
-                        async move { sf_ocr(&st, &prev).await }
-                    })
+                    .step("sf_ocr", move |_sc: StepCtx| async move { sf_ocr(&st, &frames).await })
                     .await?;
                 let st = Arc::clone(&state);
                 let fixed = ctx
-                    .step("sf_ocr_fix", move |_sc: StepCtx| {
-                        let prev = raw.clone();
-                        async move { sf_ocr_fix(&st, &prev).await }
+                    .step("sf_ocr_fix", move |_sc: StepCtx| async move {
+                        sf_ocr_fix(&st, &raw).await
                     })
                     .await?;
                 let st = Arc::clone(&state);
-                ctx.step("translate", move |_sc: StepCtx| {
-                    let prev = fixed.clone();
-                    async move { translate(&st, &prev).await }
+                ctx.step("translate", move |_sc: StepCtx| async move {
+                    translate(&st, &fixed).await
                 })
                 .await
             },
@@ -443,42 +435,49 @@ pub fn dub_sf_ocr() -> WorkflowDefinition<DubSfOcrInput, serde_json::Value, DubS
         let out_separated = separated.clone();
         let out_translated = translated.clone();
 
-        // 汇聚：split_audio 同时吃两支的产物。`separated` 后面还有两个 step 要用。
+        // ── 关于克隆放在哪 ──
+        //
+        // 上面的 `let st = Arc::clone(&state);` 在**闭包外**，`state` 要分给 10 个
+        // step，每个闭包得有自己那份，所以这个克隆是必需的。
+        //
+        // 而 `sep` / `frames` / `raw` / `fixed` / `timings` / `tts` / `translated`
+        // 这些**上游产物**不需要在闭包体内再克隆：闭包的 bound 是
+        // `FnOnce(..) + Clone`，引擎每次 attempt 执行 `run.clone()(step_ctx)`，
+        // 捕获环境随之克隆——每个 attempt 本来就各有一份。在闭包体内写
+        // `let prev = sep.clone();` 是重复劳动。
+        //
+        // 下面 `separated` 的三处克隆则是必需的：它同时被 `split_audio`、
+        // `mix_audio`、`mix_video` 三个闭包消费，每个都要自己那份。
+
+        // 汇聚：split_audio 同时吃两支的产物。
         let split_input = separated.clone();
         let st = Arc::clone(&state);
         let timings = ctx
-            .step("split_audio", move |_sc: StepCtx| {
-                let (sep, tr) = (split_input.clone(), translated.clone());
-                async move { split_audio(&st, &sep, &tr).await }
+            .step("split_audio", move |_sc: StepCtx| async move {
+                split_audio(&st, &split_input, &translated).await
             })
             .await?;
         let out_timings = timings.clone();
 
         let st = Arc::clone(&state);
         let tts = ctx
-            .step("tts", move |_sc: StepCtx| {
-                let prev = timings.clone();
-                async move { tts(&st, &prev).await }
-            })
+            .step("tts", move |_sc: StepCtx| async move { tts(&st, &timings).await })
             .await?;
         let out_tts = tts.clone();
 
         let split_audio_input = separated.clone();
         let st = Arc::clone(&state);
         let mixed_audio = ctx
-            .step("mix_audio", move |_sc: StepCtx| {
-                let (sep, wavs) = (split_audio_input.clone(), tts.clone());
-                async move { mix_audio(&st, &sep, &wavs).await }
+            .step("mix_audio", move |_sc: StepCtx| async move {
+                mix_audio(&st, &split_audio_input, &tts).await
             })
             .await?;
-
         let out_mixed_audio = mixed_audio.clone();
 
         let st = Arc::clone(&state);
         let mix_video = ctx
-            .step("mix_video", move |_sc: StepCtx| {
-                let (sep, audio) = (separated.clone(), mixed_audio.clone());
-                async move { mix_video(&st, &sep, &audio).await }
+            .step("mix_video", move |_sc: StepCtx| async move {
+                mix_video(&st, &separated, &mixed_audio).await
             })
             .await?;
 
