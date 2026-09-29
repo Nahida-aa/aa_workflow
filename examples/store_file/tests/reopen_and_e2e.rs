@@ -4,8 +4,10 @@
 //!
 //! 1. **跨实例重开**——进程 A 写、进程 B（新实例）打开同一 base 能读到并续跑。
 //!    这是「落盘」相对内存实现的**唯一实质差别**，必须自己验。
-//! 2. **接 runtime 端到端**——`define_workflow_runtime` 驱动一个含**并行 step**
-//!    的 workflow，验证 store 真能当引擎后端用（并行 step 会并发 append，走 CAS）。
+//! 2. **并行 step 端到端（adapter 直驱）**——`try_join!` 的并行 step 会并发
+//!    append，走 CAS，验证 store 真能当引擎后端用。
+//!    （经 runtime 层 `define_workflow_runtime` 驱动的示范在
+//!    `tests/dub_sf_ocr.rs`——那边走 `start_run`，带认领/幂等边界。）
 
 use std::sync::Arc;
 

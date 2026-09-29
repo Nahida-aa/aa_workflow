@@ -25,8 +25,8 @@ use std::sync::Arc;
 use aa_workflow_core::{CreateWorkflowConfig, WorkflowDefinition, create_workflow};
 use aa_workflow_runtime::{
     InMemoryExecutionStore, RunResultKind, WorkflowExecutionStatus, WorkflowExecutionStore,
-    WorkflowRegistration, WorkflowRuntime, WorkflowRuntimeConfig, WorkflowRuntimeDeliverSignalArgs,
-    WorkflowRuntimeStartRunArgs, define_workflow_runtime,
+    WorkflowRegistration, WorkflowRuntimeConfig, WorkflowRuntimeDefinition,
+    WorkflowRuntimeDeliverSignalArgs, WorkflowRuntimeStartRunArgs, define_workflow_runtime,
 };
 
 // ============================================================
@@ -117,7 +117,7 @@ pub fn fulfillment_workflow() -> WorkflowDefinition<FulfillmentInput, serde_json
 
 /// 双柄：`mem` 供示例直读内部，`rt` 是给调用方的 runtime。
 pub struct Fixture {
-    pub rt: Arc<WorkflowRuntime>,
+    pub rt: Arc<WorkflowRuntimeDefinition>,
     pub mem: Arc<InMemoryExecutionStore>,
 }
 

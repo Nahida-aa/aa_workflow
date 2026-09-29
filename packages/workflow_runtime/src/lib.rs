@@ -61,10 +61,10 @@ pub use run_store_adapter::{
 };
 pub use runtime_driver::{
     DEFAULT_LEASE_MS, DEFAULT_MIN_YIELD_REMAINING_MS, DEFAULT_SWEEP_LIMIT, RunResult,
-    RunResultKind, SweepSummary, WorkflowRegistration, WorkflowRuntime, WorkflowRuntimeConfig,
-    WorkflowRuntimeDeliverApprovalArgs, WorkflowRuntimeDeliverSignalArgs,
-    WorkflowRuntimeStartRunArgs, WorkflowRuntimeSweepArgs, WorkflowRuntimeSweepResult,
-    define_workflow_runtime,
+    RunResultKind, SweepSummary, WorkflowRegistration, WorkflowRegistry,
+    WorkflowRuntimeConfig, WorkflowRuntimeDefinition, WorkflowRuntimeDeliverApprovalArgs,
+    WorkflowRuntimeDeliverSignalArgs, WorkflowRuntimeStartRunArgs, WorkflowRuntimeSweepArgs,
+    WorkflowRuntimeSweepResult, define_workflow_runtime,
 };
 pub use schedule_materializer::{
     DEFAULT_CRON_LOOKBACK_MS, MaterializeWorkflowSchedulesOptions, MaterializedWorkflowSchedule,

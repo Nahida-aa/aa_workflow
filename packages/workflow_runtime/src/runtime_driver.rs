@@ -70,24 +70,41 @@ pub struct WorkflowRegistration {
     pub schedules: Vec<WorkflowScheduleDefinition>,
 }
 
-/// runtime 配置（对齐上游 `WorkflowRuntimeConfig`）。
+/// `TWorkflows` 的最低能力：按 id 查注册项（对齐上游 `Record<string,
+/// WorkflowRegistration>` 的静态查找）。擦除形态（HashMap）天然满足；
+/// 使用者自己的注册表类型实现它即可接入 runtime——未来「按 workflow id
+/// 校验 input 的类型安全」也挂在这个 trait 上扩展。
+pub trait WorkflowRegistry {
+    fn get(&self, workflow_id: &WorkflowId) -> Option<&WorkflowRegistration>;
+}
+
+impl WorkflowRegistry for HashMap<WorkflowId, WorkflowRegistration> {
+    fn get(&self, workflow_id: &WorkflowId) -> Option<&WorkflowRegistration> {
+        HashMap::get(self, workflow_id)
+    }
+}
+
+/// runtime 配置（对齐上游 `WorkflowRuntimeConfig<TWorkflows>`，types.ts:360）。
 ///
-/// 上游的 `telemetry` 项省略（core 无 OTel 集成）。
+/// 上游的 `telemetry` 项省略（core 无 OTel 集成）。`TWorkflows` 默认擦除为
+/// `HashMap<WorkflowId, WorkflowRegistration>`——上游靠 `const TWorkflows` 把
+/// 注册表类型带在定义上；Rust 无 keyof，先做形状对齐（start_run 的 id 仍按
+/// 注册表运行期查找），按 id 校验 input 的类型安全留待后续设计。
 #[derive(Clone)]
-pub struct WorkflowRuntimeConfig {
+pub struct WorkflowRuntimeConfig<TWorkflows = HashMap<WorkflowId, WorkflowRegistration>> {
     pub store: Arc<dyn WorkflowExecutionStore>,
     /// 按 `workflow_id` 注册的 workflow。
-    pub workflows: HashMap<WorkflowId, WorkflowRegistration>,
+    pub workflows: TWorkflows,
     /// lease 默认时长；单次调用可用 `lease_ms` 覆盖。
     pub default_lease_ms: Option<i64>,
     /// 全局事件 fan-out（best-effort，不参与耐久执行）。
     pub publish: Option<Arc<dyn Fn(&RunId, &WorkflowEvent) + Send + Sync>>,
 }
 
-impl WorkflowRuntimeConfig {
+impl<TWorkflows> WorkflowRuntimeConfig<TWorkflows> {
     pub fn new(
         store: Arc<dyn WorkflowExecutionStore>,
-        workflows: HashMap<WorkflowId, WorkflowRegistration>,
+        workflows: TWorkflows,
     ) -> Self {
         Self {
             store,
@@ -236,16 +253,23 @@ pub struct WorkflowRuntimeSweepResult {
 // runtime
 // ============================================================
 
-/// workflow runtime：认领 → 驱动 → 心跳 → 收尾 + sweep。
+/// workflow runtime definition：认领 → 驱动 → 心跳 → 收尾 + sweep。
 ///
-/// 对齐上游 `defineWorkflowRuntime` 返回的 `WorkflowRuntimeDefinition`。
-pub struct WorkflowRuntime {
-    config: WorkflowRuntimeConfig,
+/// 对齐上游 `WorkflowRuntimeDefinition<TWorkflows>`（types.ts:371）——继承
+/// config（Rust 用组合：`definition.config`）+ 驱动方法。执行进度状态全在
+/// store；definition 只是把 config（含**有状态的 store 柄**）与驱动方法绑在
+/// 一个值上，跨进程「读」同一 base = 重建一个 definition 指向它。
+pub struct WorkflowRuntimeDefinition<
+    TWorkflows = HashMap<WorkflowId, WorkflowRegistration>,
+> {
+    pub config: WorkflowRuntimeConfig<TWorkflows>,
 }
 
-/// 构造 runtime（对齐上游 `defineWorkflowRuntime`）。
-pub fn define_workflow_runtime(config: WorkflowRuntimeConfig) -> WorkflowRuntime {
-    WorkflowRuntime { config }
+/// 构造 runtime（对齐上游 `defineWorkflowRuntime`，define-runtime.ts:11）。
+pub fn define_workflow_runtime<TWorkflows>(
+    config: WorkflowRuntimeConfig<TWorkflows>,
+) -> WorkflowRuntimeDefinition<TWorkflows> {
+    WorkflowRuntimeDefinition { config }
 }
 
 static LEASE_OWNER_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -274,7 +298,10 @@ fn normalize_lease_ms(v: i64) -> anyhow::Result<i64> {
     Ok(v)
 }
 
-fn resolve_lease_ms(config: &WorkflowRuntimeConfig, lease_ms: Option<i64>) -> anyhow::Result<i64> {
+fn resolve_lease_ms<TWorkflows>(
+    config: &WorkflowRuntimeConfig<TWorkflows>,
+    lease_ms: Option<i64>,
+) -> anyhow::Result<i64> {
     normalize_lease_ms(
         lease_ms
             .or(config.default_lease_ms)
@@ -311,7 +338,7 @@ fn count_kinds(results: &[RunResult]) -> KindCounts {
     map
 }
 
-impl WorkflowRuntime {
+impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
     /// 按 id 加载 workflow：注册项的 version 覆盖自身、合并 previous_versions
     /// （对齐上游 `loadWorkflow`）。
     fn load_workflow(&self, workflow_id: &WorkflowId) -> anyhow::Result<Workflow> {
@@ -905,7 +932,9 @@ struct DriveArgs<'a> {
 }
 
 /// 每次调用建一个新 adapter（轻量 struct + Arc，与上游每次 drive 建一次一致）。
-fn run_store_for_core(config: &WorkflowRuntimeConfig) -> Arc<dyn aa_workflow_core::RunStore> {
+fn run_store_for_core<TWorkflows>(
+    config: &WorkflowRuntimeConfig<TWorkflows>,
+) -> Arc<dyn aa_workflow_core::RunStore> {
     create_run_store_adapter(Arc::clone(&config.store))
 }
 
@@ -919,8 +948,8 @@ fn run_store_for_core(config: &WorkflowRuntimeConfig) -> Arc<dyn aa_workflow_cor
 ///   与上游 `sleepUntil` 同形）；
 /// - `signal_id` 形如 `timer:{run_id}:{step_id}:{deadline}`，**幂等键**——同一次
 ///   挂起重复登记无副作用，正好抵消「每次 drive 收尾都跑一遍」。
-fn sync_timer_from_run_state(
-    config: &WorkflowRuntimeConfig,
+fn sync_timer_from_run_state<TWorkflows>(
+    config: &WorkflowRuntimeConfig<TWorkflows>,
     run_id: &str,
     workflow_id: &str,
 ) -> anyhow::Result<()> {
@@ -1029,7 +1058,7 @@ mod driver_tests {
 
     /// 双柄：`mem` 供测试直读内部，`store` 喂给 runtime（trait 对象）。
     struct Fixture {
-        rt: Arc<WorkflowRuntime>,
+        rt: Arc<WorkflowRuntimeDefinition>,
         mem: Arc<InMemoryExecutionStore>,
     }
 
