@@ -29,9 +29,9 @@
 //! 所以 `try_join!` 是安全的；分支内部仍是词法 `.await` 串行（`separate_after`
 //! 要 `separate` 的 stems）。
 //!
-//! 本示例的 step **只读** `ctx.state`，而且这条约束是**类型层面**保证的：step 桩函数
-//! [`dub_step`] 的 state 参数取 `&DubSfOcrState`，签名上就没有写 state 的路径
-//! （详见该函数的文档）。写入必须发生在 join 之后，且跨步骤传数据走 step 的**返回值**
+//! 本示例的 step **只读** `ctx.state`，而且这条约束是**类型层面**保证的：每个 step
+//! 函数的 state 参数都取 `&DubSfOcrState`，签名上就没有写 state 的路径
+//! （见 [`stub`] 的文档）。写入必须发生在 join 之后，且跨步骤传数据走 step 的**返回值**
 //! —— 见 `aa-workflow/docs/concepts/ctx-state.md` 与 AGENTS.md 的「`ctx.state` 的
 //! 写入位置准则」。
 //!
