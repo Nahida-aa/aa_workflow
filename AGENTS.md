@@ -158,13 +158,43 @@ if let Some(i) = cut {
    `ctx.clone()` 各持快照、互不可见**（见 `state_parallel_steps_snapshot_then_driver_flush`）。
    要跨分支传递可变数据，走 **step 的返回值**（durable 结果），不要走 state。
 
-## `ctx.state` 的写入位置准则（并行编排必读）
+## `ctx.state` 的写入位置准则（串行 + 并行）
 
-**串行时随手改 `ctx.state` 是自然行为，一旦并行就必须显式设计。** 这个不对称是坑的
-来源，所以给一条可机械套用的准则：
+**完整论证、串行反例、上游实测见 [`docs/concepts/ctx-state.md`](docs/concepts/ctx-state.md)。**
+本页只留必须记住的机械准则。
 
+**核心：workflow 是对副作用的编排，需要「跳过已执行的副作用」+「复用其结果」。满足
+这两条的是事件日志 + step 原语 —— 所以 step 闭包唯一耐久的输出通道是返回值。**
+
+机制：replay 时已 checkpoint 的 step **直接返回日志里的结果，闭包不被调用**
+（上游 `replay-and-resume.md:31`：`fn` is NOT called）。它把代码分成两类：
+
+| | step 闭包 `ctx.step(id, fn)` | handler 体内 |
+| --- | --- | --- |
+| replay 时 | **被跳过** | **重跑** |
+| 副作用 | 只能通过**返回值**输出 | 会被重新施加 |
+
+所以 **step 闭包不要写 `ctx.state`**：那是「未被记录的副作用」—— 不在返回值里，
+日志里也没有，而 state 每次 resume 都由 `initialize(input)` 重建
+（`STATE_DELTA` emit-only、不进日志）。数据流走 **step 返回值 → 局部变量 → 下个 step
+的入参**。
+
+补充一点容易误读的：state 的写**是自动发 `STATE_DELTA` 的**，不用手动发
+（`define/mod.rs:166-174` 的 `flush_state` → `state.sync()` + `emit_state_delta()`），
+只是攒到耐久边界才 flush（step / wait / approve / sleep_until / yield / drive 收尾）。
+最容易踩的坑是：**首次 drive 的 delta 看着完全正常，resume 时闭包被短路 → 一条 delta
+都不发 → 终态是另一个值，且永远不会被纠正。** 所以判别信号是「**恢复期有没有重新发出
+`STATE_DELTA`**」，不是终态值本身。
+
+> 精确化：step 闭包**不是**严格纯函数 —— 上游例子 `ctx.step('flag', fetchFlag)` 就有
+> 外部副作用。区别在**副作用有没有被记录**：`fetchFlag()` 的效果进了
+> `STEP_FINISHED.result`，所以只真实执行一次，那是允许的。要求的是「无隐藏副作用」。
+
+> 串行时随手改 `ctx.state` 是自然行为，一旦并行就必须显式设计。这个不对称是坑的
+> 来源，所以并行时再加一条：
+>
 > **`ctx.state.x = ...` 必须出现在「执行顺序由词法决定」的位置。**
-> 写并行编排时只需自问：**这个赋值在 `try_join!` 的哪一侧？**
+> 只需自问：**这个赋值在 `try_join!` 的哪一侧？**
 >
 > - 在 join **之内**（分支闭包内部）→ **违规**，改成把值 `return` 出去
 > - 在 join **之后**（汇合点）→ **安全**
@@ -210,14 +240,22 @@ B 的关键不只是「避免竞写」：**增量作为 step 返回值进了日�
 
 ### `ctx.state` 该用来干什么
 
-它是**串行的 handler 内部工作区**（跨迭代累积的临时数据），不是跨分支/跨步骤的数据
-通道。上游 `docs/concepts/primitives.md` 列了 step / sleep / waitForEvent / approve /
-now / emit / signal / runtime 各节，**唯独没有 `ctx.state`**——它没被当成推荐原语来教。
-参考用法见上游 `engine.smoke.test.ts:37`（最小）与 `examples.kyle-durable-agent.test.ts:100`
-（agent 的虚拟 FS，跨迭代累积）。
+⚠️ **以下是推论，不是上游表述。** 上游从未说明 `ctx.state` 的用途 —— `docs/` 里
+`ctx.state` 出现 0 次，`guide/observability.md` 完全没提 state。唯一挂钩的一句是生成
+文档 `reference/type-aliases/Operation.md:28`（讲 diff 机制本身）："…for workflow
+state **observability**"。
 
-本仓示例 `dub_sf_ocr`（`examples/shared/src/workflows.rs`）是正例：两个并行分支的 step
-**只读** state，一处都不写。
+可以确定的是它**不是**结果通道：上游 5 处 state schema（作者均为 maintainer）
+无一例外是 status / phase / counter；唯一写下来的规范用法
+（`engine.smoke.test.ts:42-43`）方向是 **返回值 → state**。
+
+所以它更像**给观察者看的进度投影**或 handler 草稿区，而非跨步骤的数据通道。
+这条推论**不参与**上面的写入规则（规则只依赖「闭包不被重放」+「state 每次重建」
+两条已证实事实）。参考用法见上游 `engine.smoke.test.ts:37`（最小）与
+`examples.kyle-durable-agent.test.ts:100`（agent 的虚拟 FS，跨迭代累积）。
+
+本仓示例 `dub_sf_ocr`（`examples/store_file/src/dub_sf_ocr.rs`）是正例：两个并行分支
+的 step **只读** state，一处都不写。
 
 ## 参考实现
 

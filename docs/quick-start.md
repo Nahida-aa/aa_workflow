@@ -284,7 +284,8 @@ store 是可插拔的，workflow 代码不动。本仓三个实现跑**同一份
 ## Where next
 
 - `examples/guide` — guide 的可运行移植（唯一跑通 core + runtime 端到端的地方）
+- `docs/concepts/ctx-state.md` — `ctx.state` 写入规则（串行 + 并行的判据与反例）
 - `docs/runtime-design.md` — runtime 层决策记录（lease / sweep / timer / schedule）
 - `docs/tanstack-alignment.md` — 对齐与分歧的完整论证
-- `AGENTS.md` — store adapter 规则、`RunState` ≠ `ctx.state`、state 写入位置准则
+- `AGENTS.md` — store adapter 规则、`RunState` ≠ `ctx.state`、state 写入位置准则速查
 - `examples/store_file` / `packages/workflow_store_sqlx_postgres` — 两个 store 参考

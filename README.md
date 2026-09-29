@@ -292,6 +292,7 @@ packages/workflow_runtime/  执行所有权层（lease / sweep / timer / schedul
   src/store_contract.rs     store 契约套件（N 个实现共用，对齐上游 contracts/）
 examples/shared/            host 无关示例层（10 个 workflow + FileRunStore + drive 薄壳）
 examples/guide/             TanStack guide 的可运行移植（唯一跑通 core+runtime 端到端的地方）
+docs/concepts/ctx-state.md   ctx.state 写入规则（串行 + 并行，判据与上游实测）
 docs/tanstack-alignment.md  对齐决策记录（含推翻第一轮的论证）
 docs/runtime-design.md      runtime 层决策记录（D1-D9）
 ```

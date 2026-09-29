@@ -245,7 +245,7 @@ library template 的脚手架产物——React/Solid 样板应用，与 workflow
 | 时钟 | 裸用 `Date.now()` | `const now = await ctx.now()` |
 | middleware | 无 | `.middleware([requireUser, traced])` |
 
-**examples 里那个 `Date.now()` 是确定性违规**（本仓 `primitives.md:111` 把它列为
+**examples 里那个 `Date.now()` 是确定性违规**（上游 `docs/concepts/primitives.md:111` 把它列为
 footgun），而同一个仓库的 `inference.test.ts` 头部注释正以「AI can write this
 with zero annotations」为卖点——examples 恰好是它反对的写法。
 
