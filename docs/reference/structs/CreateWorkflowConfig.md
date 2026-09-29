@@ -259,9 +259,9 @@ where
 Defined in: [`packages/workflow-core/src/define/define_workflow.rs:91`](../../../packages/workflow-core/src/define/define_workflow.rs#L91)
 
 Declare the input schema as a serde type: re-types the config to
-`CreateWorkflowConfig<In, _, _>` so `create_workflow` builds a
-[`WorkflowBuilder<In, _, _>`](WorkflowBuilder.md). The handler's
-`ctx.input` is `In`. Missing/mistyped input fields error the run
+`CreateWorkflowConfig<NewIn, TOutput, TState>` so `create_workflow` builds a
+[`WorkflowBuilder<NewIn, TOutput, TState>`](WorkflowBuilder.md). The handler's
+`ctx.input` is `NewIn`. Missing/mistyped input fields error the run
 (zod `inputSchema` `.safeParse` counterpart).
 
 #### Returns

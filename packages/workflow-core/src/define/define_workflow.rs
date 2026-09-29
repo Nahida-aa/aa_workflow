@@ -2,7 +2,7 @@
 //!
 //! 对齐 TanStack `define/define-workflow.ts`：`CreateWorkflowConfig`
 //! （`createWorkflow(options)`）、`WorkflowBuilder`、`createWorkflow`，外加
-//! Rust 特有的 [`WorkflowDefinition`]（把 In/Out/St/Ext 静态带在类型上）。
+//! Rust 特有的 [`WorkflowDefinition`]（把 TInput/TOutput/TState/TCtxExt 静态带在类型上）。
 //!
 //! 与 [`define`](super) 的分界：`super` 装的是 handler **运行时**能拿到的东西
 //! （`BaseCtx` / `StepCtx` / `StepOptions` / `RetryPolicy`）与 workflow 本体
@@ -84,9 +84,9 @@ impl<TInput, TOutput, TState> CreateWorkflowConfig<TInput, TOutput, TState> {
     }
 
     /// Declare the input schema as a serde type: re-types the config to
-    /// `CreateWorkflowConfig<In, _, _>` so `create_workflow` builds a
-    /// [`WorkflowBuilder<In, _, _>`](WorkflowBuilder). The handler's
-    /// `ctx.input` is `In`. Missing/mistyped input fields error the run
+    /// `CreateWorkflowConfig<NewIn, TOutput, TState>` so `create_workflow` builds a
+    /// [`WorkflowBuilder<NewIn, TOutput, TState>`](WorkflowBuilder). The handler's
+    /// `ctx.input` is `NewIn`. Missing/mistyped input fields error the run
     /// (zod `inputSchema` `.safeParse` counterpart).
     pub fn input<NewIn>(self) -> CreateWorkflowConfig<NewIn, TOutput, TState>
     where
@@ -181,10 +181,10 @@ impl<TInput, TOutput, TState> CreateWorkflowConfig<TInput, TOutput, TState> {
 /// fields added by registered middleware (`ctx.ext`). Helpers should accept
 /// a typed `BaseCtx<...>` argument to compose cleanly.
 ///
-/// `In`/`Out`/`St` are fixed by the config: [`input`](CreateWorkflowConfig::input)
-/// / [`output`](CreateWorkflowConfig::output) / [`state`](CreateWorkflowConfig::state)
-/// pin the generics; the handler's output type is inferred from the closure
-/// return value.
+/// `TInput`/`TOutput`/`TState` are pinned by the config's
+/// [`input`](CreateWorkflowConfig::input) / [`output`](CreateWorkflowConfig::output)
+/// / [`state`](CreateWorkflowConfig::state) methods; the handler's output type
+/// is inferred from the closure return value.
 pub fn create_workflow<TInput, TOutput, TState>(
     config: CreateWorkflowConfig<TInput, TOutput, TState>,
 ) -> WorkflowBuilder<TInput, TOutput, TState, ()> {

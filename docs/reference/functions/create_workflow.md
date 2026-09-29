@@ -32,10 +32,10 @@ typed input, state, durable primitives ([`step`](../structs/BaseCtx.md),
 fields added by registered middleware (`ctx.ext`). Helpers should accept
 a typed `BaseCtx<...>` argument to compose cleanly.
 
-`In`/`Out`/`St` are fixed by the config: [`input`](../structs/CreateWorkflowConfig.md)
-/ [`output`](../structs/CreateWorkflowConfig.md) / [`state`](../structs/CreateWorkflowConfig.md)
-pin the generics; the handler's output type is inferred from the closure
-return value.
+`TInput`/`TOutput`/`TState` are pinned by the config's
+[`input`](../structs/CreateWorkflowConfig.md) / [`output`](../structs/CreateWorkflowConfig.md)
+/ [`state`](../structs/CreateWorkflowConfig.md) methods; the handler's output type
+is inferred from the closure return value.
 
 ## Type Parameters
 
