@@ -57,9 +57,15 @@
 //! - [`mod@dub_sf_ocr`] — 一个可复用的示例 workflow：LocalDub `dub_sf_ocr` 的
 //!   **两分支并行**形状。放在 `src/` 而非测试里，是为了别人也能
 //!   `use example_store_file::dub_sf_ocr` 拿去驱动自己的 store。
+//! - [`mod@step_write`] — `ctx.state` 写入位置的验证载体。三个显式 step 逐个摊开，
+//!   每个 step 对三种机制（handler 体内写 / `Arc` 共享 / `StateHandle::clone` 写）
+//!   各做一次读写，把差异摆在一起。钉住「step 闭包该保持纯：唯一耐久输出通道是
+//!   返回值」。完整论证见 `docs/concepts/ctx-state.md`。
 
 pub mod dub_sf_ocr;
 pub mod file_store;
+pub mod step_write;
 
 pub use dub_sf_ocr::{DubSfOcrInput, DubSfOcrState, dub_sf_ocr};
 pub use file_store::FileExecutionStore;
+pub use step_write::{StepWriteInput, StepWriteState, step_write};
