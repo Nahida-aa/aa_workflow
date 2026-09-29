@@ -273,8 +273,11 @@ store 是可插拔的，workflow 代码不动。本仓三个实现跑**同一份
 
 ## 与上游 quick-start 的差异速览
 
-- `step` 闭包返回 `serde_json::Value`（上游是泛型 `T`）；typed 读取走 `ctx.state`
-  或事后反序列化。
+- `step<T>` 已泛型化，与上游一致：`T` 由闭包返回类型直接推出，handler 侧拿到的是
+  具名类型而非 `Value`。**但要求 `T: Serialize + DeserializeOwned`** 且能挺过一次
+  JSON 往返——只有 replay 时才从日志反序列化，所以「首次能过、resume 炸」是可能的。
+  另：workflow **出口**（`RunOutcome.output` / handler 返回值）仍是 `Value`，
+  因为 store 是 `dyn`。
 - `run_workflow` **不是** async generator——返回 `RunOutcome`，事件回调走
   `.publisher(Some(..))`（对应上游 `publish`）。
 - 多了 `continue_from` / `target_step`；少了 `recover` / `attach` / `signal` /

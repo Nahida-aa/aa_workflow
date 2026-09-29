@@ -115,20 +115,34 @@ pub mod dub_probe {
     }
 }
 
-/// 每个桩 step 的产物形状。**具名**是为了让「各 step 返回什么」在代码里可查，
-/// 而不是散在一堆内联 `json!` 里。
+/// 每个桩 step 的产物形状。
 ///
-/// ⚠️ 但要清楚：core 的 `step` 签名把返回类型固定成 `serde_json::Value`
-/// （`define/mod.rs:182`），而上游 TS 是 `step<T>` 保留泛型参数。所以这个结构体在
-/// `step()` 边界上仍会被 `to_value` 抹平，handler 侧拿到的还是 `Value`
-/// （`branch_a["vocals"]` 那种无类型下标）。这是 core 相对上游的一处退化，
-/// 示例层修不了 —— 要修得给 `step` 加泛型返回值。
-#[derive(serde::Serialize)]
+/// `step<T>` 泛型化之前，core 把返回值固定成 `serde_json::Value`，这个结构体
+/// 会在 `step()` 边界上被抹平，handler 侧只能写 `branch_a["vocals"]` 那种无类型
+/// 下标——编译通过，但产物形状错了编译期也不知道。现在 `step` 带上了 `T`，下面
+/// 这行 `let vocals: DubArtifact = ctx.step(..)` 由闭包的返回类型直接推出来。
+///
+/// 注意耐久表示**仍然是** `Value`：日志里存的是 `to_value` 的结果，只有 replay
+/// 时才反序列化回 `T`（`engine/mod.rs` 的 `exec_step`）。所以 `T` 必须能挺过一次
+/// JSON 往返——见 `BaseCtx::step` 的 `# Bound on T`。
+// `Deserialize` 不是可选的：replay 路径要靠它把日志里的 `Value` 还原成 `T`。
+// 即使闭包只「造」这个类型、从不吃它，也得 derive——这是 `step<T>` 的固有成本。
+#[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DubArtifact {
     artifact: String,
     target_lang: String,
     output_mode: String,
+}
+
+/// 分支 A 的聚合。`tokio::try_join!` 要求两支同类型，所以这里让 A 产出自己的
+/// 具名结构体，而不是 `json!` 现场拼一个 `Value`。handler 侧因此是
+/// `branch_a.vocals` 而不是 `branch_a["vocals"]`。
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DubBranchA {
+    vocals: DubArtifact,
+    bgm: DubArtifact,
 }
 
 /// 桩 step：**从 typed state 读**字段，拼出它「产出」的产物路径 →
@@ -143,11 +157,7 @@ struct DubArtifact {
 /// 的 state」的落点：换个 `videoDir` / `targetLang`，10 个 step 的产物路径全变。
 ///
 /// 不落盘、不读 LocalDub（示例层强约束）。
-async fn dub_step(
-    st: &DubSfOcrState,
-    artifact: &str,
-    millis: u64,
-) -> anyhow::Result<serde_json::Value> {
+async fn dub_step(st: &DubSfOcrState, artifact: &str, millis: u64) -> anyhow::Result<DubArtifact> {
     dub_probe::enter();
     let path = format!("{}/{}", st.video_dir, artifact);
     tracing::info!(
@@ -159,11 +169,11 @@ async fn dub_step(
     );
     tokio::time::sleep(std::time::Duration::from_millis(millis)).await;
     dub_probe::leave();
-    Ok(serde_json::to_value(DubArtifact {
+    Ok(DubArtifact {
         artifact: path,
         target_lang: st.target_lang.clone(),
         output_mode: st.output_mode.clone(),
-    })?)
+    })
 }
 
 /// 每个桩 step 的模拟耗时。两分支并行跑完的总时长 ≈ `max(A, B) + 尾部`，
@@ -228,7 +238,7 @@ pub fn dub_sf_ocr() -> WorkflowDefinition<DubSfOcrInput, serde_json::Value, DubS
                         dub_step(&st, "separate_after/target_bgm.wav", DUB_STEP_MS).await
                     })
                     .await?;
-                Ok::<_, anyhow::Error>(serde_json::json!({ "vocals": vocals, "bgm": bgm }))
+                Ok::<_, anyhow::Error>(DubBranchA { vocals, bgm })
             },
             async {
                 // 分支 B：OCR 提字 + 翻译
@@ -289,8 +299,8 @@ pub fn dub_sf_ocr() -> WorkflowDefinition<DubSfOcrInput, serde_json::Value, DubS
         Ok(serde_json::json!({
             "videoDir": video_dir,
             "pipeline": "dub_sf_ocr",
-            "vocals": branch_a["vocals"],
-            "bgm": branch_a["bgm"],
+            "vocals": branch_a.vocals,
+            "bgm": branch_a.bgm,
             "translated": branch_b,
             "splitAudio": split,
             "tts": tts,

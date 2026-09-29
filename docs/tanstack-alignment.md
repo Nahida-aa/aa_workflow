@@ -67,6 +67,15 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
 副作用只能通过 `ctx.step` 表达；并行就是 handler 里 `tokio::try_join!`（TanStack
 的 `Promise.all`）。`StepSpec` / `StepContext` 因此删除，只剩 `ctx.step(...).await`。
 
+`step<T>` 的返回类型已与上游对齐（`define/mod.rs` 的 `step` / `step_with`）：`T` 由
+闭包返回类型直接推出，handler 侧是具名类型而非 `Value`。两处残留不对称，都是
+**日志为 `Value` 这个选择**的直接后果，不是签名设计问题：
+
+1. `T: Serialize + DeserializeOwned` 且必须能挺过一次 JSON 往返——只有 replay 才从
+   日志反序列化，所以「首次 drive 通过、resume 反序列化失败」是可能的（引擎此时
+   响亮报错，不静默给 `null`）。
+2. workflow **出口**仍是 `Value`（`RunOutcome.output`），因为 store 是 `dyn`。
+
 事件分两层：
 
 - **observability-only（不进日志，走 publisher）**：`RunStarted`、`StepStarted`、`StepProgress`；
