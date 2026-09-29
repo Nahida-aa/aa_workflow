@@ -68,7 +68,7 @@ pub struct WorkflowRegistration {
     /// 构建本 workflow 的 loader——每次 load 重新调用（不做 memoize）。
     pub load: WorkflowLoader,
     /// 覆盖 workflow 自身的 version（对齐上游 `version?`）。
-    pub version_override: Option<String>,
+    pub version: Option<String>,
     /// 历史版本的 loader（对齐上游 `previousVersions?: Record<版本, loader>`）。
     /// key 目前只是声明——`loadWorkflow` 只合并 values 进
     /// `workflow.previous_versions`，供引擎按持久化版本路由。
@@ -363,9 +363,9 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         for load_previous in registration.previous_versions.values() {
             prevs.push((load_previous)());
         }
-        if registration.version_override.is_some() || !prevs.is_empty() {
+        if registration.version.is_some() || !prevs.is_empty() {
             workflow.version = registration
-                .version_override
+                .version
                 .clone()
                 .or_else(|| workflow.version.clone());
             workflow.previous_versions = prevs;
@@ -1084,7 +1084,7 @@ mod driver_tests {
             WorkflowRegistration {
                 load: Arc::new(move || workflow.clone()),
                 previous_versions: HashMap::new(),
-                version_override: None,
+                version: None,
                 schedules: vec![],
             },
         );

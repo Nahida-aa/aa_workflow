@@ -50,7 +50,7 @@ fn get_workflow_runtime(base: &std::path::Path) -> WorkflowRuntimeDefinition {
         WorkflowRegistration {
             load: Arc::new(|| dub_sf_ocr().into_workflow()),
             previous_versions: HashMap::new(),
-            version_override: None,
+            version: None,
             schedules: vec![],
         },
     );

@@ -104,7 +104,7 @@ pub fn materialize_workflow_schedules(
                 store.upsert_schedule(UpsertScheduleArgs {
                     schedule_id: schedule_id.clone(),
                     workflow_id: workflow_id.clone(),
-                    workflow_version: registration.version_override.clone(),
+                    workflow_version: registration.version.clone(),
                     schedule: definition.schedule.clone(),
                     overlap_policy: definition
                         .overlap_policy
@@ -134,7 +134,7 @@ pub fn materialize_workflow_schedules(
             store.upsert_schedule(UpsertScheduleArgs {
                 schedule_id: schedule_id.clone(),
                 workflow_id: workflow_id.clone(),
-                workflow_version: registration.version_override.clone(),
+                workflow_version: registration.version.clone(),
                 schedule: definition.schedule.clone(),
                 overlap_policy: definition
                     .overlap_policy
@@ -624,7 +624,7 @@ mod tests {
             WorkflowRegistration {
                 load: std::sync::Arc::new(|| Workflow::new("digest")),
                 previous_versions: HashMap::new(),
-                version_override: Some("v1".into()),
+                version: Some("v1".into()),
                 schedules,
             },
         );
