@@ -258,15 +258,30 @@ impl EngineRuntime {
 
 /// Runs one durable step: replay short-circuit, fresh execution with
 /// retry/timeout/gate, checkpoint append. Returns the step's result.
-pub(crate) async fn exec_step<F, Fut>(
+/// Runs one durable step and resolves to the closure's own `T`.
+///
+/// Two paths, deliberately asymmetric:
+///
+/// - **Fresh** — runs the closure and hands back its `T` *untouched*. A `Value`
+///   is derived from it only to write `STEP_FINISHED`. So the first drive returns
+///   exactly what the closure produced; a lossy JSON round-trip can't corrupt it.
+/// - **Replayed** — the log is the only source of truth, so the recorded
+///   `Value` is deserialized back into `T`. This is the one place a mismatch
+///   between the recorded shape and `T` can surface as an error, and it does so
+///   loudly rather than handing back a silent `null`.
+///
+/// The log stays `serde_json::Value` regardless of `T` — durability is defined
+/// by the event schema, not by the handler's types.
+pub(crate) async fn exec_step<T, F, Fut>(
     inner: &Arc<EngineRuntime>,
     step_id: &str,
     opts: &StepOptions,
     run: F,
-) -> anyhow::Result<serde_json::Value>
+) -> anyhow::Result<T>
 where
+    T: serde::Serialize + serde::de::DeserializeOwned + Send + 'static,
     F: FnOnce(StepCtx) -> Fut + Clone + Send + 'static,
-    Fut: Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static,
+    Fut: Future<Output = anyhow::Result<T>> + Send + 'static,
 {
     // target_step reached → halt the whole handler.
     if inner.halted() {
@@ -296,7 +311,18 @@ where
                     None => true,
                 };
                 if fresh {
-                    return Ok(st.result.clone().unwrap_or(serde_json::Value::Null));
+                    let raw = st.result.clone().unwrap_or(serde_json::Value::Null);
+                    return serde_json::from_value(raw).map_err(|e| {
+                        anyhow::anyhow!(
+                            "step `{step_id}`: recorded result does not deserialize back into \
+                             `{}` (the log says {}): {e}",
+                            std::any::type_name::<T>(),
+                            st.result
+                                .as_ref()
+                                .map(|v| v.to_string())
+                                .unwrap_or_else(|| "null".into()),
+                        )
+                    });
                 }
                 // stale → fall through and re-execute below.
             }
@@ -349,10 +375,10 @@ where
             attempt,
         };
         let started_at = now_ms();
-        let run_fut = run.clone()(step_ctx);
         // 保留 `anyhow::Error` 而非提前字符串化，这样 attempt 能记下结构化的
         // `RunError`（attempts 会落进 STEP_FAILED，供重试与审计回看）。
-        let outcome: anyhow::Result<serde_json::Value> = match opts.timeout {
+        let run_fut = run.clone()(step_ctx);
+        let run_outcome: anyhow::Result<T> = match opts.timeout {
             Some(t) => match tokio::time::timeout(t, run_fut).await {
                 Ok(res) => res,
                 Err(_) => Err(anyhow::anyhow!(
@@ -363,20 +389,36 @@ where
         };
         let finished_at = now_ms();
 
+        // 记录进日志需要 `Value`，闭包给的是 `T`。转换失败**按 step 失败处理**，
+        // 复用既有的 STEP_FAILED + 重试路径——不能 `?` 提前返回，那会让 step
+        // 永远停在 Running 且不追加任何事件。原始 `T` 一路带到 return，
+        // 不做往返，避免首次 drive 就与闭包返回值不一致。
+        let outcome: anyhow::Result<(T, serde_json::Value)> = match run_outcome {
+            Ok(t) => serde_json::to_value(&t)
+                .map(|recorded| (t, recorded))
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "step \"{step_id}\": result of type `{}` does not serialize: {e}",
+                        std::any::type_name::<T>(),
+                    )
+                }),
+            Err(e) => Err(e),
+        };
+
         match outcome {
-            Ok(result) => {
+            Ok((result, recorded)) => {
                 attempts.push(StepAttempt {
                     attempt,
                     started_at,
                     finished_at,
-                    result: Some(result.clone()),
+                    result: Some(recorded.clone()),
                     error: None,
                 });
                 let ev = WorkflowEvent::StepFinished {
                     ts: now_ms(),
                     run_id: inner.run_id.clone(),
                     step_id: step_id.to_string(),
-                    result: Some(result.clone()),
+                    result: Some(recorded.clone()),
                     attempts,
                 };
                 inner.append(&ev)?;
@@ -384,7 +426,7 @@ where
                     step_id,
                     StepState {
                         status: StepStatus::Success,
-                        result: Some(result.clone()),
+                        result: Some(recorded),
                         error: None,
                         started_at: Some(started_at),
                         finished_at: Some(finished_at),
@@ -767,8 +809,177 @@ mod tests {
     };
     use crate::engine::testkit::{TestLog, idx};
     use crate::run_store::InMemoryStore;
+    use serde::{Deserialize, Serialize};
     use std::sync::atomic::AtomicBool;
     use tokio::try_join;
+
+    /// 一个具名 step 产物。`step<T>` 泛型化后 handler 侧拿到的是这个类型，
+    /// 而不是 `serde_json::Value`。
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+    #[serde(rename_all = "camelCase")]
+    struct Probe {
+        ok: bool,
+        count: i64,
+    }
+
+    /// 故意**不对称**的类型：写出时把零值字段省掉，读回时却要求它存在。
+    /// 用它钉住「JSON 往返不对称」的边界——首次 drive 拿到的是闭包原始值
+    /// （不过往返，所以不炸），resume 才从日志反序列化，这时才炸。
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct SkippedOnZero {
+        #[serde(skip_serializing_if = "is_zero")]
+        n: i64,
+    }
+
+    fn is_zero(n: &i64) -> bool {
+        *n == 0
+    }
+
+    #[tokio::test]
+    async fn step_resolves_to_the_closure_type() {
+        let store = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("w").handler(|ctx: WorkflowCtx| async move {
+            // 无 turbofish、无 `from_value`：T 由闭包的返回类型推出来。
+            let probe = ctx
+                .step("probe", move |_sc: StepCtx| async move {
+                    Ok(Probe { ok: true, count: 7 })
+                })
+                .await?;
+            // 字段访问，不是 `["count"]` 下标。
+            let doubled = probe.count * 2;
+            Ok(serde_json::json!({ "doubled": doubled, "ok": probe.ok }))
+        });
+        let out = run_workflow(
+            &RunWorkflowOptions::new(Arc::new(wf), store).input(serde_json::json!({})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        // handler 的返回值仍是 Value（workflow 出口没泛型化），但那是出口不是 step。
+        assert_eq!(out.output.unwrap()["doubled"], 14);
+    }
+
+    #[tokio::test]
+    async fn typed_step_replays_back_into_the_same_type() {
+        let store = Arc::new(InMemoryStore::new());
+        let log = Arc::new(Mutex::new(TestLog::default()));
+        let wf = Workflow::new("w").handler({
+            let log = log.clone();
+            move |ctx: WorkflowCtx| {
+                let log = log.clone();
+                async move {
+                    let a = ctx
+                        .step("a", move |_sc: StepCtx| {
+                            let log = log.clone();
+                            async move {
+                                log.lock().unwrap().note_start("a");
+                                log.lock().unwrap().note_finish("a");
+                                Ok(Probe {
+                                    ok: true,
+                                    count: 41,
+                                })
+                            }
+                        })
+                        .await?;
+                    // +1 而不是 +true：证明 resume 拿回的是 `Probe` 不是 `Value`。
+                    Ok(serde_json::json!({ "next": a.count + 1 }))
+                }
+            }
+        });
+        let first = run_workflow(
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.output.unwrap()["next"], 42);
+        let second = run_workflow(
+            &RunWorkflowOptions::new(Arc::new(wf), store)
+                .input(serde_json::json!({}))
+                .run_id(first.run_id),
+        )
+        .await
+        .unwrap();
+        // 闭包没被重跑，但类型照样回来了。
+        assert_eq!(log.lock().unwrap().runs["a"], 1);
+        assert_eq!(second.output.unwrap()["next"], 42);
+    }
+
+    #[tokio::test]
+    async fn replay_shape_mismatch_fails_instead_of_yielding_null() {
+        let store = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("w").handler(|ctx: WorkflowCtx| async move {
+            let v = ctx
+                .step("skipped", move |_sc: StepCtx| async move {
+                    Ok(SkippedOnZero { n: 0 })
+                })
+                .await?;
+            // 首次：拿到的是闭包原始值 `n: 0`（没过往返）。
+            assert_eq!(v.n, 0);
+            Ok(serde_json::Value::Null)
+        });
+        let first = run_workflow(
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.status, RunStatus::Finished);
+        // 日志里只有 `{}`——`n` 被 skip 掉了。
+        let second = run_workflow(
+            &RunWorkflowOptions::new(Arc::new(wf), store)
+                .input(serde_json::json!({}))
+                .run_id(first.run_id),
+        )
+        .await;
+        // resume 反序列化 `{}` 失败：响亮报错，而不是静默给一个 null。
+        // 注意 run 级失败是 `Ok(RunOutcome { status: Errored, error: Some(..) })`，
+        // 不是 `Err`——Err 留给 store/引擎层故障。
+        let second = second.expect("run 级失败不是 Err");
+        assert_eq!(second.status, RunStatus::Errored);
+        let err = second.error.expect("应带 run 级错误").to_string();
+        assert!(err.contains("does not deserialize back into"), "got: {err}");
+        assert!(err.contains("missing field `n`"), "got: {err}");
+    }
+
+    /// `Serialize` 实现直接报错。用来卡住「结果写不进日志」这条路径。
+    /// （不能用 `f64::NAN` 试探：serde_json 把非有限浮点写成 `null`，不报错。）
+    #[derive(Deserialize, Debug)]
+    struct Unserializable;
+
+    impl Serialize for Unserializable {
+        fn serialize<S: serde::Serializer>(&self, _s: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("this type refuses to serialize"))
+        }
+    }
+
+    #[tokio::test]
+    async fn unserializable_result_fails_the_step_not_a_stuck_run() {
+        let store = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("w").handler(|ctx: WorkflowCtx| async move {
+            ctx.step("unserializable", move |_sc: StepCtx| async move {
+                // 闭包本身是成功的——失败点在**记录**这一步。
+                Ok(Unserializable)
+            })
+            .await?;
+            Ok(serde_json::Value::Null)
+        });
+        let out = run_workflow(
+            &RunWorkflowOptions::new(Arc::new(wf), store.clone()).input(serde_json::json!({})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Errored);
+        // 关键：step 走了既有的失败路径，所以 STEP_FAILED 落了日志。
+        // 若当初用 `?` 提前返回，step 会永远停在 Running 且零事件。
+        let events = store.get_events(&out.run_id).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, WorkflowEvent::StepFailed { .. })),
+            "no StepFailed appended"
+        );
+    }
 
     #[tokio::test]
     async fn serial_handler_runs_in_order() {
@@ -2489,7 +2700,7 @@ mod tests {
             let attempts = attempts2.clone();
             // `retry` 放 StepOptions：1 次 attempt，workflow 兜底 3 次不生效。
             async move {
-                ctx.step_with(
+                ctx.step_with::<serde_json::Value, _, _>(
                     "no-retry",
                     StepOptions::new().retry(RetryPolicy::new(1, Backoff::Fixed { base_ms: 1 })),
                     move |_sc: StepCtx| {

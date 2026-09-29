@@ -173,16 +173,35 @@ impl<TInput, TState, TCtxExt> BaseCtx<TInput, TState, TCtxExt> {
         Ok(())
     }
 
-    /// Runs `run` durably under `step_id`. On replay (resume) a previously
-    /// succeeded step short-circuits to its cached result *without* calling
-    /// `run` again; a previously failed step rethrows the stored error.
+    /// Runs `run` durably under `step_id` and resolves to `T` — the closure's own
+    /// return type, the way upstream's `step<T>` behaves.
+    ///
+    /// On replay (resume) a previously succeeded step short-circuits to its
+    /// cached result *without* calling `run` again; a previously failed step
+    /// rethrows the stored error. The cached result is deserialized back into `T`,
+    /// so a recorded shape that no longer matches `T` fails loudly here instead
+    /// of silently yielding `null`.
+    ///
+    /// On a fresh run the closure's `T` is returned untouched — the `Value` that
+    /// goes into `STEP_FINISHED` is derived from it, never round-tripped back.
+    /// Only the log is `serde_json::Value`; the handler keeps its types.
     ///
     /// The step closure is async so that concurrent steps compose via
     /// `tokio::try_join!` — parallel durable execution, no custom primitive.
-    pub async fn step<F, Fut>(&self, step_id: &str, run: F) -> anyhow::Result<serde_json::Value>
+    ///
+    /// # Bound on `T`
+    ///
+    /// `T` must survive a JSON round-trip only for the *replay* path (the log is
+    /// the sole source of truth there). A type that serializes to something it
+    /// can't deserialize from — a `f64` field that may be `NaN`, a `HashMap`
+    /// keyed by a type with a custom `Deserialize` — will therefore work on the
+    /// first drive and fail on resume. That asymmetry is inherent to storing the
+    /// result as JSON, not something this signature can paper over.
+    pub async fn step<T, F, Fut>(&self, step_id: &str, run: F) -> anyhow::Result<T>
     where
+        T: serde::Serialize + serde::de::DeserializeOwned + Send + 'static,
         F: FnOnce(StepCtx) -> Fut + Clone + Send + 'static,
-        Fut: Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static,
+        Fut: Future<Output = anyhow::Result<T>> + Send + 'static,
         TState: serde::Serialize,
     {
         self.step_with(step_id, StepOptions::default(), run).await
@@ -347,16 +366,18 @@ impl<TInput, TState, TCtxExt> BaseCtx<TInput, TState, TCtxExt> {
     }
 
     /// [`step`](Self::step) with per-step options (retry policy, timeout,
-    /// resource gate, `up_to_date` make-check).
-    pub async fn step_with<F, Fut>(
+    /// resource gate, `up_to_date` make-check). Same typing: resolves to the
+    /// closure's own `T`.
+    pub async fn step_with<T, F, Fut>(
         &self,
         step_id: &str,
         opts: StepOptions,
         run: F,
-    ) -> anyhow::Result<serde_json::Value>
+    ) -> anyhow::Result<T>
     where
+        T: serde::Serialize + serde::de::DeserializeOwned + Send + 'static,
         F: FnOnce(StepCtx) -> Fut + Clone + Send + 'static,
-        Fut: Future<Output = anyhow::Result<serde_json::Value>> + Send + 'static,
+        Fut: Future<Output = anyhow::Result<T>> + Send + 'static,
         TState: serde::Serialize,
     {
         self.flush_state()?;
