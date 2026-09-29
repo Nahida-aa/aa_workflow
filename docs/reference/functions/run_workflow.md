@@ -5,6 +5,10 @@ title: run_workflow
 
 # Function: run_workflow()
 
+```rust
+pub async fn run_workflow(opts: &RunWorkflowOptions) -> Result<RunOutcome, WorkflowError>
+```
+
 Defined in: [`packages/workflow-core/src/engine/run_workflow.rs:176`](../../../packages/workflow-core/src/engine/run_workflow.rs#L176)
 
 Runs (or resumes) a workflow by driving its async handler.
@@ -20,10 +24,6 @@ Inputs:
 On resume, `ctx.step` short-circuits succeeded checkpoints (cached result,
 `run` not re-executed) and rethrows failed ones. Multiplex step results
 however you like — the log is the only source of truth.
-
-```rust
-pub async fn run_workflow(opts: &RunWorkflowOptions) -> Result<RunOutcome, WorkflowError>
-```
 
 ## Parameters
 

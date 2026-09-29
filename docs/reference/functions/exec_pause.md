@@ -5,6 +5,10 @@ title: exec_pause
 
 # Function: exec_pause()
 
+```rust
+pub async fn exec_pause(inner: &Arc<EngineRuntime>, step_id: &str, signal_name: &str, reason: &str, deadline: Option<i64>) -> Result<Value>
+```
+
 Defined in: [`packages/workflow-core/src/engine/mod.rs:529`](../../../packages/workflow-core/src/engine/mod.rs#L529)
 
 Durable wait implemented by [`WorkflowCtx::approve`](../structs/BaseCtx.md)
@@ -27,10 +31,6 @@ external driver is what delivers the wake-up (a `StepResume` via
 [`signal_run`](signal_run.md) / [`signal_event`](signal_event.md), or a timer sweep noticing `deadline`).
 Mirrors TanStack, where the awaited primitive throws `WorkflowPaused` and
 the drive returns (`run-workflow.ts:970` / `:529`).
-
-```rust
-pub async fn exec_pause(inner: &Arc<EngineRuntime>, step_id: &str, signal_name: &str, reason: &str, deadline: Option<i64>) -> Result<Value>
-```
 
 ## Parameters
 

@@ -5,6 +5,10 @@ title: signal_event
 
 # Function: signal_event()
 
+```rust
+pub fn signal_event(store: &dyn RunStore, run_id: &str, event_name: &str, payload: Value) -> Result<(), WorkflowError>
+```
+
 Defined in: [`packages/workflow-core/src/engine/mod.rs:704`](../../../packages/workflow-core/src/engine/mod.rs#L704)
 
 Appends a `StepResume` for the run currently parked waiting for the event
@@ -13,10 +17,6 @@ Appends a `StepResume` for the run currently parked waiting for the event
 Locates the paused step via its `signal_name` (the channel, not the pause
 key), so a host needs only the event name. Fails with
 [`WorkflowError::SignalLost`](../enums/WorkflowError.md) when nothing is parked on that name.
-
-```rust
-pub fn signal_event(store: &dyn RunStore, run_id: &str, event_name: &str, payload: Value) -> Result<(), WorkflowError>
-```
 
 ## Parameters
 

@@ -480,13 +480,16 @@ def render_item_page(docs: Docs, kind: str, it: dict, here: str) -> str:
 
     else:  # function / type_alias / constant / static
         if kind == "function":
+            # 上游顺序：标题 → 签名 → Defined in → docs → 各分节
             gen, where = render_generics(inner.get("generics") or EMPTY_G)
             sig = render_fn_sig(it["name"] or "_", inner["sig"], inner.get("header"))
             if gen:
                 sig = sig.replace(f"fn {it['name']}(", f"fn {it['name']}{gen}(", 1)
             if where:
                 sig += where.rstrip("\n")
-            body += "```rust\npub " + sig + "\n```\n\n"
+            body = "```rust\npub " + sig + "\n```\n\n"
+            body += defined_in(it, here) + "\n"
+            body += expand_docs(it, here)
             body += type_params_section(inner.get("generics") or EMPTY_G, here)
             params = non_self_inputs(inner["sig"])
             if params:
