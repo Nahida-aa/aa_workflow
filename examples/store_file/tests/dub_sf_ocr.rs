@@ -35,26 +35,40 @@ use example_store_file::FileExecutionStore;
 static DUB_PROBE_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
-/// **使用者侧自定义**的 runtime 访问器（本示例的约定形态）：按任务目录组装
-/// store + workflow 注册表并定义 runtime。
+/// **使用者侧自定义**的 runtime 访问器：get-or-define。
 ///
-/// 「读或定义」的语义：`WorkflowRuntimeDefinition` 不持有执行进度状态——
-/// 真源（事件日志 / lease / run 状态）在 store 里；同一 base 跨进程「读」
-/// 就是重建一个 definition 指向它（跨实例重开见 `reopen_and_e2e.rs`）。
-/// 简单例子不做配置源解释，每个测试用自己的临时 base 调一次。
-fn get_workflow_runtime(base: &std::path::Path) -> WorkflowRuntimeDefinition {
-    let store: Arc<dyn WorkflowExecutionStore> = Arc::new(FileExecutionStore::new(base));
-    let mut workflows = HashMap::new();
-    workflows.insert(
-        "dub_sf_ocr".to_string(),
-        WorkflowRegistration {
-            load: Arc::new(|| dub_sf_ocr().into_workflow()),
-            previous_versions: HashMap::new(),
-            version: None,
-            schedules: vec![],
-        },
-    );
-    define_workflow_runtime(WorkflowRuntimeConfig::new(store, workflows))
+/// 「读」：同 base 已定义过（同进程）→ 直接复用**同一个实例**——共享实例
+/// 就是共享同一把 store 锁（`FileExecutionStore` 刻意不 Clone，克隆会破坏
+/// 「单进程串行化」语义），这不是便利是要求；
+/// 「定义」：首次遇到该 base → 组装 store + workflow 注册表 →
+/// `define_workflow_runtime`。
+///
+/// 跨进程的「读」不在此函数内：definition 不持有执行进度状态，真源（事件
+/// 日志 / lease / run 状态）在 store 里——另一进程对同一 base 重建一个
+/// definition 指向它即可（跨实例重开见 `reopen_and_e2e.rs`）。
+fn get_workflow_runtime(base: &std::path::Path) -> Arc<WorkflowRuntimeDefinition> {
+    static RUNTIMES: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<std::path::PathBuf, Arc<WorkflowRuntimeDefinition>>>,
+    > = std::sync::OnceLock::new();
+    let cache = RUNTIMES.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().unwrap();
+    cache
+        .entry(base.to_path_buf())
+        .or_insert_with(|| {
+            let store: Arc<dyn WorkflowExecutionStore> = Arc::new(FileExecutionStore::new(base));
+            let mut workflows = HashMap::new();
+            workflows.insert(
+                "dub_sf_ocr".to_string(),
+                WorkflowRegistration {
+                    load: Arc::new(|| dub_sf_ocr().into_workflow()),
+                    previous_versions: HashMap::new(),
+                    version: None,
+                    schedules: vec![],
+                },
+            );
+            Arc::new(define_workflow_runtime(WorkflowRuntimeConfig::new(store, workflows)))
+        })
+        .clone()
 }
 
 fn temp_base(tag: &str) -> std::path::PathBuf {
@@ -208,6 +222,10 @@ async fn dub_sf_ocr_replay_short_circuits() {
     let rt = get_workflow_runtime(&base);
     drive(&rt, "dub-1", dub_input()).await;
     let ts_1 = sf_ts(&events_of(&rt, "dub-1"), "separate");
+
+    // get 的「读」半边：同 base 再取 → 同一实例（复用 store 锁，不重建）。
+    let rt_again = get_workflow_runtime(&base);
+    assert!(Arc::ptr_eq(&rt, &rt_again), "同 base 再 get 应复用同一实例");
 
     let again = drive(&rt, "dub-1", dub_input()).await;
     assert_eq!(again.kind, RunResultKind::NotClaimable, "终态 run 拒绝再驱动");
