@@ -501,6 +501,7 @@ mod adapter_tests {
         WorkflowEvent::RunStarted {
             ts: 0,
             run_id: run_id.into(),
+            thread_id: None,
         }
     }
 

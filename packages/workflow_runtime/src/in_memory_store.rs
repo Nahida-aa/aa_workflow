@@ -1155,10 +1155,12 @@ mod in_memory_tests {
                 WorkflowEvent::RunStarted {
                     ts: 0,
                     run_id: "r".into(),
+                    thread_id: None,
                 },
                 WorkflowEvent::RunStarted {
                     ts: 1,
                     run_id: "r".into(),
+                    thread_id: None,
                 },
             ],
         })
@@ -1190,6 +1192,7 @@ mod in_memory_tests {
             events: vec![WorkflowEvent::RunStarted {
                 ts: 2,
                 run_id: "r".into(),
+                thread_id: None,
             }],
         })
         .unwrap();
@@ -1207,6 +1210,7 @@ mod in_memory_tests {
             events: vec![WorkflowEvent::RunStarted {
                 ts: 3,
                 run_id: "r".into(),
+                thread_id: None,
             }],
         })
         .unwrap();

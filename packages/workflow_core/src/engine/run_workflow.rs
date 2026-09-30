@@ -114,6 +114,11 @@ pub struct RunWorkflowOptions {
     pub min_yield_remaining_ms: Option<u64>,
     /// `ctx.yield_()` 的重新唤醒时刻（上游 `yieldResumeAt`；默认每次调用「now+1ms」）。
     pub yield_resume_at: Option<i64>,
+    /// 客户端关联用的线程标识（上游 `threadId`，`run-workflow.ts:52`）。
+    ///
+    /// 只写进 `RUN_STARTED` 事件，**不落 store**、不参与 resume 判定。上游
+    /// 把它当纯客户端关联（"Thread ID for client-side correlation"）。
+    pub thread_id: Option<String>,
     /// 每个事件都会回调（上游 `publish`）——host 可以接到 Redis / Durable Streams
     /// 之类的扇出通道，让别的节点能 tail 这个 run。
     ///
@@ -197,8 +202,15 @@ impl RunWorkflowOptions {
             deadline: None,
             min_yield_remaining_ms: None,
             yield_resume_at: None,
+            thread_id: None,
             publish: None,
         }
+    }
+
+    /// 客户端关联标识（上游 `threadId`），只写进 `RUN_STARTED`。
+    pub fn thread_id(mut self, v: Option<String>) -> Self {
+        self.thread_id = v;
+        self
     }
 
     /// run 输入。
@@ -816,6 +828,7 @@ async fn drive(
     inner.publish(&WorkflowEvent::RunStarted {
         ts,
         run_id: run_id.clone(),
+        thread_id: opts.thread_id.clone(),
     });
     eprintln!("[trace] run_started published");
 
@@ -941,7 +954,11 @@ fn attach_decision(
 
     // ① 合成的 `RUN_STARTED` 当信封头（上游 `:393-398`）——日志里那条是上一次
     //    drive 写的，attach 要给订阅方一个"这次回放现在开始"的边界。
-    let mut out = vec![WorkflowEvent::RunStarted { ts: now_ms(), run_id: run_id.to_string() }];
+    let mut out = vec![WorkflowEvent::RunStarted {
+        ts: now_ms(),
+        run_id: run_id.to_string(),
+        thread_id: opts.thread_id.clone(),
+    }];
     // ② 整份日志重放（上游 `:401`）。
     match store.get_events(run_id) {
         Ok(evs) => out.extend(evs),
@@ -1046,6 +1063,97 @@ pub fn run_workflow_sync(mut opts: RunWorkflowOptions) -> Result<RunOutcome, Wor
 }
 #[cfg(test)]
 mod tests {
+    /// `threadId` 只挂在 `RUN_STARTED` 上（上游 `types.ts:76` / `run-workflow.ts:52`），
+    /// 且 start / resume / attach 三条路径都要带上（上游 `:242` / `:353` / `:391`）。
+    ///
+    /// attach 这条尤其容易漏：它发的是**全新**的 `RUN_STARTED`（带 attach 调用者
+    /// 自己的 threadId），然后才重放整份日志——所以订阅者会看到两个 `RUN_STARTED`。
+    #[tokio::test]
+    async fn thread_id_lands_on_run_started_in_all_three_paths() {
+        let store = Arc::new(InMemoryStore::new());
+        let wf = WorkflowDefinition::new("w").handler(|ctx: WorkflowCtx| async move {
+            ctx.step("s", |_sc: StepCtx| async move { Ok(serde_json::json!({"v": 1})) })
+                .await
+        });
+
+        // 1) start
+        let events = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("t1")
+                .thread_id(Some("thread-start".into())),
+        )
+        .collect()
+        .await;
+        let started: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                WorkflowEvent::RunStarted { thread_id, .. } => Some(thread_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(started, vec![Some("thread-start".into())]);
+
+        // 2) resume（同一个 run_id 再 drive 一次）
+        let events = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("t1")
+                .thread_id(Some("thread-resume".into())),
+        )
+        .collect()
+        .await;
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                WorkflowEvent::RunStarted { thread_id: Some(t), .. } if t == "thread-resume"
+            )),
+            "resume 路径的 RUN_STARTED 应带新 threadId"
+        );
+
+        // 3) attach：合成头带 attach 自己的 threadId，与日志里那条并存
+        let events = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("t1")
+                .attach()
+                .thread_id(Some("thread-attach".into())),
+        )
+        .collect()
+        .await;
+        let attached_head = match events.first() {
+            Some(WorkflowEvent::RunStarted { thread_id, .. }) => thread_id.clone(),
+            other => panic!("attach 首事件应是合成的 RUN_STARTED，实际：{other:?}"),
+        };
+        assert_eq!(attached_head, Some("thread-attach".into()));
+
+        // 4) 不给 threadId 时字段整个消失（serde skip），与上游 `threadId: undefined`
+        //    在 JSON 里被丢掉一致
+        let events = run_workflow(
+            RunWorkflowOptions::new(Arc::new(WorkflowDefinition::new("w2").handler(
+                |ctx: WorkflowCtx| async move {
+                    ctx.step("s", |_sc: StepCtx| async move { Ok(serde_json::json!({})) })
+                        .await
+                },
+            )), store)
+                .input(serde_json::json!({}))
+                .run_id("t2"),
+        )
+        .collect()
+        .await;
+        match events.first() {
+            Some(WorkflowEvent::RunStarted { thread_id, .. }) => {
+                assert_eq!(*thread_id, None, "未给 threadId 应为 None");
+            }
+            other => panic!("应为 RUN_STARTED，实际：{other:?}"),
+        }
+        let json = serde_json::to_string(&events[0]).unwrap();
+        assert!(
+            !json.contains("thread_id"),
+            "None 时不该序列化出 thread_id：{json}"
+        );
+    }
+
     /// attach 是**只读**的：不重跑 handler、不写日志、不改 RunState。
     ///
     /// 三件事分别钉住：事件包形状（合成 RUN_STARTED 头 + 整份日志重放）、

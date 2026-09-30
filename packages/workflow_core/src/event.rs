@@ -52,7 +52,15 @@ pub struct StepAttempt {
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum WorkflowEvent {
     /// Observability only (not persisted): marks the start of a run.
-    RunStarted { ts: i64, run_id: String },
+    RunStarted {
+        ts: i64,
+        run_id: String,
+        /// 客户端关联用的线程标识（上游 `threadId`，`types.ts:76`）。**只挂在
+        /// `RUN_STARTED` 上**，别的事件不带——它不参与 resume，也不落进
+        /// `RunState`，纯粹给订阅方把一次 drive 归到某个会话/请求上。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
     /// Checkpoint (persisted): final state of a completed run.
     RunFinished {
         ts: i64,

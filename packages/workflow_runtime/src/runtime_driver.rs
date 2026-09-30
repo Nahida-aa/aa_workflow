@@ -17,6 +17,9 @@
 //! # 与上游的另两处差异
 //!
 //! - **telemetry**：core 无 OTel 集成，省略（上游每个 store 调用包一个 span）。
+//! - **threadId**：已接（`startRun` / `deliverSignal` / `deliverApproval` 三个
+//!   args 各带一个，透传进 `RUN_STARTED`）。注意 `sweep` **不带**——上游
+//!   `WorkflowRuntimeSweepArgs`（`types.ts:459-474`）就没这个字段。
 //! - **lease 属主前缀**：解析收敛在 `drive_claimed_run`（上游 `:679-681`
 //!   `args.leaseOwner ?? createLeaseOwner(\`runtime:${runId}\`)`）。只有 sweep
 //!   自带 `sweep:{now}`（上游 `:416`，那是批次标识）。
@@ -182,6 +185,8 @@ pub struct WorkflowRuntimeStartRunArgs {
     pub min_yield_remaining_ms: Option<u64>,
     pub lease_owner: Option<LeaseOwner>,
     pub lease_ms: Option<i64>,
+    /// 客户端关联标识（上游 `threadId`）。透传到 `RUN_STARTED` 事件；不落 store。
+    pub thread_id: Option<String>,
     /// 默认 `true`：把 drive 观测到的事件带回结果。
     pub include_events: Option<bool>,
     /// 结果里最多保留多少事件（总数仍计入 `event_count`）。
@@ -201,6 +206,8 @@ pub struct WorkflowRuntimeDeliverSignalArgs {
     pub now: Option<i64>,
     pub lease_owner: Option<LeaseOwner>,
     pub lease_ms: Option<i64>,
+    /// 客户端关联标识（上游 `threadId`）。透传到 `RUN_STARTED` 事件；不落 store。
+    pub thread_id: Option<String>,
     pub deadline: Option<i64>,
     pub max_duration_ms: Option<i64>,
     pub min_yield_remaining_ms: Option<u64>,
@@ -215,6 +222,8 @@ pub struct WorkflowRuntimeDeliverApprovalArgs {
     pub now: Option<i64>,
     pub lease_owner: Option<LeaseOwner>,
     pub lease_ms: Option<i64>,
+    /// 客户端关联标识（上游 `threadId`）。透传到 `RUN_STARTED` 事件；不落 store。
+    pub thread_id: Option<String>,
     pub deadline: Option<i64>,
     pub max_duration_ms: Option<i64>,
     pub min_yield_remaining_ms: Option<u64>,
@@ -424,6 +433,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         }
 
         self.drive_claimed_run(DriveArgs {
+            thread_id: args.thread_id.clone(),
             workflow: &workflow,
             workflow_id: &args.workflow_id,
             run_id: &args.run_id,
@@ -475,6 +485,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                 let workflow = self.load_workflow(&workflow_id)?;
                 return self
                     .drive_claimed_run(DriveArgs {
+            thread_id: args.thread_id.clone(),
                         workflow: &workflow,
                         workflow_id: &workflow_id,
                         run_id: &args.run_id,
@@ -590,6 +601,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
             .map(|r| r.input)
             .unwrap_or(serde_json::Value::Null);
         self.drive_claimed_run(DriveArgs {
+            thread_id: args.thread_id.clone(),
             workflow: &workflow,
             workflow_id: &workflow_id,
             run_id: &args.run_id,
@@ -666,6 +678,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                     input: Some(claim.run.input.clone()),
                     lease_owner: Some(lease_owner.clone()),
                     lease_ms: Some(lease_ms),
+                    thread_id: None,
                     now,
                     deadline,
                     min_yield_remaining_ms: min_yield,
@@ -706,6 +719,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                     min_yield_remaining_ms: args.min_yield_remaining_ms,
                     lease_owner: Some(lease_owner.clone()),
                     lease_ms: Some(lease_ms),
+                    thread_id: None,
                     include_events: args.include_events,
                     max_events: args.max_events,
                 })
@@ -751,6 +765,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                     now: Some(now),
                     lease_owner: Some(lease_owner.clone()),
                     lease_ms: Some(lease_ms),
+                    thread_id: None,
                     deadline,
                     max_duration_ms: None,
                     min_yield_remaining_ms: args.min_yield_remaining_ms,
@@ -886,6 +901,10 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         if let Some(at) = args.yield_resume_at {
             opts = opts.yield_resume_at(at);
         }
+        // start_run / deliver_signal / deliver_approval 三个入口都汇到这里，
+        // 所以 threadId 只要在这一处转发就够（上游三个 args 各带一个，
+        // runtime-driver.ts:115/182/248 同样都往 driveClaimedRun 传）。
+        opts = opts.thread_id(args.thread_id.clone());
         opts = opts.publish(Some(publish));
         let drive_result = run_workflow(opts).outcome().await;
 
@@ -953,6 +972,9 @@ struct DriveArgs<'a> {
     lease_owner: Option<LeaseOwner>,
     /// `None` = 走 `config.default_lease_ms` → `DEFAULT_LEASE_MS`。
     lease_ms: Option<i64>,
+    /// 客户端关联标识，透传进 `RUN_STARTED`（上游 `DriveOptions.threadId`）。
+    /// sweep 传 `None`——上游 `sweep` 不带 threadId（`types.ts:459-474`）。
+    thread_id: Option<String>,
     /// 本次 drive 的「现在」，入口算一次一路传下去。**不要**在下游重读墙钟：
     /// 上游把 `args.now` 一路传到 `syncTimerFromRunState`
     /// （`runtime-driver.ts:761`）就是这个原因。
@@ -1239,6 +1261,39 @@ mod driver_tests {
         );
         assert!(out.event_count > 0, "应收集到事件");
         assert!(!out.events.is_empty());
+    }
+
+    /// `thread_id` 从 args 一路透到 `RUN_STARTED`（上游
+    /// `runtime-driver.ts:115` → `run-workflow.ts:242`）。
+    ///
+    /// 上一条 core 测试已经钉住 emit 本身；这条钉的是**runtime 层的接线**——
+    /// 三个 args 各带一个 `threadId`（`types.ts:402/418/433`），
+    /// `drive_claimed_run` 单点转发（`:115/182/248`）。中间任何一环漏掉都只会在
+    /// 这里现形。
+    #[tokio::test]
+    async fn start_run_threads_id_into_run_started() {
+        let fx = runtime_with("simple", simple_workflow());
+        let out = fx
+            .rt
+            .start_run(WorkflowRuntimeStartRunArgs {
+                workflow_id: "simple".into(),
+                run_id: "rt-thread".into(),
+                input: serde_json::json!({}),
+                thread_id: Some("from-args".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let started = out
+            .events
+            .iter()
+            .find_map(|e| match e {
+                WorkflowEvent::RunStarted { thread_id, .. } => Some(thread_id.clone()),
+                _ => None,
+            })
+            .expect("事件流里应有 RUN_STARTED");
+        assert_eq!(started, Some("from-args".into()));
     }
 
     /// 已存在且不在 Queued 的 run 不重复驱动。
@@ -1734,6 +1789,7 @@ mod driver_tests {
                     WorkflowEvent::RunStarted {
                         ts: now,
                         run_id: "sleep:1".into(),
+                        thread_id: None,
                     },
                     WorkflowEvent::StepFinished {
                         ts: now,
