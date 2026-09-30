@@ -5,30 +5,335 @@ title: WorkflowDefinition
 
 # Struct: WorkflowDefinition
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:347`](../../../packages/workflow_core/src/define/define_workflow.rs#L347)
+Defined in: [`packages/workflow_core/src/define/mod.rs:591`](../../../packages/workflow_core/src/define/mod.rs#L591)
 
-A workflow whose `TInput`/`TOutput`/`TState`/`TCtxExt` are statically known at the
-declaration site. `Deref<Target = Workflow>` lets it be handed to
-[`crate::engine::run_workflow`](../functions/run_workflow.md) / the registry directly; explicit erasure is
-[`into_workflow`](WorkflowDefinition.md).
+A declared workflow: id, optional version, the async handler, plus the
+builder-derived extras (`description`, `default_step_retry`, `middlewares`,
+`previous_versions`, `output_validator`) that TanStack carries on the
+workflow object.
+
+Mirrors TanStack's `WorkflowDefinition<TInput, TOutput, TState>`
+(`types.ts:442-460`) member-for-member — **including the generics**, which is
+the whole point: upstream's erased alias (`AnyWorkflowDefinition`) and its
+typed form are the same type, and here they are too, just spelled out.
+
+Every type parameter is defaulted to the erased form, so a **bare
+`WorkflowDefinition` is the type-erased workflow** — what the engine and
+every run site see. See [`AnyWorkflowDefinition`](AnyWorkflowDefinition.md) for the run-site spelling.
+
+## Fields
+
+### id
+
+```rust
+id: String
+```
+
+Defined in: [`packages/workflow_core/src/define/mod.rs:597`](../../../packages/workflow_core/src/define/mod.rs#L597)
+
+
+***
+
+### version
+
+```rust
+version: Option<String>
+```
+
+Defined in: [`packages/workflow_core/src/define/mod.rs:598`](../../../packages/workflow_core/src/define/mod.rs#L598)
+
+
+***
+
+### description
+
+```rust
+description: Option<String>
+```
+
+Defined in: [`packages/workflow_core/src/define/mod.rs:599`](../../../packages/workflow_core/src/define/mod.rs#L599)
+
+
+***
+
+### default_step_retry
+
+```rust
+default_step_retry: Option<RetryPolicy>
+```
+
+Defined in: [`packages/workflow_core/src/define/mod.rs:602`](../../../packages/workflow_core/src/define/mod.rs#L602)
+
+Fallback retry policy for steps that declare none
+(TanStack `defaultStepRetry`). Per-step [`StepOptions::retry`](StepOptions.md) wins.
+
+
+***
+
+### middlewares
+
+```rust
+middlewares: Vec<Middleware>
+```
+
+Defined in: [`packages/workflow_core/src/define/mod.rs:605`](../../../packages/workflow_core/src/define/mod.rs#L605)
+
+Middleware list, in the order TanStack's `composeMiddlewares` chains
+them (first = outermost wrapping of the typed handler).
+
+
+***
+
+### previous_versions
+
+```rust
+previous_versions: Vec<AnyWorkflowDefinition>
+```
+
+Defined in: [`packages/workflow_core/src/define/mod.rs:609`](../../../packages/workflow_core/src/define/mod.rs#L609)
+
+Older versions of the same workflow. Resume routes by the persisted
+`workflow_version` to the matching entry (see
+[`select_workflow_version`](../functions/select_workflow_version.md)).
+
+
+***
+
+### handler
+
+```rust
+handler: WorkflowHandler
+```
+
+Defined in: [`packages/workflow_core/src/define/mod.rs:610`](../../../packages/workflow_core/src/define/mod.rs#L610)
+
+
+***
+
+### initialize
+
+```rust
+initialize: Arc<dyn Fn(&Value) -> Result<Value> + Send + Sync>
+```
+
+Defined in: [`packages/workflow_core/src/define/mod.rs:611`](../../../packages/workflow_core/src/define/mod.rs#L611)
+
+
+***
+
+### state_validator
+
+```rust
+state_validator: Option<Arc<dyn Fn(&Value) -> Result<()> + Send + Sync>>
+```
+
+Defined in: [`packages/workflow_core/src/define/mod.rs:612`](../../../packages/workflow_core/src/define/mod.rs#L612)
+
+
+***
+
+### output_validator
+
+```rust
+output_validator: Option<Arc<dyn Fn(&Value) -> Result<()> + Send + Sync>>
+```
+
+Defined in: [`packages/workflow_core/src/define/mod.rs:614`](../../../packages/workflow_core/src/define/mod.rs#L614)
+
+Shape-check for the handler's `TOutput` value (config `output` schema).
 
 _（存在非公开字段）_
 
 ## Implementations
 
-### into_workflow()
+### new()
 
 ```rust
-pub fn into_workflow(self) -> Workflow
+pub fn new<impl Into<String>: Into>(id: impl ?) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:357`](../../../packages/workflow_core/src/define/define_workflow.rs#L357)
+Defined in: [`packages/workflow_core/src/define/mod.rs:759`](../../../packages/workflow_core/src/define/mod.rs#L759)
 
-Type-erase back to the engine's [`Workflow`](Workflow.md) view.
+The erased workflow: no `TInput`/`TOutput`/`TState`/`TCtxExt`. This is
+the engine-facing constructor (it replaces the old standalone `Workflow`
+type); a *typed* definition comes from
+[`create_workflow`](../functions/create_workflow.md)(...).handler(...), which
+pins the parameters from the declaration site.
+
+#### Parameters
+
+##### id
+
+`impl ?`
 
 #### Returns
 
-[`Workflow`](Workflow.md)
+`Self`
+
+
+***
+
+### version()
+
+```rust
+pub fn version<impl Into<String>: Into>(self, version: impl ?) -> Self
+```
+
+Defined in: [`packages/workflow_core/src/define/mod.rs:778`](../../../packages/workflow_core/src/define/mod.rs#L778)
+
+#### Parameters
+
+##### version
+
+`impl ?`
+
+#### Returns
+
+`Self`
+
+
+***
+
+### description()
+
+```rust
+pub fn description<impl Into<String>: Into>(self, description: impl ?) -> Self
+```
+
+Defined in: [`packages/workflow_core/src/define/mod.rs:783`](../../../packages/workflow_core/src/define/mod.rs#L783)
+
+#### Parameters
+
+##### description
+
+`impl ?`
+
+#### Returns
+
+`Self`
+
+
+***
+
+### default_step_retry()
+
+```rust
+pub fn default_step_retry(self, retry: RetryPolicy) -> Self
+```
+
+Defined in: [`packages/workflow_core/src/define/mod.rs:790`](../../../packages/workflow_core/src/define/mod.rs#L790)
+
+Fallback retry policy for steps that declare no
+[`StepOptions::retry`](StepOptions.md).
+
+#### Parameters
+
+##### retry
+
+[`RetryPolicy`](RetryPolicy.md)
+
+#### Returns
+
+`Self`
+
+
+***
+
+### previous_versions()
+
+```rust
+pub fn previous_versions<impl Into<AnyWorkflowDefinition>: Into, impl IntoIterator<Item = impl Into<AnyWorkflowDefinition>>: IntoIterator>(self, v: impl ?) -> Self
+```
+
+Defined in: [`packages/workflow_core/src/define/mod.rs:798`](../../../packages/workflow_core/src/define/mod.rs#L798)
+
+Same as
+[`WorkflowBuilder::previous_versions`](WorkflowBuilder.md) —
+the direct-construction variant for engine-facing code.
+
+#### Parameters
+
+##### v
+
+`impl ?`
+
+#### Returns
+
+`Self`
+
+
+***
+
+### initialize()
+
+```rust
+pub fn initialize<impl Fn(&serde_json::Value) -> anyhow::Result<serde_json::Value> + Send + Sync + 'static: Fn(&Value) -> Result<Value> + Send + Sync + 'static>(self, f: impl ? + ? + ? + ?) -> Self
+```
+
+Defined in: [`packages/workflow_core/src/define/mod.rs:810`](../../../packages/workflow_core/src/define/mod.rs#L810)
+
+Declare the initial per-invocation state, derived from the frozen run
+input (TanStack `initialize`). Called on every invocation — start and
+resume — and the handler re-runs from scratch, so mutations written
+*outside* step closures re-execute deterministically.
+
+#### Parameters
+
+##### f
+
+`impl ? + ? + ? + ?`
+
+#### Returns
+
+`Self`
+
+
+***
+
+### state_schema()
+
+```rust
+pub fn state_schema<T: DeserializeOwned + Send + Sync + 'static>(self) -> Self
+```
+
+Defined in: [`packages/workflow_core/src/define/mod.rs:823`](../../../packages/workflow_core/src/define/mod.rs#L823)
+
+Declare a typed state (serde `Deserialize` type = schema). The initial
+state built by [`initialize`](WorkflowDefinition.md) is shape-checked against
+`T` on every invocation; a mismatch errors the run (zod `.safeParse`
+counterpart for `stateSchema`). Typed access at runtime is the `ctx.state`
+field.
+
+#### Returns
+
+`Self`
+
+
+***
+
+### handler()
+
+```rust
+pub fn handler<F, Fut>(self, handler: F) -> Self
+where
+    F: Fn(WorkflowCtx) -> Fut + Send + Sync + 'static,
+    Fut: Future + Send + 'static
+```
+
+Defined in: [`packages/workflow_core/src/define/mod.rs:833`](../../../packages/workflow_core/src/define/mod.rs#L833)
+
+Installs the orchestrating closure. Branching/parallelism/order are
+plain async code; only durable side effects go through `ctx.step`.
+
+#### Parameters
+
+##### handler
+
+`F`
+
+#### Returns
+
+`Self`
 
 ## Trait Implementations
 
@@ -39,11 +344,10 @@ Type-erase back to the engine's [`Workflow`](Workflow.md) view.
 - `impl From for WorkflowDefinition`
 - `impl TryInto for WorkflowDefinition`
 - `impl TryFrom for WorkflowDefinition`
-- `impl Receiver for WorkflowDefinition`
 - `impl Any for WorkflowDefinition`
 - `impl ToOwned for WorkflowDefinition`
 - `impl Clone for WorkflowDefinition`
-- `impl Deref for WorkflowDefinition`
+- `impl From for WorkflowDefinition`
 
 ## Auto Trait Implementations
 

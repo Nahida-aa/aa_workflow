@@ -6,7 +6,7 @@ title: select_workflow_version
 # Function: select_workflow_version()
 
 ```rust
-pub fn select_workflow_version<'a>(workflow: &'a Workflow, persisted: Option<&str>) -> Option<&'a Workflow>
+pub fn select_workflow_version<'a>(workflow: &'a WorkflowDefinition, persisted: Option<&str>) -> Option<&'a WorkflowDefinition>
 ```
 
 Defined in: [`packages/workflow_core/src/registry/select_version.rs:31`](../../../packages/workflow_core/src/registry/select_version.rs#L31)
@@ -19,7 +19,7 @@ Defined in: [`packages/workflow_core/src/registry/select_version.rs:31`](../../.
 
 ### workflow
 
-`&'a Workflow`
+`&'a WorkflowDefinition`
 
 ### persisted
 
@@ -27,5 +27,5 @@ Defined in: [`packages/workflow_core/src/registry/select_version.rs:31`](../../.
 
 ## Returns
 
-`Option<&'a Workflow>`
+`Option<&'a WorkflowDefinition>`
 

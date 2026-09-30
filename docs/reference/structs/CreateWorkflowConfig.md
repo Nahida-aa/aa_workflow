@@ -5,7 +5,7 @@ title: CreateWorkflowConfig
 
 # Struct: CreateWorkflowConfig
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:25`](../../../packages/workflow_core/src/define/define_workflow.rs#L25)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:24`](../../../packages/workflow_core/src/define/define_workflow.rs#L24)
 
 The declaration config consumed by [`create_workflow`](../functions/create_workflow.md). Mirrors TanStack's
 `createWorkflow(options)`; only `id` is required (`initialize` defaults to
@@ -22,7 +22,7 @@ the step retry fallback; `description` is metadata.
 id: String
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:26`](../../../packages/workflow_core/src/define/define_workflow.rs#L26)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:25`](../../../packages/workflow_core/src/define/define_workflow.rs#L25)
 
 
 ***
@@ -33,7 +33,7 @@ Defined in: [`packages/workflow_core/src/define/define_workflow.rs:26`](../../..
 description: Option<String>
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:27`](../../../packages/workflow_core/src/define/define_workflow.rs#L27)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:26`](../../../packages/workflow_core/src/define/define_workflow.rs#L26)
 
 
 ***
@@ -44,7 +44,7 @@ Defined in: [`packages/workflow_core/src/define/define_workflow.rs:27`](../../..
 version: Option<String>
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:28`](../../../packages/workflow_core/src/define/define_workflow.rs#L28)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:27`](../../../packages/workflow_core/src/define/define_workflow.rs#L27)
 
 
 ***
@@ -55,7 +55,7 @@ Defined in: [`packages/workflow_core/src/define/define_workflow.rs:28`](../../..
 initialize: Arc<dyn Fn(&Value) -> Result<Value> + Send + Sync>
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:29`](../../../packages/workflow_core/src/define/define_workflow.rs#L29)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:28`](../../../packages/workflow_core/src/define/define_workflow.rs#L28)
 
 
 ***
@@ -66,7 +66,7 @@ Defined in: [`packages/workflow_core/src/define/define_workflow.rs:29`](../../..
 state_validator: Option<Arc<dyn Fn(&Value) -> Result<()> + Send + Sync>>
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:30`](../../../packages/workflow_core/src/define/define_workflow.rs#L30)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:29`](../../../packages/workflow_core/src/define/define_workflow.rs#L29)
 
 
 ***
@@ -77,7 +77,7 @@ Defined in: [`packages/workflow_core/src/define/define_workflow.rs:30`](../../..
 output_validator: Option<Arc<dyn Fn(&Value) -> Result<()> + Send + Sync>>
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:31`](../../../packages/workflow_core/src/define/define_workflow.rs#L31)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:30`](../../../packages/workflow_core/src/define/define_workflow.rs#L30)
 
 
 ***
@@ -88,7 +88,7 @@ Defined in: [`packages/workflow_core/src/define/define_workflow.rs:31`](../../..
 default_step_retry: Option<RetryPolicy>
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:32`](../../../packages/workflow_core/src/define/define_workflow.rs#L32)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:31`](../../../packages/workflow_core/src/define/define_workflow.rs#L31)
 
 
 ***
@@ -99,7 +99,7 @@ Defined in: [`packages/workflow_core/src/define/define_workflow.rs:32`](../../..
 handler: WorkflowHandler
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:33`](../../../packages/workflow_core/src/define/define_workflow.rs#L33)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:32`](../../../packages/workflow_core/src/define/define_workflow.rs#L32)
 
 
 ***
@@ -110,7 +110,7 @@ Defined in: [`packages/workflow_core/src/define/define_workflow.rs:33`](../../..
 _input: PhantomData<TInput>
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:34`](../../../packages/workflow_core/src/define/define_workflow.rs#L34)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:33`](../../../packages/workflow_core/src/define/define_workflow.rs#L33)
 
 
 ***
@@ -121,7 +121,7 @@ Defined in: [`packages/workflow_core/src/define/define_workflow.rs:34`](../../..
 _output: PhantomData<TOutput>
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:35`](../../../packages/workflow_core/src/define/define_workflow.rs#L35)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:34`](../../../packages/workflow_core/src/define/define_workflow.rs#L34)
 
 
 ***
@@ -132,7 +132,7 @@ Defined in: [`packages/workflow_core/src/define/define_workflow.rs:35`](../../..
 _state: PhantomData<TState>
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:36`](../../../packages/workflow_core/src/define/define_workflow.rs#L36)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:35`](../../../packages/workflow_core/src/define/define_workflow.rs#L35)
 
 ## Implementations
 
@@ -142,7 +142,7 @@ Defined in: [`packages/workflow_core/src/define/define_workflow.rs:36`](../../..
 pub fn new<impl Into<String>: Into>(id: impl ?) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:40`](../../../packages/workflow_core/src/define/define_workflow.rs#L40)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:39`](../../../packages/workflow_core/src/define/define_workflow.rs#L39)
 
 #### Parameters
 
@@ -163,7 +163,7 @@ Defined in: [`packages/workflow_core/src/define/define_workflow.rs:40`](../../..
 pub fn version<impl Into<String>: Into>(self, version: impl ?) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:58`](../../../packages/workflow_core/src/define/define_workflow.rs#L58)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:57`](../../../packages/workflow_core/src/define/define_workflow.rs#L57)
 
 #### Parameters
 
@@ -184,7 +184,7 @@ Defined in: [`packages/workflow_core/src/define/define_workflow.rs:58`](../../..
 pub fn description<impl Into<String>: Into>(self, description: impl ?) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:63`](../../../packages/workflow_core/src/define/define_workflow.rs#L63)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:62`](../../../packages/workflow_core/src/define/define_workflow.rs#L62)
 
 #### Parameters
 
@@ -202,14 +202,22 @@ Defined in: [`packages/workflow_core/src/define/define_workflow.rs:63`](../../..
 ### initialize()
 
 ```rust
-pub fn initialize<impl Fn(&serde_json::Value) -> anyhow::Result<serde_json::Value> + Send + Sync + 'static: Fn(&Value) -> Result<Value> + Send + Sync + 'static>(self, f: impl ? + ? + ? + ?) -> Self
+pub fn initialize<impl Fn(&TInput) -> anyhow::Result<TState> + Send + Sync + 'static: Fn(&TInput) -> Result<TState> + Send + Sync + 'static>(self, f: impl ? + ? + ? + ?) -> Self
+where
+    TInput: DeserializeOwned,
+    TState: Serialize
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:71`](../../../packages/workflow_core/src/define/define_workflow.rs#L71)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:75`](../../../packages/workflow_core/src/define/define_workflow.rs#L75)
 
 `initialize({ input })` — rebuild the per-invocation state on every
 start and resume (state is never persisted, see
-[`Workflow::initialize`](Workflow.md)).
+[`WorkflowDefinition::initialize`](WorkflowDefinition.md)).
+
+typed：闭包吃 `&TInput`、产 `TState`（对齐上游——`TState` 由
+`.state::<T>()` 声明、编译期钉死）。内部 serde 桥接到运行时的擦除
+表示（`WorkflowDefinition` 持 `Fn(&Value) -> Result<Value>`）；input 反序列化
+失败 / state 序列化失败都算 run 错误。
 
 #### Parameters
 
@@ -230,7 +238,7 @@ start and resume (state is never persisted, see
 pub fn default_step_retry(self, retry: RetryPolicy) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:81`](../../../packages/workflow_core/src/define/define_workflow.rs#L81)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:93`](../../../packages/workflow_core/src/define/define_workflow.rs#L93)
 
 Fallback retry for steps that declare no retry of their own
 (see [`StepOptions`](StepOptions.md)).
@@ -256,7 +264,7 @@ where
     NewIn: DeserializeOwned + Send + Sync + 'static
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:91`](../../../packages/workflow_core/src/define/define_workflow.rs#L91)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:103`](../../../packages/workflow_core/src/define/define_workflow.rs#L103)
 
 Declare the input schema as a serde type: re-types the config to
 `CreateWorkflowConfig<NewIn, TOutput, TState>` so `create_workflow` builds a
@@ -279,7 +287,7 @@ where
     NewSt: DeserializeOwned + Send + Sync + 'static
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:113`](../../../packages/workflow_core/src/define/define_workflow.rs#L113)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:125`](../../../packages/workflow_core/src/define/define_workflow.rs#L125)
 
 Declare the state schema as a serde type: the state built by
 [`initialize`](CreateWorkflowConfig.md) is shape-checked against `NewSt` on
@@ -300,7 +308,7 @@ where
     NewOut: DeserializeOwned + Send + Sync + 'static
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:140`](../../../packages/workflow_core/src/define/define_workflow.rs#L140)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:152`](../../../packages/workflow_core/src/define/define_workflow.rs#L152)
 
 Declare the output schema as a serde type: re-types the config to
 `CreateWorkflowConfig<_, NewOut, _>`; the handler's `TOutput` is validated

@@ -6,10 +6,10 @@ title: run_workflow
 # Function: run_workflow()
 
 ```rust
-pub async fn run_workflow(opts: &RunWorkflowOptions) -> Result<RunOutcome, WorkflowError>
+pub fn run_workflow(opts: RunWorkflowOptions) -> RunEventStream
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:176`](../../../packages/workflow_core/src/engine/run_workflow.rs#L176)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:356`](../../../packages/workflow_core/src/engine/run_workflow.rs#L356)
 
 Runs (or resumes) a workflow by driving its async handler.
 
@@ -29,9 +29,9 @@ however you like — the log is the only source of truth.
 
 ### opts
 
-`&RunWorkflowOptions`
+[`RunWorkflowOptions`](../structs/RunWorkflowOptions.md)
 
 ## Returns
 
-`Result<RunOutcome, WorkflowError>`
+`RunEventStream`
 

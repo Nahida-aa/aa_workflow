@@ -374,7 +374,7 @@ struct RunStoreAdapter {
 ///
 /// ```ignore
 /// let store: Arc<dyn WorkflowExecutionStore> = Arc::new(MyStore::new());
-/// let outcome = run_workflow(&wf, create_run_store_adapter(store), &opts, None).outcome().await?;
+/// let outcome = run_workflow(wf, create_run_store_adapter(store), &opts, None).outcome().await?;
 /// ```
 ///
 /// # 为什么不让实现者自己 `impl RunStore`
@@ -606,7 +606,7 @@ mod e2e_tests {
         let store = create_run_store_adapter(exec);
 
         let out = aa_workflow_core::run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store)
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store)
                 .input(serde_json::json!({}))
             .run_id("e2e:1"),
         )

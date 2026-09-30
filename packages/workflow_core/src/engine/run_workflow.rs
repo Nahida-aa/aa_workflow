@@ -16,12 +16,36 @@ use crate::event::{RunStatus, StepStatus, WorkflowEvent, fold_step_states};
 use crate::resource::Gate;
 use crate::run_store::{RunState, RunStore};
 
-/// `run_workflow` / `run_workflow_sync` 的入参（对齐上游 `RunWorkflowOptions`，
-/// 见 `engine/run-workflow.ts:34-72`）。
+/// 事件回调的**已擦除**类型：返回 future 而非直接调用，所以宿主可以给异步实现。
+/// 参数与上游 `publish?: (runId, event) => void | Promise<void>`
+/// （`run-workflow.ts:41`）**逐个对应**，顺序也一致。
+///
+/// **`run_id` 是补上的那个参数。** 之前回调只收事件，宿主想按 run 归集就得从
+/// `event.run_id()` 里反解——而 `WorkflowEvent::Custom` 不带 run_id（自定义事件
+/// 是宿主的，引擎无从填），那条路径上宿主根本拿不到 run 身份。上游把 runId 当
+/// 独立参数传就是这个原因。
+///
+/// **事件按值传 `WorkflowEvent`**，不是 `&WorkflowEvent`。这不是口味问题：
+/// `publish()` 走队列时本来就要克隆一份（调用点只有 `&self`），drain task 已经
+/// 持有一份完整副本。传引用就得让返回的 future 借用它，于是被迫用
+/// `BoxFuture<'static, _>` + HRTB 兜（`for<'a> Fn(&'a E) -> BoxFuture<'a, ()>`
+/// 在 `dyn` 上是噩梦），代价是 async block **不能借用事件**。
+/// 按值传则一次克隆都不浪费、生命周期问题直接消失。
+/// `run_id` 相反**按引用**：它 `&'static`（spawn 时克隆的那份），且真要在 async
+/// block 里长期持有，按值只会多一次 clone。
+///
+/// ```ignore
+/// .async_publish(|run_id, ev| async move { sink.send(run_id, ev).await })
+/// ```
+pub type PublisherFn =
+    Arc<dyn Fn(&str, WorkflowEvent) -> crate::define::BoxFuture<'static, ()> + Send + Sync>;
+
+/// `run_workflow` / `run_workflow_sync` 的全部入参（对齐上游
+/// `runWorkflow(options)` 的**按值**收法，见 `engine/run-workflow.ts:34-72`）。
 ///
 /// # 为什么把 `workflow` / `run_store` 也收进来
 ///
-/// 之前是 4 个位置参数 `run_workflow(&wf, store, &opts, publish)`——容易传错位。
+/// 之前是 4 个位置参数 `run_workflow(&wf, store, &opts, publisher)`——容易传错位。
 /// 上游把**全部**入参放在一个结构体里，`workflow` / `runStore` 是**必填字段**。
 /// 这里照做：必填项由 [`RunWorkflowOptions::new`] 强制（构造完就一定齐了），
 /// 可选项走 builder 链。
@@ -49,30 +73,6 @@ use crate::run_store::{RunState, RunStore};
 /// newtype 内部持 `Arc<WorkflowDefinition>`：`previous_versions` 是 `Vec`、另有
 /// 若干 `Arc`，按值持有会让每次 run 都 deep-copy 一遍；`Arc` 让 clone 变引用计数自增，
 /// 也避免给结构体引入生命周期参数（那会让 builder 链很难写）。
-/// 事件回调的**已擦除**类型：返回 future 而非直接调用，所以宿主可以给异步实现。
-/// 参数与上游 `publish?: (runId, event) => void | Promise<void>`
-/// （`run-workflow.ts:41`）**逐个对应**，顺序也一致。
-///
-/// **`run_id` 是补上的那个参数。** 之前回调只收事件，宿主想按 run 归集就得从
-/// `event.run_id()` 里反解——而 `WorkflowEvent::Custom` 不带 run_id（自定义事件
-/// 是宿主的，引擎无从填），那条路径上宿主根本拿不到 run 身份。上游把 runId 当
-/// 独立参数传就是这个原因。
-///
-/// **事件按值传 `WorkflowEvent`**，不是 `&WorkflowEvent`。这不是口味问题：
-/// `publish()` 走队列时本来就要克隆一份（调用点只有 `&self`），drain task 已经
-/// 持有一份完整副本。传引用就得让返回的 future 借用它，于是被迫用
-/// `BoxFuture<'static, _>` + HRTB 兜（`for<'a> Fn(&'a E) -> BoxFuture<'a, ()>`
-/// 在 `dyn` 上是噩梦），代价是 async block **不能借用事件**。
-/// 按值传则一次克隆都不浪费、生命周期问题直接消失。
-/// `run_id` 相反**按引用**：它 `&'static`（spawn 时克隆的那份），且真要在 async
-/// block 里长期持有，按值只会多一次 clone。
-///
-/// ```ignore
-/// .async_publish(|run_id, ev| async move { sink.send(run_id, ev).await })
-/// ```
-pub type PublisherFn =
-    Arc<dyn Fn(&str, WorkflowEvent) -> crate::define::BoxFuture<'static, ()> + Send + Sync>;
-
 #[derive(Clone)]
 pub struct RunWorkflowOptions {
     /// 要驱动的 workflow。**必填**（由 [`Self::new`] 保证）。
@@ -162,15 +162,6 @@ pub struct RunWorkflowOptions {
     /// 可选的事件回调（上游 `publish`）。多数宿主用同步的 [`Self::publish`]；
     /// 需要 `await` 落盘/发网络的用 [`Self::async_publish`]。
     pub publish: Option<PublisherFn>,
-}
-
-/// 让 `run_workflow(&opts)` 和 `run_workflow(opts)` 都能用——调用点不必因为
-/// 签名从「取引用」变成「取所有权」而全体改写。字段全是 `Arc` / `Option`，克隆很
-/// 便宜。
-impl From<&RunWorkflowOptions> for RunWorkflowOptions {
-    fn from(opts: &RunWorkflowOptions) -> Self {
-        opts.clone()
-    }
 }
 
 impl RunWorkflowOptions {
@@ -362,13 +353,12 @@ pub use crate::registry::select_workflow_version;
 /// On resume, `ctx.step` short-circuits succeeded checkpoints (cached result,
 /// `run` not re-executed) and rethrows failed ones. Multiplex step results
 /// however you like — the log is the only source of truth.
-pub fn run_workflow(opts: impl Into<RunWorkflowOptions>) -> RunEventStream {
+pub fn run_workflow(mut opts: RunWorkflowOptions) -> RunEventStream {
     // run_id 必须**只在这里定一次**并写回 `opts`：stream 自己要按它回 store 读
     // 结果（[`Self::outcome`]），drive 也要按它写日志。两处各生成一次的话，
     // `opts.run_id` 为 `None` 时跨过一个 ms 边界就会拿到两个不同的 id。
     // 定下来之后 `publish` 也能直接拿到它——上游得在循环里等 `RUN_STARTED`
     // 出现才敢用（`runIdForPublish`，`run-workflow.ts:116-119`）。
-    let mut opts = opts.into();
     let run_id = opts
         .run_id
         .clone()
@@ -469,7 +459,7 @@ impl RunEventStream {
     /// 排干事件流，然后从 store 读出 [`RunOutcome`]。
     ///
     /// 这是「只要结果、不留事件」那条路的落点，也是流化之后 `run_workflow` 的
-    /// 等价替代（旧的 `run_workflow(&opts).outcome().await -> Result<RunOutcome>`）。
+    /// 等价替代（旧的 `run_workflow(opts).outcome().await -> Result<RunOutcome>`）。
     ///
     /// 两步的分工逐行对齐上游 runtime：先 `collectWorkflowEvents` 排干
     /// （`runtime-driver.ts:1179-1214`），再 `store.loadRun` 拿状态
@@ -910,9 +900,7 @@ fn error_persisted(
 /// 事件流在这里被**排干**：本函数的契约是「跑到终态并交出 outcome」，中间事件
 /// 不外泄。要逐条看事件就用 async 的 [`run_workflow`]。`publish` 回调仍然逐条
 /// 触发（它在 [`RunEventStream`] 里被 await，与 async 路径同一处）。
-pub fn run_workflow_sync(
-    opts: impl Into<RunWorkflowOptions>,
-) -> Result<RunOutcome, WorkflowError> {
+pub fn run_workflow_sync(mut opts: RunWorkflowOptions) -> Result<RunOutcome, WorkflowError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_time()
         .build()
@@ -943,7 +931,7 @@ mod tests {
                 .await
         });
         let out = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(json!({ "x": 1 })),
         )
         .outcome().await
@@ -975,7 +963,7 @@ mod tests {
                 .await
             });
         let out = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(json!({}))
             .run_id("bad-init:r"),
         )
@@ -1007,7 +995,7 @@ mod tests {
         });
         let wf: AnyWorkflowDefinition = wf.into();
         let out = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(json!({}))
             .run_id("bad-state:r"),
         )
@@ -1036,7 +1024,7 @@ mod tests {
                 .await
         });
         let out = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(json!({}))
             .run_id("code:err"),
         )
@@ -1065,7 +1053,7 @@ mod tests {
             Err(crate::engine::WorkflowCancelled.into())
         });
         let out = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(json!({}))
             .run_id("code:abort"),
         )
@@ -1108,7 +1096,7 @@ mod tests {
                 Ok(serde_json::json!({}))
             });
         run_workflow(
-            &RunWorkflowOptions::new(wf, store)
+            RunWorkflowOptions::new(wf, store)
                 .input(serde_json::json!({}))
                 .run_id("rid:1")
                 .publish(Some(publish)),
@@ -1142,7 +1130,7 @@ mod tests {
             .initialize(|_| Err(anyhow::anyhow!("nope")))
             .handler(|_ctx: WorkflowCtx| async move { Ok(json!({ "unreachable": true })) });
         let out = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(json!({}))
             .run_id("code:validation")
             .publish(Some(publish)),
@@ -1187,7 +1175,7 @@ mod tests {
             .await
         });
         let out = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(json!({}))
             .run_id("one:r"),
         )
@@ -1250,7 +1238,7 @@ mod tests {
             let v1 = v1.clone();
             async move {
                 run_workflow(
-                    &RunWorkflowOptions::new(Arc::new(v1.clone()), store)
+                    RunWorkflowOptions::new(Arc::new(v1.clone()), store)
                         .input(serde_json::json!({}))
                     .run_id("ver:mismatch"),
                 )
@@ -1277,7 +1265,7 @@ mod tests {
             .version("v2")
             .handler(|_ctx: WorkflowCtx| async move { Ok(serde_json::Value::Null) });
         let events = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(v2.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(v2.clone()), store.clone())
                 .input(serde_json::json!({}))
                 .run_id("ver:mismatch"),
         )
@@ -1341,7 +1329,7 @@ mod tests {
 
         // first run: b fails, run errors
         let out = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
         .outcome().await
@@ -1353,7 +1341,7 @@ mod tests {
 
         // plain resume: failed checkpoint rethrows → still errored, no rerun
         let again = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
             .run_id(run_id.clone()),
         )
@@ -1368,7 +1356,7 @@ mod tests {
 
         // continue_from "b": truncate b's checkpoint + suffix, replay reruns b
         let resumed = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
             .run_id(run_id)
             .continue_from("b"),
@@ -1409,13 +1397,13 @@ mod tests {
             }
         });
         let out = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
         .outcome().await
         .unwrap();
         let second = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
             .run_id(out.run_id)
             .continue_from("b"),
@@ -1457,7 +1445,7 @@ mod tests {
             }
         });
         let out = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
             .target_step("b"),
         )
@@ -1486,7 +1474,7 @@ mod tests {
             Ok(serde_json::json!({ "out": v }))
         });
         let out = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
         .outcome().await
@@ -1525,19 +1513,19 @@ mod tests {
         };
 
         // 第一次 drive：真的挂起，写下 STEP_PAUSED。
-        let first = run_workflow(&opts(store.clone())).collect().await;
+        let first = run_workflow(opts(store.clone())).collect().await;
         assert!(
             first.iter().any(|e| matches!(e, WorkflowEvent::StepPaused { .. })),
             "首次挂起应写 STEP_PAUSED，实际 {:?}",
             first.iter().map(|e| e.type_name()).collect::<Vec<_>>()
         );
         assert_eq!(
-            run_workflow(&opts(store.clone())).outcome().await.unwrap().status,
+            run_workflow(opts(store.clone())).outcome().await.unwrap().status,
             RunStatus::Paused
         );
 
         // 第二次 drive：primitive 短路 → **零条新事件**（连 STEP_PAUSED 都不重写）。
-        let second = run_workflow(&opts(store.clone())).collect().await;
+        let second = run_workflow(opts(store.clone())).collect().await;
         assert!(
             !second.iter().any(|e| matches!(e, WorkflowEvent::StepPaused { .. })),
             "重挂起不该重复 append STEP_PAUSED（日志幂等），实际 {:?}",
@@ -1550,7 +1538,7 @@ mod tests {
 
         // 但状态仍然问得到，而且必须是 Paused——不是「流结束了所以不知道」。
         assert_eq!(
-            run_workflow(&opts(store.clone())).outcome().await.unwrap().status,
+            run_workflow(opts(store.clone())).outcome().await.unwrap().status,
             RunStatus::Paused,
             "Paused 只能从 RunState 来"
         );
@@ -1581,7 +1569,7 @@ mod tests {
         .into();
 
         let out1 = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(v1.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(v1.clone()), store.clone())
                 .input(serde_json::json!({}))
             .run_id("ver:r"),
         )
@@ -1604,7 +1592,7 @@ mod tests {
         .into();
 
         let out2 = run_workflow(
-            &RunWorkflowOptions::new(v2.clone(), store.clone())
+            RunWorkflowOptions::new(v2.clone(), store.clone())
                 .input(serde_json::json!({}))
                 .run_id("ver:r"),
         )
@@ -1617,7 +1605,7 @@ mod tests {
         );
 
         let out3 = run_workflow(
-            &RunWorkflowOptions::new(v2.clone(), store.clone())
+            RunWorkflowOptions::new(v2.clone(), store.clone())
                 .input(serde_json::json!({}))
                 .run_id("ver:r2"),
         )

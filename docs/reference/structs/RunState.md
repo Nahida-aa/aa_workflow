@@ -5,7 +5,7 @@ title: RunState
 
 # Struct: RunState
 
-Defined in: [`packages/workflow_core/src/run_store/mod.rs:86`](../../../packages/workflow_core/src/run_store/mod.rs#L86)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:138`](../../../packages/workflow_core/src/run_store/mod.rs#L138)
 
 Minimal, durable metadata for a run. The heavy state lives in the event
 log; this is just the envelope the launcher needs to locate runs.
@@ -61,7 +61,7 @@ reconstructed from `initialize(input)` + log replay on every resume.”
 run_id: String
 ```
 
-Defined in: [`packages/workflow_core/src/run_store/mod.rs:87`](../../../packages/workflow_core/src/run_store/mod.rs#L87)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:139`](../../../packages/workflow_core/src/run_store/mod.rs#L139)
 
 
 ***
@@ -72,7 +72,7 @@ Defined in: [`packages/workflow_core/src/run_store/mod.rs:87`](../../../packages
 workflow_id: String
 ```
 
-Defined in: [`packages/workflow_core/src/run_store/mod.rs:88`](../../../packages/workflow_core/src/run_store/mod.rs#L88)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:140`](../../../packages/workflow_core/src/run_store/mod.rs#L140)
 
 
 ***
@@ -83,7 +83,7 @@ Defined in: [`packages/workflow_core/src/run_store/mod.rs:88`](../../../packages
 workflow_version: Option<String>
 ```
 
-Defined in: [`packages/workflow_core/src/run_store/mod.rs:89`](../../../packages/workflow_core/src/run_store/mod.rs#L89)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:141`](../../../packages/workflow_core/src/run_store/mod.rs#L141)
 
 
 ***
@@ -94,7 +94,7 @@ Defined in: [`packages/workflow_core/src/run_store/mod.rs:89`](../../../packages
 status: RunStatus
 ```
 
-Defined in: [`packages/workflow_core/src/run_store/mod.rs:90`](../../../packages/workflow_core/src/run_store/mod.rs#L90)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:142`](../../../packages/workflow_core/src/run_store/mod.rs#L142)
 
 
 ***
@@ -105,7 +105,7 @@ Defined in: [`packages/workflow_core/src/run_store/mod.rs:90`](../../../packages
 input: TInput
 ```
 
-Defined in: [`packages/workflow_core/src/run_store/mod.rs:91`](../../../packages/workflow_core/src/run_store/mod.rs#L91)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:143`](../../../packages/workflow_core/src/run_store/mod.rs#L143)
 
 
 ***
@@ -116,7 +116,15 @@ Defined in: [`packages/workflow_core/src/run_store/mod.rs:91`](../../../packages
 output: Option<TOutput>
 ```
 
-Defined in: [`packages/workflow_core/src/run_store/mod.rs:92`](../../../packages/workflow_core/src/run_store/mod.rs#L92)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:152`](../../../packages/workflow_core/src/run_store/mod.rs#L152)
+
+`Some(Value::Null)` 与 `None` 必须能区分——handler 返回 `null` 是合法的
+（比如 `Ok(ctx.step(..).await?)` 而 step 的结果是 null）。
+
+serde 默认会把 `Some(Value::Null)` 序列化成 `null`、再把 `null` 读回成
+`None`，两者在 JSON 层撞成一个值。`default` + `skip_serializing_if` 让
+「没有」表现为**键缺失**，`de_some` 让「键存在（哪怕是 null）」表现为
+`Some`——用缺键来编码 `None`，两种状态就不撞了。
 
 
 ***
@@ -127,7 +135,22 @@ Defined in: [`packages/workflow_core/src/run_store/mod.rs:92`](../../../packages
 error: Option<RunError>
 ```
 
-Defined in: [`packages/workflow_core/src/run_store/mod.rs:93`](../../../packages/workflow_core/src/run_store/mod.rs#L93)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:153`](../../../packages/workflow_core/src/run_store/mod.rs#L153)
+
+
+***
+
+### awaiting
+
+```rust
+awaiting: Vec<RunAwaitable>
+```
+
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:158`](../../../packages/workflow_core/src/run_store/mod.rs#L158)
+
+挂起等待中的**全部** awaitable（对齐 TanStack `RunState.awaiting`，
+`types.ts:552`）。这是**规范形**；下面两个字段是它的**镜像**，同一份
+信息的两种看法。当前恒定 ≤1 个元素（见 [`RunAwaitable`](../enums/RunAwaitable.md) 的说明）。
 
 
 ***
@@ -138,7 +161,7 @@ Defined in: [`packages/workflow_core/src/run_store/mod.rs:93`](../../../packages
 waiting_for: Option<WaitForState>
 ```
 
-Defined in: [`packages/workflow_core/src/run_store/mod.rs:96`](../../../packages/workflow_core/src/run_store/mod.rs#L96)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:161`](../../../packages/workflow_core/src/run_store/mod.rs#L161)
 
 挂起等待外部 signal / sleep 到期（sleep 有 deadline）。
 
@@ -151,7 +174,7 @@ Defined in: [`packages/workflow_core/src/run_store/mod.rs:96`](../../../packages
 pending_approval: Option<PendingApproval>
 ```
 
-Defined in: [`packages/workflow_core/src/run_store/mod.rs:99`](../../../packages/workflow_core/src/run_store/mod.rs#L99)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:164`](../../../packages/workflow_core/src/run_store/mod.rs#L164)
 
 挂起等待审批。
 
@@ -164,7 +187,7 @@ Defined in: [`packages/workflow_core/src/run_store/mod.rs:99`](../../../packages
 created_at: i64
 ```
 
-Defined in: [`packages/workflow_core/src/run_store/mod.rs:100`](../../../packages/workflow_core/src/run_store/mod.rs#L100)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:165`](../../../packages/workflow_core/src/run_store/mod.rs#L165)
 
 
 ***
@@ -175,7 +198,7 @@ Defined in: [`packages/workflow_core/src/run_store/mod.rs:100`](../../../package
 updated_at: i64
 ```
 
-Defined in: [`packages/workflow_core/src/run_store/mod.rs:101`](../../../packages/workflow_core/src/run_store/mod.rs#L101)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:166`](../../../packages/workflow_core/src/run_store/mod.rs#L166)
 
 ## Implementations
 
@@ -188,7 +211,7 @@ where
     TOutput: DeserializeOwned
 ```
 
-Defined in: [`packages/workflow_core/src/run_store/mod.rs:112`](../../../packages/workflow_core/src/run_store/mod.rs#L112)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:189`](../../../packages/workflow_core/src/run_store/mod.rs#L189)
 
 #### Returns
 

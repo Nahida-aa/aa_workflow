@@ -5,7 +5,7 @@ title: PendingApproval
 
 # Struct: PendingApproval
 
-Defined in: [`packages/workflow_core/src/run_store/mod.rs:32`](../../../packages/workflow_core/src/run_store/mod.rs#L32)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:36`](../../../packages/workflow_core/src/run_store/mod.rs#L36)
 
 挂起中的审批（对齐 TanStack `RunState.pendingApproval`）。我们的
 `approve` 用 key 作 `approval_id`；`title` 即挂起时给的理由。
@@ -18,7 +18,7 @@ Defined in: [`packages/workflow_core/src/run_store/mod.rs:32`](../../../packages
 step_id: Option<String>
 ```
 
-Defined in: [`packages/workflow_core/src/run_store/mod.rs:34`](../../../packages/workflow_core/src/run_store/mod.rs#L34)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:38`](../../../packages/workflow_core/src/run_store/mod.rs#L38)
 
 
 ***
@@ -29,7 +29,7 @@ Defined in: [`packages/workflow_core/src/run_store/mod.rs:34`](../../../packages
 approval_id: String
 ```
 
-Defined in: [`packages/workflow_core/src/run_store/mod.rs:35`](../../../packages/workflow_core/src/run_store/mod.rs#L35)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:39`](../../../packages/workflow_core/src/run_store/mod.rs#L39)
 
 
 ***
@@ -40,7 +40,7 @@ Defined in: [`packages/workflow_core/src/run_store/mod.rs:35`](../../../packages
 title: String
 ```
 
-Defined in: [`packages/workflow_core/src/run_store/mod.rs:36`](../../../packages/workflow_core/src/run_store/mod.rs#L36)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:40`](../../../packages/workflow_core/src/run_store/mod.rs#L40)
 
 
 ***
@@ -51,7 +51,21 @@ Defined in: [`packages/workflow_core/src/run_store/mod.rs:36`](../../../packages
 description: Option<String>
 ```
 
-Defined in: [`packages/workflow_core/src/run_store/mod.rs:37`](../../../packages/workflow_core/src/run_store/mod.rs#L37)
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:41`](../../../packages/workflow_core/src/run_store/mod.rs#L41)
+
+
+***
+
+### meta
+
+```rust
+meta: Option<Value>
+```
+
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:45`](../../../packages/workflow_core/src/run_store/mod.rs#L45)
+
+自由元数据（对齐 TanStack `RunState.pendingApproval.meta`，
+`types.ts:562`）。
 
 ## Trait Implementations
 

@@ -393,6 +393,11 @@ impl RunEventStream { async fn outcome(self) -> Result<RunOutcome, WorkflowError
   「drain 完 → `store.get_run_state(run_id)`」，逐行对应
   `collectWorkflowEvents` + `loadRun` + `classifyRun`。
 
+入参按**值**收（`run_workflow(opts: RunWorkflowOptions)`，上游
+`runWorkflow(options)` 同形）。中途为了不改 14 个调用点，曾经临时用过
+`impl Into<RunWorkflowOptions>` + `From<&RunWorkflowOptions>`——那是个只为
+省事的兼容垫片，API 未稳定就直接删掉收紧成按值了。
+
 ### 顺带修掉的三个既有 bug
 
 改成「状态从 store 读」之后，原本被事件路径掩盖的三个问题立刻暴露——它们本来

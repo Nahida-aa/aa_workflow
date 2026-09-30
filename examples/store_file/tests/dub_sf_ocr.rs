@@ -435,14 +435,14 @@ async fn dub_sf_ocr_continue_from_is_unsupported_on_new_contract() {
     let core_store =
         create_run_store_adapter(store.clone() as Arc<dyn WorkflowExecutionStore>);
     let out = run_workflow(
-        &RunWorkflowOptions::new(Arc::new(wf.clone()), core_store.clone()).input(dub_input()),
+        RunWorkflowOptions::new(Arc::new(wf.clone()), core_store.clone()).input(dub_input()),
     )
     .outcome().await
     .unwrap();
     let run_id = out.run_id.clone();
 
     let resumed = run_workflow(
-        &RunWorkflowOptions::new(Arc::new(wf.clone()), core_store)
+        RunWorkflowOptions::new(Arc::new(wf.clone()), core_store)
             .input(dub_input())
             .run_id(run_id.clone())
             .continue_from("tts"),

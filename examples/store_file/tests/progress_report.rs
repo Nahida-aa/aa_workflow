@@ -41,7 +41,7 @@ async fn drive(
     let seen = Arc::new(Mutex::new(Vec::new()));
     let sink = seen.clone();
     let out = run_workflow(
-        &RunWorkflowOptions::new(progress_report(), create_run_store_adapter(store.clone()))
+        RunWorkflowOptions::new(progress_report(), create_run_store_adapter(store.clone()))
             .input(serde_json::json!({ "rounds": ROUNDS, "tickMs": 5 }))
             .run_id(run_id)
             .publish(Some(Arc::new(move |_run_id: &str, e: WorkflowEvent| {
@@ -171,7 +171,7 @@ async fn resume_does_not_continue_the_progress_counter() {
     let input = serde_json::json!({ "rounds": ROUNDS, "tickMs": 5 });
 
     let first = run_workflow(
-        &RunWorkflowOptions::new(wf.clone(), create_run_store_adapter(store.clone()))
+        RunWorkflowOptions::new(wf.clone(), create_run_store_adapter(store.clone()))
             .input(input.clone())
             .run_id("r"),
     )
@@ -184,7 +184,7 @@ async fn resume_does_not_continue_the_progress_counter() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let sink = seen.clone();
     let second = run_workflow(
-        &RunWorkflowOptions::new(wf, create_run_store_adapter(store))
+        RunWorkflowOptions::new(wf, create_run_store_adapter(store))
             .input(input)
             .run_id("r")
             .publish(Some(Arc::new(move |_run_id: &str, e: WorkflowEvent| {

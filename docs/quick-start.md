@@ -52,7 +52,7 @@ fn charge_workflow() -> WorkflowDefinition<ChargeInput, serde_json::Value> {
 
 let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
 let outcome = run_workflow(
-    &RunWorkflowOptions::new(Arc::new(charge_workflow().into_workflow()), store)
+    RunWorkflowOptions::new(Arc::new(charge_workflow().into_workflow()), store)
         .input(serde_json::json!({ "amount": 4200, "userId": "cus_123" })),
 ).outcome().await?;
 
@@ -109,7 +109,7 @@ let wf = Workflow::new("order").handler(|ctx| async move {
 
 // 第一次 drive：停在审批点。
 let out = run_workflow(
-    &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+    RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
         .input(serde_json::json!({ "amount": 1500 }))
         .run_id("order-1"),
 ).outcome().await?;
@@ -119,7 +119,7 @@ assert_eq!(out.status, RunStatus::Paused);
 signal_run(store.as_ref(), "order-1", "large-order",
            serde_json::json!({ "approved": true }))?;
 let out = run_workflow(
-    &RunWorkflowOptions::new(Arc::new(wf.clone()), store)
+    RunWorkflowOptions::new(Arc::new(wf.clone()), store)
         .input(serde_json::json!({ "amount": 1500 }))
         .run_id("order-1"),
 ).outcome().await?;
@@ -244,7 +244,7 @@ resume 时引擎读 run 里的 `workflowVersion`，在 `[当前] + previous_vers
 
 ```rust
 let outcome = run_workflow(
-    &RunWorkflowOptions::new(Arc::new(wf.clone()), store)
+    RunWorkflowOptions::new(Arc::new(wf.clone()), store)
         .input(input)
         .run_id("run-1")
         .continue_from("charge"),   // 截断 charge 的终态 checkpoint 及后缀

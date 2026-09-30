@@ -708,7 +708,7 @@ mod tests {
         wf: &WorkflowDefinition<TInput, TOutput, TState, TCtxExt>,
         opts: impl Fn(AnyWorkflowDefinition, Arc<dyn RunStore>) -> RunWorkflowOptions,
     ) -> RunStatus {
-        run_workflow(&opts(wf.clone().into(), store.clone()))
+        run_workflow(opts(wf.clone().into(), store.clone()))
             .outcome().await
             .unwrap()
             .status
@@ -727,7 +727,7 @@ mod tests {
             .clone()
             .expect("测试应显式指定 run_id");
         signal_run(store.as_ref(), &run_id, step_id, payload).unwrap();
-        run_workflow(&opts(wf.clone().into(), store.clone()))
+        run_workflow(opts(wf.clone().into(), store.clone()))
             .outcome().await
             .unwrap()
     }
@@ -747,7 +747,7 @@ mod tests {
                 .run_id
                 .clone()
                 .expect("测试应显式指定 run_id");
-            let out = run_workflow(&opts(wf.clone().into(), store.clone()))
+            let out = run_workflow(opts(wf.clone().into(), store.clone()))
                 .outcome().await
                 .unwrap();
             if out.status != RunStatus::Paused {
@@ -788,7 +788,7 @@ mod tests {
         let wf = fulfillment_saga();
 
         let out = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({ "orderId": "o-1", "expedited": true })),
         )
         .outcome().await
@@ -825,7 +825,7 @@ mod tests {
 
         // run 1: charge 在 3 次重试后仍失败 → run Errored
         let out = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({ "orderId": "o-1" })),
         )
         .outcome().await
@@ -839,7 +839,7 @@ mod tests {
 
         // 普通 resume: 失败 checkpoint rethrow, 不再执行 charge
         let again = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({ "orderId": "o-1" }))
                 .run_id(run_id.clone()),
         )
@@ -855,7 +855,7 @@ mod tests {
         // continue_from charge: 截断 charge 的 StepFailed + 后缀, 前缀短路、后缀重跑
         payment_gateway::set_fail_always(false);
         let resumed = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({ "orderId": "o-1" }))
                 .run_id(run_id)
                 .continue_from("charge"),
@@ -890,7 +890,7 @@ mod tests {
 
         let input = serde_json::json!({ "days": 7 });
         let out = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone()).input(input.clone()),
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone()).input(input.clone()),
         )
         .outcome().await
         .unwrap();
@@ -902,7 +902,7 @@ mod tests {
 
         // 同 run_id resume：全部短路，不产生新 StepFinished
         let again = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(input.clone())
                 .run_id(run_id.clone()),
         )
@@ -917,7 +917,7 @@ mod tests {
 
         // continue_from render: render + send 重跑, scan-events 不重跑
         let cont = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(input)
                 .run_id(run_id)
                 .continue_from("render"),
@@ -1030,7 +1030,7 @@ mod tests {
         payment_gateway::reset();
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let out = run_workflow(
-            &RunWorkflowOptions::new(
+            RunWorkflowOptions::new(
                 approval_order(),
                 store.clone(),
             )
@@ -1256,7 +1256,7 @@ mod tests {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let wf = fulfillment();
         let out = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store)
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store)
                 .input(serde_json::json!({ "orderId": "o-1" }))
                 .run_id("fulfill:bad"),
         )
@@ -1280,7 +1280,7 @@ mod tests {
             .initialize(|_input| Ok(serde_json::json!({ "bogus": 1 })))
             .handler(|_ctx: WorkflowCtx| async move { Ok(serde_json::json!({})) });
         let out = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
         .outcome().await
@@ -1338,7 +1338,7 @@ mod tests {
             },
         );
         let out = run_workflow(
-            &RunWorkflowOptions::new(wf.clone(), store.clone())
+            RunWorkflowOptions::new(wf.clone(), store.clone())
                 .input(serde_json::json!({})),
         )
         .outcome().await
@@ -1543,7 +1543,7 @@ mod tests {
         )
         .unwrap();
         let out = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({ "amount": 5 }))
                 .run_id("state:edge"),
         )
@@ -1580,7 +1580,7 @@ mod tests {
 
         // Drive #1：挂起在 price-wait。
         let first = run_workflow(
-            &opts(wf.clone().into(), store.clone()).publish(Some(Arc::new(
+            opts(wf.clone().into(), store.clone()).publish(Some(Arc::new(
                 move |_run_id: &str, e: WorkflowEvent| sink.lock().unwrap().push(e.clone()),
             ))),
         )

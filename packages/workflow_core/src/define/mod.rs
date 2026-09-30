@@ -870,7 +870,7 @@ mod tests {
                 },
             );
         let out = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
         .outcome().await
@@ -894,7 +894,7 @@ mod tests {
             },
         );
         let out2 = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf2.clone()), store2)
+            RunWorkflowOptions::new(Arc::new(wf2.clone()), store2)
                 .input(serde_json::json!({})),
         )
         .outcome().await
@@ -944,7 +944,7 @@ mod tests {
                 });
         let store = Arc::new(InMemoryStore::new());
         let out = run_workflow(
-            &RunWorkflowOptions::new(wf.clone(), store)
+            RunWorkflowOptions::new(wf.clone(), store)
                 .input(serde_json::json!({})),
         )
         .outcome().await

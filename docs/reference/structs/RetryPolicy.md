@@ -5,7 +5,7 @@ title: RetryPolicy
 
 # Struct: RetryPolicy
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:390`](../../../packages/workflow_core/src/define/mod.rs#L390)
+Defined in: [`packages/workflow_core/src/define/mod.rs:449`](../../../packages/workflow_core/src/define/mod.rs#L449)
 
 ## Fields
 
@@ -15,7 +15,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:390`](../../../packages/w
 max_attempts: usize
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:392`](../../../packages/workflow_core/src/define/mod.rs#L392)
+Defined in: [`packages/workflow_core/src/define/mod.rs:451`](../../../packages/workflow_core/src/define/mod.rs#L451)
 
 Total attempts, including the first. 1 == no retry.
 
@@ -28,7 +28,7 @@ Total attempts, including the first. 1 == no retry.
 backoff: Backoff
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:393`](../../../packages/workflow_core/src/define/mod.rs#L393)
+Defined in: [`packages/workflow_core/src/define/mod.rs:452`](../../../packages/workflow_core/src/define/mod.rs#L452)
 
 ## Implementations
 
@@ -38,7 +38,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:393`](../../../packages/w
 pub fn new(max_attempts: usize, backoff: Backoff) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:397`](../../../packages/workflow_core/src/define/mod.rs#L397)
+Defined in: [`packages/workflow_core/src/define/mod.rs:456`](../../../packages/workflow_core/src/define/mod.rs#L456)
 
 #### Parameters
 

@@ -9,7 +9,7 @@ title: exec_uuid
 pub fn exec_uuid(inner: &Arc<EngineRuntime>) -> Result<String>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:485`](../../../packages/workflow_core/src/engine/mod.rs#L485)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:558`](../../../packages/workflow_core/src/engine/mod.rs#L558)
 
 Deterministic id behind [`WorkflowCtx::uuid`](../structs/BaseCtx.md)
 (TanStack `ctx.uuid`): a generated UUIDv4, recorded as a `UuidRecorded`

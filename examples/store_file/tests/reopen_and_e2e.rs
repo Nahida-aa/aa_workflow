@@ -135,7 +135,7 @@ async fn drives_a_parallel_workflow() {
     let core_store = create_run_store_adapter(store.clone());
 
     let out = run_workflow(
-        &RunWorkflowOptions::new(wf.clone(), core_store)
+        RunWorkflowOptions::new(wf.clone(), core_store)
             .input(serde_json::json!({ "n": 1 })),
     )
     .outcome().await

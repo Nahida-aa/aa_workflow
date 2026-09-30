@@ -83,7 +83,7 @@ async fn slow_publisher_does_not_stall_the_engine() {
     );
 
     let out = run_workflow(
-        &RunWorkflowOptions::new(wf, create_run_store_adapter(store))
+        RunWorkflowOptions::new(wf, create_run_store_adapter(store))
             .input(serde_json::json!({}))
             .run_id("r")
             .async_publish(move |_run_id, _e| {
@@ -128,7 +128,7 @@ async fn async_publisher_can_await_without_blocking_the_runtime() {
     let sink = seen.clone();
 
     let out = run_workflow(
-        &RunWorkflowOptions::new(three_steps(), create_run_store_adapter(store))
+        RunWorkflowOptions::new(three_steps(), create_run_store_adapter(store))
             .input(serde_json::json!({}))
             .run_id("r")
             .async_publish(move |_run_id, e| {
@@ -156,7 +156,7 @@ async fn delivery_order_matches_production_order() {
     let sink = seen.clone();
 
     run_workflow(
-        &RunWorkflowOptions::new(three_steps(), create_run_store_adapter(store))
+        RunWorkflowOptions::new(three_steps(), create_run_store_adapter(store))
             .input(serde_json::json!({}))
             .run_id("r")
             .async_publish(move |_run_id, e| {
@@ -191,7 +191,7 @@ async fn terminal_event_is_delivered_before_run_workflow_returns() {
     let sink = seen.clone();
 
     let out = run_workflow(
-        &RunWorkflowOptions::new(three_steps(), create_run_store_adapter(store))
+        RunWorkflowOptions::new(three_steps(), create_run_store_adapter(store))
             .input(serde_json::json!({}))
             .run_id("r")
             .async_publish(move |_run_id, e| {
@@ -237,7 +237,7 @@ async fn paused_path_also_drains_the_queue() {
     );
 
     let out = run_workflow(
-        &RunWorkflowOptions::new(wf, create_run_store_adapter(store))
+        RunWorkflowOptions::new(wf, create_run_store_adapter(store))
             .input(serde_json::json!({}))
             .run_id("r")
             .async_publish(move |_run_id, e| {
@@ -272,7 +272,7 @@ async fn event_moves_into_the_future_with_no_extra_clone() {
     let sink = done.clone();
 
     run_workflow(
-        &RunWorkflowOptions::new(three_steps(), create_run_store_adapter(store))
+        RunWorkflowOptions::new(three_steps(), create_run_store_adapter(store))
             .input(serde_json::json!({}))
             .run_id("r")
             .async_publish(move |_run_id, ev| {

@@ -118,7 +118,7 @@ external decision.
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:115`](../../../packages/workflow_core/src/event.rs#L115)
+Defined in: [`packages/workflow_core/src/event.rs:117`](../../../packages/workflow_core/src/event.rs#L117)
 
 Checkpoint (persisted): a signal was delivered for a paused run
 (see [`signal_run`](../functions/signal_run.md)). Resolves the pending
@@ -134,7 +134,7 @@ Checkpoint (persisted): a signal was delivered for a paused run
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:122`](../../../packages/workflow_core/src/event.rs#L122)
+Defined in: [`packages/workflow_core/src/event.rs:124`](../../../packages/workflow_core/src/event.rs#L124)
 
 Observability only (not persisted): 0.0..=1.0 progress signal.
 
@@ -147,7 +147,7 @@ Observability only (not persisted): 0.0..=1.0 progress signal.
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:131`](../../../packages/workflow_core/src/event.rs#L131)
+Defined in: [`packages/workflow_core/src/event.rs:133`](../../../packages/workflow_core/src/event.rs#L133)
 
 Observability only (not persisted): `ctx.emit` fan-out. Reaches only
 the publisher, never the log — so it never becomes part of replay
@@ -162,7 +162,7 @@ the publisher, never the log — so it never becomes part of replay
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:140`](../../../packages/workflow_core/src/event.rs#L140)
+Defined in: [`packages/workflow_core/src/event.rs:142`](../../../packages/workflow_core/src/event.rs#L142)
 
 Checkpoint (persisted): `ctx.now()` recorded a wall-clock timestamp.
 On replay the cached value is served so a run sees the same clock
@@ -177,7 +177,7 @@ across resumes (TanStack `NOW_RECORDED`).
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:148`](../../../packages/workflow_core/src/event.rs#L148)
+Defined in: [`packages/workflow_core/src/event.rs:150`](../../../packages/workflow_core/src/event.rs#L150)
 
 Checkpoint (persisted): `ctx.uuid()` recorded a generated id. On
 replay the same id is served (TanStack `UUID_RECORDED`).
@@ -191,7 +191,7 @@ replay the same id is served (TanStack `UUID_RECORDED`).
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:161`](../../../packages/workflow_core/src/event.rs#L161)
+Defined in: [`packages/workflow_core/src/event.rs:163`](../../../packages/workflow_core/src/event.rs#L163)
 
 Observability only (not persisted): RFC 6902 JSON Patch describing
 `ctx.state` changes since the last durable boundary (TanStack
@@ -209,7 +209,7 @@ delta 语义见 `crate::engine::state_diff`。
 pub fn step_id(&self) -> Option<&str>
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:169`](../../../packages/workflow_core/src/event.rs#L169)
+Defined in: [`packages/workflow_core/src/event.rs:171`](../../../packages/workflow_core/src/event.rs#L171)
 
 #### Returns
 
@@ -224,7 +224,7 @@ Defined in: [`packages/workflow_core/src/event.rs:169`](../../../packages/workfl
 pub fn ts(&self) -> i64
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:188`](../../../packages/workflow_core/src/event.rs#L188)
+Defined in: [`packages/workflow_core/src/event.rs:190`](../../../packages/workflow_core/src/event.rs#L190)
 
 事件发生时间（每个变体都带 `ts`，对齐 TS 侧 `event.ts`）。
 
@@ -241,7 +241,7 @@ Defined in: [`packages/workflow_core/src/event.rs:188`](../../../packages/workfl
 pub fn type_name(&self) -> &'static str
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:207`](../../../packages/workflow_core/src/event.rs#L207)
+Defined in: [`packages/workflow_core/src/event.rs:209`](../../../packages/workflow_core/src/event.rs#L209)
 
 对齐 TS 侧 `event.type`）。
 

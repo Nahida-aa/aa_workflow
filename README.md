@@ -97,7 +97,7 @@ pub fn fulfillment_saga() -> WorkflowDefinition<SagaInput, serde_json::Value> {
 ```rust
 let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
 let outcome = run_workflow(
-    &RunWorkflowOptions::new(Arc::new(workflow.clone()), store.clone())  // 必填两项
+    RunWorkflowOptions::new(Arc::new(workflow.clone()), store.clone())  // 必填两项
         .input(json!({ "orderId": "A-1" }))
         .run_id("run_1")          // 复用 run_id ⇒ resume
         .continue_from("charge")  // 从该 step 截断后重跑后缀（本地扩展，见下）

@@ -45,6 +45,20 @@ deadline: Option<i64>
 
 Defined in: [`packages/workflow_core/src/run_store/mod.rs:26`](../../../packages/workflow_core/src/run_store/mod.rs#L26)
 
+
+***
+
+### meta
+
+```rust
+meta: Option<Value>
+```
+
+Defined in: [`packages/workflow_core/src/run_store/mod.rs:30`](../../../packages/workflow_core/src/run_store/mod.rs#L30)
+
+自由元数据（对齐 TanStack `RunState.waitingFor.meta`，
+`types.ts:558`），host / UI 拿去渲染，不参与引擎判定。
+
 ## Trait Implementations
 
 - `impl Borrow for WaitForState`

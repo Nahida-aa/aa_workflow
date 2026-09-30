@@ -1,4 +1,5 @@
 - 需要有批判性思维(可以质疑)
+- api 未稳定, 可以修改测试
 - 另外文件可以放项目下的 tmp/ 目录
 
 ## Store adapter 实现哪个契约：`WorkflowExecutionStore`（不是 `RunStore`）
@@ -131,7 +132,7 @@ if let Some(i) = cut {
 |          | `RunState<TInput, TOutput>`                                                                      | `ctx.state: TState`                                   |
 | -------- | ------------------------------------------------------------------------------------------------ | ----------------------------------------------------- |
 | 是什么   | run 的**持久化元数据信封**（store 存它）                                                         | workflow 的**业务状态**（handler 用）                 |
-| 定义处   | `packages/workflow_core/src/run_store/mod.rs`（上游 `types.ts:540`）                                      | `BaseCtx<TInput, TState>` 的 `state` 字段             |
+| 定义处   | `packages/workflow_core/src/run_store/mod.rs`（上游 `types.ts:540`）                             | `BaseCtx<TInput, TState>` 的 `state` 字段             |
 | 怎么声明 | 固定结构，无 schema                                                                              | `.state::<T>()` + `.initialize(...)`                  |
 | 谁消费   | **store**（路由 / 恢复 / 审计）                                                                  | **handler**（`ctx.state.count += 1`）                 |
 | 存哪     | **持久化**（表 `workflow_run_states` / `workflow_runs`）                                         | **不持久化**，每次 resume 由 `initialize(input)` 重建 |
@@ -169,10 +170,10 @@ if let Some(i) = cut {
 机制：replay 时已 checkpoint 的 step **直接返回日志里的结果，闭包不被调用**
 （上游 `replay-and-resume.md:31`：`fn` is NOT called）。它把代码分成两类：
 
-| | step 闭包 `ctx.step(id, fn)` | handler 体内 |
-| --- | --- | --- |
-| replay 时 | **被跳过** | **重跑** |
-| 副作用 | 只能通过**返回值**输出 | 会被重新施加 |
+|           | step 闭包 `ctx.step(id, fn)` | handler 体内 |
+| --------- | ---------------------------- | ------------ |
+| replay 时 | **被跳过**                   | **重跑**     |
+| 副作用    | 只能通过**返回值**输出       | 会被重新施加 |
 
 所以 **step 闭包不要写 `ctx.state`**：那是「未被记录的副作用」—— 不在返回值里，
 日志里也没有，而 state 每次 resume 都由 `initialize(input)` 重建
