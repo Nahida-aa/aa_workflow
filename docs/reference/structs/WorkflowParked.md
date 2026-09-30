@@ -5,7 +5,7 @@ title: WorkflowParked
 
 # Struct: WorkflowParked
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:54`](../../../packages/workflow_core/src/engine/mod.rs#L54)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:55`](../../../packages/workflow_core/src/engine/mod.rs#L55)
 
 Internal sentinel: the engine parked the run at a durable wait point
 ([`exec_pause`](../functions/exec_pause.md)). The pause checkpoint and the `Paused` projection were

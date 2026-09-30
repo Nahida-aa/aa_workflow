@@ -37,8 +37,18 @@ use crate::run_store::{RunState, RunStore};
 /// ```ignore
 /// .async_publish(|run_id, ev| async move { sink.send(run_id, ev).await })
 /// ```
+/// run 标识（上游 core 写 `string`，这里给个具名，和 runtime 的 `RunId` 同义）。
+///
+/// 只用在**公开入口**上——`PublisherFn` 的回调契约、`RunWorkflowOptions.run_id`。
+/// 事件与 store 结构体里那几百处仍写 `String`：它们是 serde 面对的形状，
+/// 上游也一律 `string`，改名的文档收益抵不上 290 处 churn。
+pub type RunId = String;
+
+/// 事件 fan-out 回调。**按引用**收 run id（上游按值，但 TS 传引用不拷贝，
+/// Rust 按值就得多 clone 一次）；事件按值收，因为 core 每次都要 clone 出去
+/// （`RunEventStream` 要在 poll 里重放同一份）。
 pub type PublisherFn =
-    Arc<dyn Fn(&str, WorkflowEvent) -> crate::define::BoxFuture<'static, ()> + Send + Sync>;
+    Arc<dyn Fn(&RunId, WorkflowEvent) -> crate::define::BoxFuture<'static, ()> + Send + Sync>;
 
 /// `run_workflow` / `run_workflow_sync` 的全部入参（对齐上游
 /// `runWorkflow(options)` 的**按值**收法，见 `engine/run-workflow.ts:34-72`）。
@@ -87,7 +97,7 @@ pub struct RunWorkflowOptions {
     pub run_store: Arc<dyn RunStore>,
 
     /// 复用该 run_id ⇒ resume（成功 step 短路、失败 rethrow）。
-    pub run_id: Option<String>,
+    pub run_id: Option<RunId>,
     /// run 输入。默认 `Value::Null`。
     pub input: serde_json::Value,
     /// 命中即停（本地扩展；上游用 handler 内 early `return`）。
@@ -270,9 +280,9 @@ impl RunWorkflowOptions {
     /// 事件**按值**传入，与 `async_publish` 同一套所有权语义（只有投递时机
     /// 不同），这样两条路径的心智模型是一致的：`ev` 归你，随便 move 进
     /// `async move`、随便丢给线程、随便 `join()`。
-    pub fn publish(mut self, v: Option<Arc<dyn Fn(&str, WorkflowEvent) + Send + Sync>>) -> Self {
+    pub fn publish(mut self, v: Option<Arc<dyn Fn(&RunId, WorkflowEvent) + Send + Sync>>) -> Self {
         self.publish = v.map(|f| {
-            Arc::new(move |run_id: &str, ev: WorkflowEvent| -> crate::define::BoxFuture<'static, ()> {
+            Arc::new(move |run_id: &RunId, ev: WorkflowEvent| -> crate::define::BoxFuture<'static, ()> {
                 let out = f(run_id, ev);
                 Box::pin(async move { out })
             }) as PublisherFn
@@ -296,10 +306,10 @@ impl RunWorkflowOptions {
     /// 这里不会再多一次引擎侧克隆）。
     pub fn async_publish<F, Fut>(mut self, f: F) -> Self
     where
-        F: Fn(&str, WorkflowEvent) -> Fut + Send + Sync + 'static,
+        F: Fn(&RunId, WorkflowEvent) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
-        self.publish = Some(Arc::new(move |run_id: &str, ev: WorkflowEvent| {
+        self.publish = Some(Arc::new(move |run_id: &RunId, ev: WorkflowEvent| {
             Box::pin(f(run_id, ev)) as crate::define::BoxFuture<'static, ()>
         }));
         self
@@ -1468,7 +1478,6 @@ mod tests {
         .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Aborted);
-
         let (err, code) = store
             .get_events("code:abort")
             .unwrap()
@@ -1482,6 +1491,43 @@ mod tests {
         assert_eq!(err.name, "Aborted");
     }
 
+    /// publisher 收 `&RunId`（具名别名）而**不是** `&str`，且这不该带来 clone。
+    ///
+    /// 这条容易被"顺手优化"掉：`RunId = String`，所以 `&RunId` 就是 `&String`，
+    /// 看着比 `&str` 重。但 `RunEventStream` 本来就持有一个 owned
+    /// `run_id: String`（`run_workflow.rs:496`），poll 里传的是 `&me.run_id`——
+    /// 换成 `&RunId` 后**零分配**，因为签名要的是 `&String` 而它手上就是 `&String`。
+    ///
+    /// 反过来若把签名退回 `&str`，runtime 侧要拿 `&RunId` 喂 publisher 就得
+    /// 每个事件 `String::from` 一次——白付一次分配，就为省下一个名字。
+    #[tokio::test]
+    async fn publisher_run_id_is_named_and_borrowed() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        // 收 &RunId 的回调能拿到具体类型（不是靠 deref 蒙混）
+        let got: Arc<Mutex<Option<RunId>>> = Arc::new(Mutex::new(None));
+        let g = got.clone();
+        let publish: Arc<dyn Fn(&RunId, WorkflowEvent) + Send + Sync> = {
+            Arc::new(move |run_id: &RunId, _ev: WorkflowEvent| {
+                *g.lock().unwrap() = Some(run_id.clone());
+            })
+        };
+        let wf = WorkflowDefinition::new("named").handler(|ctx: WorkflowCtx| async move {
+            ctx.step("s", |_sc: StepCtx| async move { Ok(serde_json::json!({})) })
+                .await
+        });
+        run_workflow(
+            RunWorkflowOptions::new(wf, store)
+                .input(serde_json::json!({}))
+                .run_id("named:1")
+                .publish(Some(publish)),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        assert_eq!(*got.lock().unwrap(), Some(RunId::from("named:1")));
+    }
+
+
     /// `publish` 收到的 `run_id` 就是 run 身份本身（上游把 runId 单列成一个参数，
     /// `run-workflow.ts:41`）。这里特意用 `Custom` 事件验：`Custom` 的
     /// `event.run_id()` 字段是宿主自己填的，引擎无从保证它对——所以 run 身份
@@ -1490,9 +1536,9 @@ mod tests {
     async fn publish_receives_run_id_including_custom_events() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
-        let publish: Arc<dyn Fn(&str, WorkflowEvent) + Send + Sync> = {
+        let publish: Arc<dyn Fn(&RunId, WorkflowEvent) + Send + Sync> = {
             let seen = seen.clone();
-            Arc::new(move |run_id: &str, ev: WorkflowEvent| {
+            Arc::new(move |run_id: &RunId, ev: WorkflowEvent| {
                 seen.lock()
                     .unwrap()
                     .push((run_id.to_string(), ev.type_name().to_string()))
@@ -1530,9 +1576,9 @@ mod tests {
     async fn init_failure_publishes_validation_code_without_appending() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let seen: Arc<Mutex<Vec<WorkflowEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let publish: Arc<dyn Fn(&str, WorkflowEvent) + Send + Sync> = {
+        let publish: Arc<dyn Fn(&RunId, WorkflowEvent) + Send + Sync> = {
             let seen = seen.clone();
-            Arc::new(move |_run_id: &str, ev| seen.lock().unwrap().push(ev))
+            Arc::new(move |_run_id: &RunId, ev| seen.lock().unwrap().push(ev))
         };
         let wf = WorkflowDefinition::new("bad-init")
             .initialize(|_| Err(anyhow::anyhow!("nope")))

@@ -9,7 +9,7 @@ title: cancel_run
 pub fn cancel_run(store: &dyn RunStore, run_id: &str) -> Result<(), WorkflowError>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:99`](../../../packages/workflow_core/src/engine/mod.rs#L99)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:100`](../../../packages/workflow_core/src/engine/mod.rs#L100)
 
 Cancels a live or parked run: flips its state to terminal `Aborted`. The
 engine spots it on its next step/attempt boundary and returns

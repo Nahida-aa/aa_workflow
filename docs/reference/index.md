@@ -75,6 +75,7 @@ title: aa_workflow_core
 - [PayloadValidator](type-aliases/PayloadValidator.md)
 - [PublisherFn](type-aliases/PublisherFn.md)
 - [ResourceKey](type-aliases/ResourceKey.md)
+- [RunId](type-aliases/RunId.md)
 - [WorkflowCtx](type-aliases/WorkflowCtx.md)
 - [WorkflowHandler](type-aliases/WorkflowHandler.md)
 ## Constants

@@ -6,11 +6,11 @@
 
 use std::sync::Arc;
 
-use aa_workflow_core::{RunOutcome, RunStore, RunWorkflowOptions, WorkflowDefinition, WorkflowEvent, run_workflow};
+use aa_workflow_core::{RunId, RunOutcome, RunStore, RunWorkflowOptions, WorkflowDefinition, WorkflowEvent, run_workflow};
 
 /// 可选的事件订阅者（每个 `ctx.step` 落盘事件都会回调）。首参 `run_id` 由
 /// core 直接给出（同 [`aa_workflow_core::RunWorkflowOptions::publish`]）。
-pub type EventSubscriberFn = Arc<dyn Fn(&str, WorkflowEvent) + Send + Sync>;
+pub type EventSubscriberFn = Arc<dyn Fn(&RunId, WorkflowEvent) + Send + Sync>;
 
 /// 把事件打到 tracing 的默认订阅者（`examples.runtime` target）。
 pub fn tracing_publish() -> EventSubscriberFn {

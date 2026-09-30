@@ -44,7 +44,7 @@ async fn drive(
         RunWorkflowOptions::new(progress_report(), create_run_store_adapter(store.clone()))
             .input(serde_json::json!({ "rounds": ROUNDS, "tickMs": 5 }))
             .run_id(run_id)
-            .publish(Some(Arc::new(move |_run_id: &str, e: WorkflowEvent| {
+            .publish(Some(Arc::new(move |_run_id: &aa_workflow_core::RunId, e: WorkflowEvent| {
                 sink.lock().unwrap().push(e.clone())
             }))),
     )
@@ -187,7 +187,7 @@ async fn resume_does_not_continue_the_progress_counter() {
         RunWorkflowOptions::new(wf, create_run_store_adapter(store))
             .input(input)
             .run_id("r")
-            .publish(Some(Arc::new(move |_run_id: &str, e: WorkflowEvent| {
+            .publish(Some(Arc::new(move |_run_id: &aa_workflow_core::RunId, e: WorkflowEvent| {
                 sink.lock().unwrap().push(e.clone())
             }))),
     )

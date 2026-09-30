@@ -9,7 +9,7 @@ title: exec_pause_with
 pub async fn exec_pause_with(inner: &Arc<EngineRuntime>, step_id: &str, signal_name: &str, reason: &str, deadline: Option<i64>, meta: Option<Value>, validator: Option<PayloadValidator>) -> Result<Value>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:630`](../../../packages/workflow_core/src/engine/mod.rs#L630)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:631`](../../../packages/workflow_core/src/engine/mod.rs#L631)
 
 [`exec_pause`](exec_pause.md) 的完整形态：额外带 `meta`（落进 `StepPaused` checkpoint 与
 `RunState` 的三处投影）和 `validator`（恢复时校验 payload 形状）。

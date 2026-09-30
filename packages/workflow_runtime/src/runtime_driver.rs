@@ -117,8 +117,11 @@ impl WorkflowRegistry for HashMap<WorkflowId, WorkflowRegistration> {
 /// `max_events` 计数），改成 async 会把收集也拖成异步，没好处。需要落盘 / 发网络
 /// 走 core 的 `RunWorkflowOptions::async_publish`。
 ///
-/// 事件按 `&WorkflowEvent` **借**给回调，不强制调用方 clone（上游按值）。
-pub type WorkflowRuntimeEventPublisher = Arc<dyn Fn(&str, &WorkflowEvent) + Send + Sync>;
+/// run id 按 `&RunId` **借**给回调（上游按值 `RunId`，但 TS 传引用不拷贝，
+/// Rust 按值就得多 clone 一次，而这是每个事件都走的热路径）。`RunId` 与
+/// core 的 `RunId`、runtime 的 `RunId` 是同一个 `String` 别名，所以 core 那边
+/// 持有的 `&String` 能直接传进来，**零分配**。
+pub type WorkflowRuntimeEventPublisher = Arc<dyn Fn(&RunId, &WorkflowEvent) + Send + Sync>;
 
 /// 注册表类型带在定义上；Rust 无 keyof，先做形状对齐（start_run 的 id 仍按
 /// 注册表运行期查找），按 id 校验 input 的类型安全留待后续设计。
@@ -380,7 +383,7 @@ fn combine_publishers(
             if Arc::ptr_eq(&c, &r) {
                 return Some(c);
             }
-            Some(Arc::new(move |run_id: &str, event: &WorkflowEvent| {
+            Some(Arc::new(move |run_id: &RunId, event: &WorkflowEvent| {
                 c(run_id, event);
                 r(run_id, event);
             }))
@@ -928,10 +931,10 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         // 所以这里不必再自己 capture 一份——闭包首参就是它。
         // 合并在汇合点做：config 级在前、单次级在后，同一个只调一次。
         let runtime_publish = combine_publishers(self.config.publish.clone(), args.publish.clone());
-        let publish: Arc<dyn Fn(&str, WorkflowEvent) + Send + Sync> = {
+        let publish: Arc<dyn Fn(&RunId, WorkflowEvent) + Send + Sync> = {
             let collected = collected.clone();
             let total = total.clone();
-            Arc::new(move |run_id: &str, event: WorkflowEvent| {
+            Arc::new(move |run_id: &RunId, event: WorkflowEvent| {
                 let count = total.fetch_add(1, Ordering::Relaxed);
                 let keep = include_events && max_events.map(|m| count < m).unwrap_or(true);
                 if keep {
@@ -1219,22 +1222,22 @@ mod driver_tests {
     fn combine_publishers_semantics() {
         assert!(combine_publishers(None, None).is_none(), "两个都没有不该造空闭包");
 
-        let only_cfg = combine_publishers(Some(Arc::new(|_: &str, _: &WorkflowEvent| {})), None);
+        let only_cfg = combine_publishers(Some(Arc::new(|_: &RunId, _: &WorkflowEvent| {})), None);
         assert!(only_cfg.is_some(), "只有 config 级时应原样返回");
 
-        let only_req = combine_publishers(None, Some(Arc::new(|_: &str, _: &WorkflowEvent| {})));
+        let only_req = combine_publishers(None, Some(Arc::new(|_: &RunId, _: &WorkflowEvent| {})));
         assert!(only_req.is_some(), "只有单次级时应原样返回");
 
         // 同一个 Arc 配在两处 ⇒ 只调一次
         let calls = Arc::new(std::sync::Mutex::new(0usize));
         let c1 = calls.clone();
         let shared: WorkflowRuntimeEventPublisher =
-            Arc::new(move |_: &str, _: &WorkflowEvent| {
+            Arc::new(move |_: &RunId, _: &WorkflowEvent| {
                 *c1.lock().unwrap() += 1;
             });
         let combined = combine_publishers(Some(shared.clone()), Some(shared.clone()))
             .expect("同一 publisher 仍应产出回调");
-        combined("r", &WorkflowEvent::RunFinished {
+        combined(&RunId::from("r"), &WorkflowEvent::RunFinished {
             ts: 0,
             run_id: "r".into(),
             output: None,
@@ -1244,15 +1247,15 @@ mod driver_tests {
         // 两个不同 ⇒ 都调，且配置级在前
         let order = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
         let o1 = order.clone();
-        let cfg: WorkflowRuntimeEventPublisher = Arc::new(move |_: &str, _: &WorkflowEvent| {
+        let cfg: WorkflowRuntimeEventPublisher = Arc::new(move |_: &RunId, _: &WorkflowEvent| {
             o1.lock().unwrap().push("cfg");
         });
         let o2 = order.clone();
-        let req: WorkflowRuntimeEventPublisher = Arc::new(move |_: &str, _: &WorkflowEvent| {
+        let req: WorkflowRuntimeEventPublisher = Arc::new(move |_: &RunId, _: &WorkflowEvent| {
             o2.lock().unwrap().push("req");
         });
         let combined = combine_publishers(Some(cfg), Some(req)).unwrap();
-        combined("r", &WorkflowEvent::RunFinished {
+        combined(&RunId::from("r"), &WorkflowEvent::RunFinished {
             ts: 0,
             run_id: "r".into(),
             output: None,
@@ -1280,12 +1283,12 @@ mod driver_tests {
         let req_hits = Arc::new(std::sync::Mutex::new(0usize));
         let c = cfg_hits.clone();
         let config_publish: WorkflowRuntimeEventPublisher =
-            Arc::new(move |_: &str, _: &WorkflowEvent| {
+            Arc::new(move |_: &RunId, _: &WorkflowEvent| {
                 *c.lock().unwrap() += 1;
             });
         let r = req_hits.clone();
         let per_call_publish: WorkflowRuntimeEventPublisher =
-            Arc::new(move |_: &str, _: &WorkflowEvent| {
+            Arc::new(move |_: &RunId, _: &WorkflowEvent| {
                 *r.lock().unwrap() += 1;
             });
 

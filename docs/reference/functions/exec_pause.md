@@ -9,7 +9,7 @@ title: exec_pause
 pub async fn exec_pause(inner: &Arc<EngineRuntime>, step_id: &str, signal_name: &str, reason: &str, deadline: Option<i64>) -> Result<Value>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:602`](../../../packages/workflow_core/src/engine/mod.rs#L602)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:603`](../../../packages/workflow_core/src/engine/mod.rs#L603)
 
 Durable wait implemented by [`WorkflowCtx::approve`](../structs/BaseCtx.md)
 / [`WorkflowCtx::sleep`](../structs/BaseCtx.md) /

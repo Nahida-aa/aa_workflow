@@ -5,7 +5,7 @@ title: StepHalt
 
 # Struct: StepHalt
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:36`](../../../packages/workflow_core/src/engine/mod.rs#L36)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:37`](../../../packages/workflow_core/src/engine/mod.rs#L37)
 
 Internal sentinel: the engine stopped driving the handler after
 `target_step` succeeded. Becomes a `Finished` run, never `Errored`.
