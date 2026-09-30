@@ -199,13 +199,21 @@ publisher 回调、从不 `append`。
 
 ### 顺带：哪些事件落盘，哪些不落
 
-查这个问题时容易误以为「Started/Finished 都记着」。实际只有 5 类事件 `append`
-进日志（`engine/mod.rs` 里的 5 处 `inner.append`）：
+查这个问题时容易误以为「Started/Finished 都记着」。实际是 **step 层 5 类 + run 终局
+2 类** `append` 进日志（`engine/mod.rs` 里 5 处 `inner.append` 写 step/checkpoint，
+`run_workflow.rs` 另有 2 处写 run 终局）：
 
 | 落盘 | 仅 `publish`（emit-only） |
 | --- | --- |
 | `STEP_FINISHED` / `STEP_FAILED` / `STEP_PAUSED` | `RUN_STARTED` / `STEP_STARTED` |
 | `NOW_RECORDED` / `UUID_RECORDED` | `STEP_PROGRESS` / `CUSTOM` / `STATE_DELTA` |
+| `RUN_FINISHED` / `RUN_ERRORED` | |
+
+⚠️ 曾把这份表写成「只有 5 类」（只数了 `engine/mod.rs`、漏了 `run_workflow.rs`
+的 run 终局），并据此断言「日志里查不到 run 层面的结局」。**那句是错的**：
+`examples/store_file/src/progress_report.rs` 的测试实跑日志，
+`events.jsonl` 里 `STEP_FINISHED` 后面紧跟着 `RUN_FINISHED`。
+`init_failed` 那条 `RUN_ERRORED` 只 `publish` 不 `append`（此时还没有日志可写）。
 
 后果值得知道：**进程在 step 中途被杀，日志里查不到「当时在跑哪个 step」** ——
 最后一条只是上一个 step 的 Finished。这不违反一致性（那个 step 重来即可），但想诊断

@@ -140,6 +140,127 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
    需要 step 归因时用 `progress`。示例见 `examples/store_file/src/progress_report.rs`。
    背景见 `docs/concepts/ctx-state.md`「那 step 内部的进度呢？」。
 
+## 完整分歧清单（逐符号实测，2026-09-30）
+
+本节是**实测**的：把本仓 `workflow_core` 的公开导出逐个拿到上游
+`workflow-core/src` 里查同名/同义符号。此前只有上面那 6 条散落在正文里，
+漏了不少，补齐如下。判定标准是「上游 grep 命中数 = 0」。
+
+### A. 上游零对应物（纯自研）
+
+| 本仓 | 上游实测 | 性质 |
+| --- | --- | --- |
+| `resource` 模块：`Gate` / `GateGuard` / `ResourceKey` | `rg -c resource` = **0 文件** | 并发门原语（见上节 3） |
+| `up_to_date`（`StepOptions`） | `upToDate` = **0** | make 式 freshness（见上节 4） |
+| `target_step` | 仅 `run-workflow.ts:1412` 一个**同名局部变量**，非选项 | 见上节 2 |
+| `continue_from` + `RunStore::truncate_log_at_step` | `continueFrom` = **0**；上游 `RunStore` 只有 6 个方法 | 见上节 1 |
+| `cancel_run` | `cancelRun` = **0** | 取消一个 run（写 `Aborted` 终局）；上游只有 `AbortSignal` |
+| `signal_run` / `signal_event` | `signalEvent` = **0**；上游 `RunStore` 接口**无投递方法** | 上游只有 ctx 侧 `waitForEvent`，**投递侧无公开入口** |
+| `select_workflow_version` + `previous_versions` + `WorkflowVersionMismatch` | = **0** | **正确性保护**，非便利功能（见下） |
+| `StepState` + `fold_step_states` | `StepState` = **0 文件** | 事件折叠成 per-step 状态投影；上游有 `StepAttempt` 但无 `StepState` |
+| `StepProgress` + `StepCtx::progress` | = **0** | 见上节 6 |
+| `run_workflow_sync` | = **0** | 阻塞入口；上游纯 async |
+
+`select_workflow_version` 值得单独强调：它**不是便利功能**。版本化 run 的 handler
+代码已经变了，用当前版本重放会产生与原始 run 不一致的副作用（step 集合、顺序、
+幂等键都可能不同）——**静默回退是 determinism violation**，所以宁可返回
+`WorkflowVersionMismatch` 终局错误。对照上游时找不到对端是正常的。
+
+### B. 上游有内部件，本仓提前导出了
+
+| 本仓 | 上游 |
+| --- | --- |
+| `snapshot_state` | `state-diff.ts:18 export function snapshotState` —— 有 `export`，但 `index.ts` **未转出** |
+| `diff_state` | `state-diff.ts:29 export function diffState` —— 同上 |
+| `Operation` | `index.ts:31` **确实导出**（type-only） |
+
+即：这两个函数在上游是「模块内可用、包根拿不到」，本仓直接放进了公共 API。
+
+### C. 同一概念，形状不同
+
+- **`RunStore`**：本仓多一个 `truncate_log_at_step`（**必需方法**，不是默认实现
+  ——不支持要报 `StoreError::Io`，不许静默 no-op，否则 `continue_from` 会看起来
+  成功、实际全部短路）
+- **`RunState`**：本仓 `waiting_for` / `pending_approval` 是两个具名槽；上游用
+  `awaiting: RunAwaitable[]`（数组 + `type` 判别式）作**规范形**，两个具名字段是
+  **镜像**。详见下一节——这是**真缺口**
+- **错误**：本仓 `StoreError` 枚举；上游只有 `LogConflictError` 一个 class
+- **`RetryPolicy`**：本仓具名 struct；上游内联 union（`'exponential' | 'fixed' | fn`）
+
+## 真缺口：`RunState` 的 await 信封缺 `awaiting` / `meta`
+
+上游 `RunState`（`types.ts:540-576`）挂 **3** 个 await 相关字段，本仓只有 2 个：
+
+| 上游 | 本仓 | 状态 |
+| --- | --- | --- |
+| `awaiting?: RunAwaitable[]` | — | ❌ **完全没有** |
+| `waitingFor?: { stepId?, signalName, deadline?, meta? }` | `waiting_for: Option<WaitForState>` | ⚠️ 有，但**无 `meta`** |
+| `pendingApproval?: { stepId?, approvalId, title, description?, meta? }` | `pending_approval: Option<PendingApproval>` | ⚠️ 有，但**无 `meta`** |
+
+### 1. 缺 `awaiting`（规范形）
+
+上游 `run-workflow.ts:950` / `:1059` 在挂起时**同时**写三样：
+
+```ts
+awaiting: [{ type: 'signal', stepId, signalName, deadline, meta }],  // 规范形
+waitingFor: { stepId, signalName, deadline, meta },                  // 镜像
+pendingApproval: undefined,                                          // 清另一槽
+```
+
+`awaiting` 不是摆设——上游有 4 处测试直接断言它
+（`tests/engine.signals.test.ts:36,109,267`、`engine.primitives.test.ts:308`）。
+
+`types.ts:548-551` 说清了它为什么是数组：
+
+> All currently outstanding waits. **Current engine versions only create one
+> awaitable at a time**, but the persisted shape can represent future
+> fan-out/race primitives **without replacing the run schema**.
+
+**「每次 drive 恒定一个 awaitable」对本仓同样成立**（已实测，见下），所以缺
+`awaiting` **今天不丢任何功能**。差别在形状：将来上 fan-out / race 原语时，上游
+只往数组里加元素，本仓得改 `RunState` 的 schema + 写迁移。
+
+### 2. 缺 `meta`（功能缺口，不只是形状）
+
+上游 `WaitForEventOptions`（`types.ts:268-279`）有三个选项，本仓
+`wait_for_event(key, event_name)`（`define/mod.rs:274`）**一个都没有**：
+
+| 上游选项 | 本仓 | 后果 |
+| --- | --- | --- |
+| `deadline?` | ❌ 硬编码 `None`（`exec_pause(..., None)`） | 非 sleep 的等待**无法设唤醒期限**，host 建不了时间索引的 worker job |
+| `meta?` | ❌ | 等待点**挂不上给 UI 渲染的自由元数据**（`StepPaused` 事件也没有 `meta`） |
+| `schema?` | ❌ | 恢复前**无法校验 payload 形状** |
+
+`DurableOperationOptions`（`types.ts:24-32`）另有 `id?` / `meta?`；本仓对应位置
+只有 `StepOptions::meta`，durable op 上没有。
+
+## 实测：为什么「每次 drive 一个 awaitable」成立
+
+一度怀疑单槽 `waiting_for` 会在 `try_join!` 两个分支各挂一个等待时**互相覆盖**
+（那样第二个 sleep 永远醒不了——`sync_timer_from_run_state`
+（`workflow_runtime/src/runtime_driver.rs:964`）每次 drive 只按 `state.waiting_for`
+登记 **1 个** timer）。写探针实测，**假设不成立**：
+
+```
+ctx.sleep("a", 100ms) 与 ctx.sleep("b", 600s) 并发，park 用 ? 传播
+→ status = Paused
+→ StepPaused 事件数 = 1（只有 "a"）
+→ RunState.waiting_for = Some(WaitForState { step_id: "a", .. })
+```
+
+因为 `exec_pause`（`engine/mod.rs:605-661`）**不是**协作式 async 等待，而是
+`Err(WorkflowParked)`——第一个 park 就让 `try_join!` 短路，分支 "b" 根本没被 poll。
+所以单槽不可能覆盖。
+
+⚠️ 顺带一个真实的坑：**`WorkflowParked` 必须用 `?` 传播**。探针里写成
+`let _ = try_join!(..)` 会把 park 错误吞掉，run 变成 `Finished`，而日志里留着一条
+`STEP_PAUSED` checkpoint——状态与日志分叉。`let _ =` / `.ok()` / `if let Ok(..)`
+都会踩。
+
+`signal_run` / `signal_event`（`engine/mod.rs:752` / `:780`）**读事件日志、不读
+`waiting_for`**（后者扫日志找最后一个 `signal_name` 匹配的 `StepPaused`），所以
+信号投递也不依赖那个单槽。
+
 ## 驱动入口：`RunWorkflowOptions` 的字段对照
 
 上游 `runWorkflow` 收一个结构体（`engine/run-workflow.ts:34-72` 的
