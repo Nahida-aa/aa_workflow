@@ -17,6 +17,9 @@
 //! # 与上游的另两处差异
 //!
 //! - **telemetry**：core 无 OTel 集成，省略（上游每个 store 调用包一个 span）。
+//! - **lease 属主前缀**：解析收敛在 `drive_claimed_run`（上游 `:679-681`
+//!   `args.leaseOwner ?? createLeaseOwner(\`runtime:${runId}\`)`）。只有 sweep
+//!   自带 `sweep:{now}`（上游 `:416`，那是批次标识）。
 //! - **schedule materializer**：cron 表达式解析（上游
 //!   `schedule-materializer.ts`，272 行）暂未移植——`next_fire_at` 由 host
 //!   计算后传入 `upsert_schedule`。
@@ -309,6 +312,15 @@ fn normalize_lease_ms(v: i64) -> anyhow::Result<i64> {
     Ok(v)
 }
 
+/// 归一 `min_yield_remaining_ms`（上游 `normalizeMinYieldRemainingMs`，
+/// `runtime-driver.ts:1035-1043`）。上游在这里对非有限值 / 负数 `throw`；我们
+/// 参数是 `u64`，负数在类型层面构造不出来，所以只剩「缺省填默认」。
+/// 放**入口**做（上游在 `startRun` 顶部 `:73`），别拖到 drive 里——那样
+/// `create_run` 已经在 store 落过一遍，"已归一" 也没写进类型。
+fn normalize_min_yield_remaining_ms(value: Option<u64>) -> u64 {
+    value.unwrap_or(DEFAULT_MIN_YIELD_REMAINING_MS)
+}
+
 fn resolve_lease_ms<TWorkflows>(
     config: &WorkflowRuntimeConfig<TWorkflows>,
     lease_ms: Option<i64>,
@@ -379,27 +391,12 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         Ok(loaded)
     }
 
-    fn resolve_lease(
-        &self,
-        lease_owner: Option<LeaseOwner>,
-        lease_ms: Option<i64>,
-        prefix: &str,
-    ) -> anyhow::Result<(LeaseOwner, i64)> {
-        let owner = lease_owner.unwrap_or_else(|| create_lease_owner(prefix));
-        let ms = resolve_lease_ms(&self.config, lease_ms)?;
-        Ok((owner, ms))
-    }
-
     /// 启动一个 run：幂等创建 → 认领 → 驱动到下一个 pause / 终态。
     pub async fn start_run(&self, args: WorkflowRuntimeStartRunArgs) -> anyhow::Result<RunResult> {
         let started_at = now_ms();
         let now = args.now.unwrap_or_else(now_ms);
         let deadline = resolve_runtime_deadline(args.deadline, args.max_duration_ms, started_at)?;
-        let (lease_owner, lease_ms) = self.resolve_lease(
-            args.lease_owner,
-            args.lease_ms,
-            &format!("runtime:{}", args.run_id),
-        )?;
+        let min_yield = normalize_min_yield_remaining_ms(args.min_yield_remaining_ms);
         let workflow = self.load_workflow(&args.workflow_id)?;
         let workflow_version = workflow.version.clone();
 
@@ -431,10 +428,11 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
             workflow_id: &args.workflow_id,
             run_id: &args.run_id,
             input: Some(args.input),
-            lease_owner,
-            lease_ms,
+            lease_owner: args.lease_owner.clone(),
+            lease_ms: args.lease_ms,
+            now,
             deadline,
-            min_yield_remaining_ms: args.min_yield_remaining_ms,
+            min_yield_remaining_ms: min_yield,
             yield_resume_at: Some(now + 1),
             include_events: args.include_events,
             max_events: args.max_events,
@@ -450,11 +448,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         let started_at = now_ms();
         let now = args.now.unwrap_or_else(now_ms);
         let deadline = resolve_runtime_deadline(args.deadline, args.max_duration_ms, started_at)?;
-        let (lease_owner, lease_ms) = self.resolve_lease(
-            args.lease_owner,
-            args.lease_ms,
-            &format!("signal:{}", args.run_id),
-        )?;
+        let min_yield = normalize_min_yield_remaining_ms(args.min_yield_remaining_ms);
 
         let delivered = self.config.store.deliver_signal(DeliverSignalArgs {
             run_id: args.run_id.clone(),
@@ -489,10 +483,11 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                         // 给 Null 会让强类型 input（`.input::<T>()`）反序列化失败。
                         // 上游同此：`runtime-driver.ts:481` 传 `claim.run.input`。
                         input: Some(run.input.clone()),
-                        lease_owner,
-                        lease_ms,
+                        lease_owner: args.lease_owner.clone(),
+                        lease_ms: args.lease_ms,
+                        now,
                         deadline,
-                        min_yield_remaining_ms: args.min_yield_remaining_ms,
+                        min_yield_remaining_ms: min_yield,
                         yield_resume_at: Some(now + 1),
                         include_events: args.include_events,
                         max_events: args.max_events,
@@ -537,11 +532,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         let started_at = now_ms();
         let now = args.now.unwrap_or_else(now_ms);
         let deadline = resolve_runtime_deadline(args.deadline, args.max_duration_ms, started_at)?;
-        let (lease_owner, lease_ms) = self.resolve_lease(
-            args.lease_owner,
-            args.lease_ms,
-            &format!("approval:{}", args.run_id),
-        )?;
+        let min_yield = normalize_min_yield_remaining_ms(args.min_yield_remaining_ms);
 
         let delivered = self.config.store.deliver_approval(DeliverApprovalArgs {
             run_id: args.run_id.clone(),
@@ -603,10 +594,11 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
             workflow_id: &workflow_id,
             run_id: &args.run_id,
             input: Some(input),
-            lease_owner,
-            lease_ms,
+            lease_owner: args.lease_owner.clone(),
+            lease_ms: args.lease_ms,
+            now,
             deadline,
-            min_yield_remaining_ms: args.min_yield_remaining_ms,
+            min_yield_remaining_ms: min_yield,
             yield_resume_at: Some(now + 1),
             include_events: args.include_events,
             max_events: args.max_events,
@@ -621,9 +613,6 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         let started_at = now_ms();
         let now = args.now.unwrap_or_else(now_ms);
         let deadline = resolve_runtime_deadline(args.deadline, args.max_duration_ms, started_at)?;
-        let min_yield = args
-            .min_yield_remaining_ms
-            .unwrap_or(DEFAULT_MIN_YIELD_REMAINING_MS);
         let max_recovered = args
             .max_recovered_runs
             .or(args.limit)
@@ -636,8 +625,17 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
             .max_timers
             .or(args.limit)
             .unwrap_or(DEFAULT_SWEEP_LIMIT);
-        let (lease_owner, lease_ms) =
-            self.resolve_lease(args.lease_owner, args.lease_ms, &format!("sweep:{now}"))?;
+        // sweep 是唯一自带属主前缀的入口：`sweep:{now}` 标识这一批扫描（上游
+        // `runtime-driver.ts:416`）。其余入口都不生成，交给 `drive_claimed_run`
+        // 兜底成 `runtime:{run_id}`（上游 `:680`）。
+        let lease_owner = args
+            .lease_owner
+            .clone()
+            .unwrap_or_else(|| create_lease_owner(&format!("sweep:{now}")));
+        // store 的 claim 调用（`claim_stale_runs` / `claim_due_schedule_buckets` /
+        // `claim_due_timers`）直接要 leaseMs，所以 sweep 自己解析一份（上游 `:418`）。
+        let lease_ms = resolve_lease_ms(&self.config, args.lease_ms)?;
+        let min_yield = normalize_min_yield_remaining_ms(args.min_yield_remaining_ms);
 
         let mut recovered = Vec::new();
         let mut scheduled = Vec::new();
@@ -666,10 +664,11 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                     workflow_id: &claim.run.workflow_id,
                     run_id: &claim.run.run_id,
                     input: Some(claim.run.input.clone()),
-                    lease_owner: lease_owner.clone(),
-                    lease_ms,
+                    lease_owner: Some(lease_owner.clone()),
+                    lease_ms: Some(lease_ms),
+                    now,
                     deadline,
-                    min_yield_remaining_ms: args.min_yield_remaining_ms,
+                    min_yield_remaining_ms: min_yield,
                     yield_resume_at: Some(now + 1),
                     include_events: args.include_events,
                     max_events: args.max_events,
@@ -800,10 +799,19 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
     /// [`create_run_store_adapter`] 降格），心跳任务每 `lease_ms / 3` 续租一次。
     #[allow(clippy::too_many_arguments)]
     async fn drive_claimed_run(&self, args: DriveArgs<'_>) -> anyhow::Result<RunResult> {
+        // 租约在**这里**解析，不在各个入口（上游 `runtime-driver.ts:679-681`：
+        // `args.leaseOwner ?? createLeaseOwner(\`runtime:${runId}\`)` + `resolveLeaseMs`）。
+        // 之前我们让每个入口自己解析，凭空多出 `signal:` / `approval:` 两个上游
+        // 没有的属主前缀——属主前缀是 lease 的身份，入口层不该发明它。
+        let lease_owner = args
+            .lease_owner
+            .clone()
+            .unwrap_or_else(|| create_lease_owner(&format!("runtime:{}", args.run_id)));
+        let lease_ms = resolve_lease_ms(&self.config, args.lease_ms)?;
         let claim = self.config.store.claim_run(ClaimRunArgs {
             run_id: args.run_id.to_string(),
-            lease_owner: args.lease_owner.clone(),
-            lease_ms: args.lease_ms,
+            lease_owner: lease_owner.clone(),
+            lease_ms,
             now: now_ms(),
         })?;
         match claim {
@@ -859,8 +867,8 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         let heartbeat = start_lease_heartbeat(
             Arc::clone(&self.config.store),
             args.run_id.to_string(),
-            args.lease_owner.clone(),
-            args.lease_ms,
+            lease_owner.clone(),
+            lease_ms,
         );
 
         // 驱动（core）。signal / approval 的恢复在进入 drive 前已经以
@@ -871,10 +879,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         )
         .input(args.input.clone().unwrap_or(serde_json::Value::Null))
         .run_id(args.run_id.clone())
-        .min_yield_remaining(
-            args.min_yield_remaining_ms
-                .unwrap_or(DEFAULT_MIN_YIELD_REMAINING_MS),
-        );
+        .min_yield_remaining(args.min_yield_remaining_ms);
         if let Some(deadline) = args.deadline {
             opts = opts.deadline(deadline);
         }
@@ -895,11 +900,12 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         //
         // 失败不致命：timer 登记不上，sweep 下一轮还会从 `waiting_for` 恢复，
         // 但这一轮先如实报错。
-        let sync_result = sync_timer_from_run_state(&self.config, args.run_id, args.workflow_id);
+        let sync_result =
+            sync_timer_from_run_state(&self.config, args.run_id, args.workflow_id, args.now);
 
         self.config.store.release_run_lease(ReleaseRunLeaseArgs {
             run_id: args.run_id.to_string(),
-            lease_owner: args.lease_owner.clone(),
+            lease_owner: lease_owner.clone(),
         })?;
         heartbeat_error?;
         sync_result?;
@@ -941,10 +947,21 @@ struct DriveArgs<'a> {
     run_id: &'a RunId,
     /// 全新启动时的 input；resume 时为 `None`（input 已在 store 里）。
     input: Option<serde_json::Value>,
-    lease_owner: LeaseOwner,
-    lease_ms: i64,
+    /// 租约属主。`None` = 由 [`Self::drive_claimed_run`] 按上游
+    /// `runtime:{run_id}` 前缀兜底生成（`runtime-driver.ts:680`）。**只有 sweep
+    /// 会预先生成** `sweep:{now}`（上游 `:416`）——那是批次标识，不是 per-run 的。
+    lease_owner: Option<LeaseOwner>,
+    /// `None` = 走 `config.default_lease_ms` → `DEFAULT_LEASE_MS`。
+    lease_ms: Option<i64>,
+    /// 本次 drive 的「现在」，入口算一次一路传下去。**不要**在下游重读墙钟：
+    /// 上游把 `args.now` 一路传到 `syncTimerFromRunState`
+    /// （`runtime-driver.ts:761`）就是这个原因。
+    now: i64,
     deadline: Option<i64>,
-    min_yield_remaining_ms: Option<u64>,
+    /// 已归一（入口套了 [`normalize_min_yield_remaining_ms`]），所以不是
+    /// `Option`。上游类型是 `Option<number>` 但同样在 `startRun` 顶部就归一了
+    /// （`:73`）——归一过还用 `Option` 表示，等于把「已校验」只写在注释里。
+    min_yield_remaining_ms: u64,
     yield_resume_at: Option<i64>,
     include_events: Option<bool>,
     max_events: Option<usize>,
@@ -967,10 +984,14 @@ fn run_store_for_core<TWorkflows>(
 ///   与上游 `sleepUntil` 同形）；
 /// - `signal_id` 形如 `timer:{run_id}:{step_id}:{deadline}`，**幂等键**——同一次
 ///   挂起重复登记无副作用，正好抵消「每次 drive 收尾都跑一遍」。
+/// `now` 由调用方传入（上游 `runtime-driver.ts:761` 把 `args.now` 一路传下来），
+/// **不要**在这里重读墙钟：timer 的 deadline 判定要和这次 drive 用同一个「现在」，
+/// 否则同一次 drive 里两处时间会差几毫秒。
 fn sync_timer_from_run_state<TWorkflows>(
     config: &WorkflowRuntimeConfig<TWorkflows>,
     run_id: &str,
     workflow_id: &str,
+    now: i64,
 ) -> anyhow::Result<()> {
     let Some(state) = config.store.load_run_state(run_id)? else {
         return Ok(());
@@ -992,7 +1013,7 @@ fn sync_timer_from_run_state<TWorkflows>(
         workflow_version: state.workflow_version.clone(),
         wake_at: deadline,
         signal_id: format!("timer:{run_id}:{step_id}:{deadline}"),
-        now: now_ms(),
+        now,
     })
 }
 
@@ -1445,6 +1466,143 @@ mod driver_tests {
                 now: 0,
             })
             .unwrap();
+    }
+
+    /// 属主前缀只在 `drive_claimed_run` 里兜底成 `runtime:{run_id}`（上游
+    /// `runtime-driver.ts:680`）；入口层**不发明**前缀。之前我们让每个入口自己
+    /// 解析 lease，凭空多出 `signal:` / `approval:` 两个上游没有的前缀。
+    ///
+    /// 观测方式：让 workflow 在**执行途中**读自己的 lease。不能在 drive 之后读
+    /// ——`release_run_lease` 会把 lease 清掉（`in_memory_store.rs:471-478`）；
+    /// 也不能靠 `can_claim` 的同属主规则绕（那样测的是 claim 成不成功，不是
+    /// 前缀本身，而且 run 得先被占住，很容易写成空测试——我第一版就是这么废掉的）。
+    #[tokio::test]
+    async fn start_run_lease_owner_is_runtime_prefixed() {
+        let mem: Arc<InMemoryExecutionStore> = Arc::new(InMemoryExecutionStore::default());
+        let seen: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        let s1 = seen.clone();
+        let m1 = mem.clone();
+        let wf = WorkflowDefinition::new("peek").handler(move |ctx: WorkflowCtx| {
+            let s1 = s1.clone();
+            let m1 = m1.clone();
+            async move {
+                ctx.step("peek", move |_sc: aa_workflow_core::StepCtx| {
+                    let s1 = s1.clone();
+                    let m1 = m1.clone();
+                    async move {
+                        // 此刻 drive 正在跑，lease 还在。
+                        let owner = m1
+                            .load_run("peek:1")
+                            .unwrap()
+                            .and_then(|r| r.lease.map(|l| l.owner));
+                        *s1.lock().unwrap() = owner;
+                        Ok(serde_json::Value::Null)
+                    }
+                })
+                .await?;
+                Ok(serde_json::Value::Null)
+            }
+        });
+        let store: Arc<dyn WorkflowExecutionStore> = mem.clone();
+        let mut workflows = HashMap::new();
+        workflows.insert(
+            "peek".to_string(),
+            WorkflowRegistration {
+                load: Arc::new(move || wf.clone().into()),
+                previous_versions: HashMap::new(),
+                version: None,
+                schedules: vec![],
+            },
+        );
+        let rt = define_workflow_runtime(WorkflowRuntimeConfig::new(store, workflows));
+        rt.start_run(WorkflowRuntimeStartRunArgs {
+            workflow_id: "peek".into(),
+            run_id: "peek:1".into(),
+            input: serde_json::json!({}),
+            now: Some(0),
+            lease_owner: None,
+            lease_ms: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        let owner = seen.lock().unwrap().clone().expect("step 内应读到 lease");
+        assert!(
+            owner.starts_with("runtime:"),
+            "兜底属主前缀应是 runtime:（上游 :680），实际：{owner}"
+        );
+        assert!(
+            !owner.starts_with("signal:") && !owner.starts_with("approval:"),
+            "入口层不该发明前缀（那是我们本地自造的），实际：{owner}"
+        );
+    }
+
+    /// sweep 的属主前缀是 `sweep:{now}`（上游 `:416`），不是 `runtime:{run_id}`。
+    /// 同样在 workflow 执行途中读 lease。
+    #[tokio::test]
+    async fn sweep_lease_owner_is_sweep_prefixed() {
+        let mem: Arc<InMemoryExecutionStore> = Arc::new(InMemoryExecutionStore::default());
+        let seen: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        let s1 = seen.clone();
+        let m1 = mem.clone();
+        let wf = WorkflowDefinition::new("peek").handler(move |ctx: WorkflowCtx| {
+            let s1 = s1.clone();
+            let m1 = m1.clone();
+            async move {
+                ctx.step("peek", move |_sc: aa_workflow_core::StepCtx| {
+                    let s1 = s1.clone();
+                    let m1 = m1.clone();
+                    async move {
+                        let owner = m1
+                            .load_run("peek:2")
+                            .unwrap()
+                            .and_then(|r| r.lease.map(|l| l.owner));
+                        *s1.lock().unwrap() = owner;
+                        Ok(serde_json::Value::Null)
+                    }
+                })
+                .await?;
+                Ok(serde_json::Value::Null)
+            }
+        });
+        let store: Arc<dyn WorkflowExecutionStore> = mem.clone();
+        let mut workflows = HashMap::new();
+        workflows.insert(
+            "peek".to_string(),
+            WorkflowRegistration {
+                load: Arc::new(move || wf.clone().into()),
+                previous_versions: HashMap::new(),
+                version: None,
+                schedules: vec![],
+            },
+        );
+        let rt = define_workflow_runtime(WorkflowRuntimeConfig::new(store, workflows));
+        // 造一个"上一个 worker 死了"的 run：lease 过期 → sweep 会捡起并驱动。
+        mem.create_run(CreateRunArgs {
+            run_id: "peek:2".into(),
+            workflow_id: "peek".into(),
+            workflow_version: None,
+            input: serde_json::json!({}),
+            now: 0,
+        })
+        .unwrap();
+        mem.claim_run(ClaimRunArgs {
+            run_id: "peek:2".into(),
+            lease_owner: "dead-worker".into(),
+            lease_ms: 50,
+            now: 0,
+        })
+        .unwrap();
+        rt.sweep(WorkflowRuntimeSweepArgs { now: Some(100), ..Default::default() })
+            .await
+            .unwrap();
+
+        let owner = seen.lock().unwrap().clone().expect("step 内应读到 lease");
+        assert!(
+            owner.starts_with("sweep:"),
+            "sweep 的属主前缀应是 sweep:（上游 :416），实际：{owner}"
+        );
     }
 
     /// sweep 恢复「持有者已死」的 run：lease 过期后 claim_stale_runs 捡起并
