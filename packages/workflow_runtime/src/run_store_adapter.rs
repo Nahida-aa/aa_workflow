@@ -15,7 +15,7 @@
 //! | `delete_run(id, reason)` | [`delete_run`](WorkflowRunStoreAdapterStore::delete_run) | ✅ 相同 |
 //! | `append_event`（单条） | [`append_events`](WorkflowRunStoreAdapterStore::append_events)（批量，返回 next_index） | **语义差别** |
 //! | `get_events` → 裸数组 | [`read_events`](WorkflowRunStoreAdapterStore::read_events) → 带索引信封 | **语义差别**（含 `from_index` 游标） |
-//! | `subscribe` | [`subscribe_events`](WorkflowRunStoreAdapterStore::subscribe_events) | 同签名 |
+//! | `subscribe` → `Receiver` | [`subscribe_events`](WorkflowRunStoreAdapterStore::subscribe_events) → 退订句柄 | **语义差别**：底层先补发 `skip(from_index)` 的存量，本 trait 只推之后新增 |
 //!
 //! 上游之所以在 core 之上另立这一层，是因为它**正处于迁移中**：core 还在用
 //! `RunStore`，runtime 已改用这一套，`run-store-adapter.ts` 的
@@ -83,8 +83,8 @@
 //!
 //! [`RunStore`]: aa_workflow_core::RunStore
 
-use std::sync::Arc;
-use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Receiver};
 
 use aa_workflow_core::{DeleteReason, RunState, RunStore, StoreError, WorkflowEvent};
 
@@ -457,12 +457,69 @@ impl RunStore for RunStoreAdapter {
     }
 
     fn subscribe(&self, run_id: &str) -> Option<Receiver<WorkflowEvent>> {
-        // 基础层的 `subscribe_events` 是回调式（`Box<dyn Fn>`），core 要的是
-        // `mpsc::Receiver`，两者形状不同（上游的 TS 版本也是回调式，因为它没有
-        // Rust 的通道）。要弥合需另起一个转发线程，暂不做——core 的订阅只用于
-        // fan-out 观测，不影响正确性。
-        let _ = run_id;
-        None
+        // 底层 `subscribe_events` 是回调式（`Box<dyn Fn>`）+ 返回退订句柄，core
+        // 要的是 `mpsc::Receiver`。用一条转发链弥合：
+        //
+        //     订阅回调 ──tx.send──> 无界 mpsc ──> core 的 Receiver
+        //
+        // 形状不同，**语义必须对齐**：底层会先补发 `skip(from_index)` 的存量，
+        // 而 core 的 `InMemoryStore::subscribe` 只推**之后**新增的事件、从不补发。
+        // 所以先读出当前尾部索引、从它**的下一个**接，否则调用方会凭空多收整段
+        // 历史。注意底层游标是**含**该索引的（`skip(from_index)`），要一个都不补发
+        // 就得从 `tail + 1` 起。
+        let from_index = self
+            .inner
+            .read_events(ReadEventsArgs {
+                run_id: run_id.to_string(),
+                from_index: None,
+            })
+            .ok()?
+            .last()
+            .map_or(0, |e| e.event_index.saturating_add(1));
+
+        // core 的 `Receiver` 上没有任何地方能挂 drop 钩子，而退订句柄只能被调用
+        // 一次。用「关掉 sender」当作「没人要这些事件了」的信号：Receiver 被 drop
+        // 之后第一次 `tx.send` 失败 → 置位 → 转发线程退订。否则 store 侧的订阅会
+        // 永久留着（内存泄漏），此后每次 append 还会往一条死链上白 clone 事件。
+        let (tx, rx) = mpsc::channel::<WorkflowEvent>();
+        let (gone_tx, gone_rx) = mpsc::channel::<()>();
+        let gone = Arc::new(Mutex::new(Some(gone_tx)));
+
+        let on_event = {
+            let gone = Arc::clone(&gone);
+            Box::new(move |event: &WorkflowEvent, _index: u64| {
+                if tx.send(event.clone()).is_ok() {
+                    return;
+                }
+                // Receiver 已消失，通知转发线程退订；只报一次。
+                if let Ok(mut slot) = gone.lock()
+                    && let Some(notify) = slot.take()
+                {
+                    let _ = notify.send(());
+                }
+            }) as Box<dyn Fn(&WorkflowEvent, u64) + Send + Sync>
+        };
+
+        // 底层不支持订阅（如 postgres 未实现）时如实返回 `None`，调用方退化为轮询
+        // `read_events`——与 `subscribe_events` 契约一致。
+        let unsubscribe = self.inner.subscribe_events(run_id, from_index, on_event)?;
+
+        // 退订**不能**在注册后立刻调用，那会把刚注册的订阅立刻撤掉；只在该
+        // 「没人要事件了」时调用。
+        //
+        // `recv` 返回 `Err` 当且仅当所有 sender 都被 drop：要么是上面 `gone` 槽位
+        // 已被 take 并发出通知（Receiver 消失），要么是 store 自己先退订、把回调
+        // 连同槽位一起释放了——后者调一次退订是无害的幂等操作。
+        //
+        // 已知残留：若 Receiver 被 drop 后**再无事件到达**，就没人再调 `send`，
+        // 通知不会发出，线程会一直 park（订阅也还在）。事件流通常会继续，这只是
+        // 兜底路径上的有界泄漏——core 的 `RunStore::subscribe` 不提供别的通知手段。
+        std::thread::spawn(move || {
+            let _ = gone_rx.recv();
+            unsubscribe();
+        });
+
+        Some(rx)
     }
 }
 
@@ -573,10 +630,99 @@ mod adapter_tests {
         assert!(store.truncate_log_at_step("r1", "a").is_err());
     }
 
+    /// 桥接后：订阅者只收到**订阅之后**新增的事件，**不补发**存量——与 core 的
+    /// `InMemoryStore::subscribe` 语义一致（底层 `subscribe_events` 本身是补发的，
+    /// 适配器靠「先读尾部索引、再从那里接」把这个差别抹平）。
     #[test]
-    fn subscribe_returns_none() {
+    fn subscribe_bridges_callback_to_channel_without_replaying_backlog() {
         let (store, _mem) = adapted();
-        assert!(store.subscribe("r1").is_none());
+
+        // 先造两条存量事件，它们**不该**被补发。
+        for i in 0..2u64 {
+            store
+                .append_event(
+                    "r1",
+                    i as usize,
+                    &WorkflowEvent::StepFinished {
+                        ts: i as i64,
+                        run_id: "r1".into(),
+                        step_id: format!("old{i}"),
+                        result: None,
+                        attempts: vec![],
+                    },
+                )
+                .unwrap();
+        }
+
+        let rx = store.subscribe("r1").expect("in-memory store 支持订阅");
+        assert!(
+            rx.try_recv().is_err(),
+            "存量事件不得补发：底层会补发，适配器必须靠 tail_index 挡掉"
+        );
+
+        // 订阅之后新增的事件要能收到。
+        store
+            .append_event(
+                "r1",
+                2,
+                &WorkflowEvent::StepFinished {
+                    ts: 99,
+                    run_id: "r1".into(),
+                    step_id: "new".into(),
+                    result: None,
+                    attempts: vec![],
+                },
+            )
+            .unwrap();
+
+        let got = rx.recv_timeout(std::time::Duration::from_secs(2))
+            .expect("应收到订阅之后的新增事件");
+        assert!(
+            matches!(&got, WorkflowEvent::StepFinished { step_id, .. } if step_id == "new"),
+            "首个收到的应是新增事件，实际 {got:?}"
+        );
+    }
+
+    /// Receiver 被 drop 后，适配器必须退订——否则 store 侧的订阅永久留存，
+    /// 之后每次 append 都会往一条死链上白 clone 事件。
+    #[test]
+    fn dropping_receiver_unsubscribes() {
+        let (store, mem) = adapted();
+        let rx = store.subscribe("r1").expect("in-memory store 支持订阅");
+        assert_eq!(subscriber_count(&mem, "r1"), 1, "订阅已注册");
+
+        drop(rx);
+
+        // drop Receiver 本身不触发退订（core 的 Receiver 没有钩子），
+        // 退订由「下一次 push 发现没人收」驱动，所以先制造一个事件。
+        store
+            .append_event(
+                "r1",
+                0,
+                &WorkflowEvent::StepFinished {
+                    ts: 1,
+                    run_id: "r1".into(),
+                    step_id: "a".into(),
+                    result: None,
+                    attempts: vec![],
+                },
+            )
+            .unwrap();
+
+        // 退订发生在转发线程上，轮询等它落地。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while subscriber_count(&mem, "r1") > 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            subscriber_count(&mem, "r1"),
+            0,
+            "Receiver 消失且 push 失败后应退订"
+        );
+    }
+
+    fn subscriber_count(mem: &InMemoryExecutionStore, run_id: &str) -> usize {
+        mem.debug_subscriber_count(run_id)
     }
 }
 #[cfg(test)]

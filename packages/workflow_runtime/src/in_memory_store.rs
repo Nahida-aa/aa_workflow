@@ -240,6 +240,20 @@ impl InMemoryExecutionStore {
     }
 }
 
+impl InMemoryExecutionStore {
+    /// 当前挂在 `run_id` 上的订阅回调数。仅供测试断言退订是否真的发生
+    /// ——适配器的 `subscribe` 把 `Receiver` 桥接成回调后，「订阅有没有被
+    /// 撤掉」只能从这里观察。
+    pub fn debug_subscriber_count(&self, run_id: &str) -> usize {
+        self.inner
+            .subscribers
+            .lock()
+            .unwrap()
+            .get(run_id)
+            .map_or(0, |s| s.len())
+    }
+}
+
 impl WorkflowRunStoreAdapterStore for InMemoryExecutionStore {
     fn load_run_state(&self, run_id: &str) -> anyhow::Result<Option<RunState>> {
         Ok(self.inner.run_states.lock().unwrap().get(run_id).cloned())
