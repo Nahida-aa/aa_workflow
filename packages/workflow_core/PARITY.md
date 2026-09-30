@@ -13,6 +13,11 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunWorkflowOptions.r
 > `if (engine.paused) return`）。**不阻塞等待**——唤醒由外部投递。
 > 详见 [`docs/runtime-design.md`](../../docs/runtime-design.md) D3。
 >
+> **`Paused` 从 RunState 读，不从事件流读**：重 drive 一个已挂起的 run 时
+> primitive 短路、**一条新事件都不写**，凭末事件分不出「挂起」和「结束」。上游
+> 同理（`classifyRun` 只看 store）。`run_workflow(...).outcome()` = drain 完回读
+> store。推导见 [对齐文档的决策节](../../docs/tanstack-alignment.md)。
+>
 > 表内 `deadline` 一律是**绝对** UTC ms 时间戳（上游同形：`sleep(ms)` 定义在
 > `sleepUntil(Date.now()+ms)` 上，`run-workflow.ts:992`）。
 

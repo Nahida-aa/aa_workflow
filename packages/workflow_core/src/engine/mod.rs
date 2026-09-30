@@ -118,14 +118,11 @@ pub fn cancel_run(store: &dyn RunStore, run_id: &str) -> Result<(), WorkflowErro
 /// Shared driver state handed to every step (and to the `<WorkflowCtx>`).
 /// This is the code-as-DAG substrate: the "graph" is just this state plus the
 /// handler's control flow, discovered as the handler runs.
-/// 事件扇出通道的载荷。用显式的 [`Fanout::Shutdown`] 而不是「关通道」来收尾：
-/// sender 藏在 `Arc<EngineRuntime>` 里，靠 drop 关不掉；而在 `publish` 热路径上
-/// 加锁/take 也不划算。
-pub(crate) enum Fanout {
-    Event(WorkflowEvent),
-    Shutdown,
-}
-
+///
+/// 事件扇出通道直接传 `WorkflowEvent`：收尾**靠关通道**（`run_workflow` 返回的
+/// [`RunEventStream`](crate::RunEventStream) 靠 `poll_recv` 见到 `None` 结束），
+/// 不需要显式的 shutdown 哨兵——`EngineRuntime` 随引擎 future 一起 drop，
+/// 它是最后一个 sender。
 pub struct EngineRuntime {
     pub run_id: String,
     pub input: serde_json::Value,
@@ -164,11 +161,11 @@ pub struct EngineRuntime {
     pub yield_resume_at: Option<i64>,
     /// Positional counter for `__yield-{n}` pause keys (per-invocation).
     pub(crate) yield_counter: AtomicUsize,
-    /// 事件扇出通道。**同步调用点只做一次 `send`**（非阻塞），真正 await
-    /// publisher 的 drain task 独立于引擎执行 —— 对齐上游 `runWorkflow` 的
-    /// async generator：`queue.shift()` 后 `await publish`，而执行在另一个 task
-    /// 里继续往 queue 推（`run-workflow.ts:85-134`）。
-    pub(crate) publish_tx: Option<tokio::sync::mpsc::UnboundedSender<Fanout>>,
+    /// 事件扇出通道。**引擎侧只做一次 `send`**（非阻塞），await publisher 的
+    /// 动作在**消费侧**——对齐上游 `runWorkflow` 的 async generator：
+    /// `queue.shift()` 后 `await publish`，而执行在另一个 task 里继续往 queue 推
+    /// （`run-workflow.ts:85-134`）。所以慢 publisher 拖慢消费端，不拖慢引擎。
+    pub(crate) publish_tx: Option<tokio::sync::mpsc::UnboundedSender<WorkflowEvent>>,
     /// WorkflowDefinition-level fallback retry (TanStack `defaultStepRetry`); steps that
     /// declare their own [`StepOptions::retry`](crate::define::StepOptions::retry)
     /// win.
@@ -218,7 +215,7 @@ impl EngineRuntime {
     /// 引擎侧不再有任何额外拷贝。
     pub(crate) fn publish(&self, ev: &WorkflowEvent) {
         if let Some(tx) = &self.publish_tx {
-            let _ = tx.send(Fanout::Event(ev.clone()));
+            let _ = tx.send(ev.clone());
         }
     }
 
@@ -974,7 +971,7 @@ mod tests {
         let out = run_workflow(
             &RunWorkflowOptions::new(Arc::new(wf), store).input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         // handler 的返回值仍是 Value（workflow 出口没泛型化），但那是出口不是 step。
@@ -1012,7 +1009,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(first.output.unwrap()["next"], 42);
         let second = run_workflow(
@@ -1020,7 +1017,7 @@ mod tests {
                 .input(serde_json::json!({}))
                 .run_id(first.run_id),
         )
-        .await
+        .outcome().await
         .unwrap();
         // 闭包没被重跑，但类型照样回来了。
         assert_eq!(log.lock().unwrap().runs["a"], 1);
@@ -1044,7 +1041,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(first.status, RunStatus::Finished);
         // 日志里只有 `{}`——`n` 被 skip 掉了。
@@ -1053,7 +1050,7 @@ mod tests {
                 .input(serde_json::json!({}))
                 .run_id(first.run_id),
         )
-        .await;
+        .outcome().await;
         // resume 反序列化 `{}` 失败：响亮报错，而不是静默给一个 null。
         // 注意 run 级失败是 `Ok(RunOutcome { status: Errored, error: Some(..) })`，
         // 不是 `Err`——Err 留给 store/引擎层故障。
@@ -1089,7 +1086,7 @@ mod tests {
         let out = run_workflow(
             &RunWorkflowOptions::new(Arc::new(wf), store.clone()).input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
         // 关键：step 走了既有的失败路径，所以 STEP_FAILED 落了日志。
@@ -1134,7 +1131,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let l = log.lock().unwrap();
@@ -1184,7 +1181,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         let l = log.lock().unwrap();
         assert_eq!(l.runs["a"], 1);
@@ -1285,7 +1282,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         let l = log.lock().unwrap();
         for id in ["a", "b", "c", "d", "e"] {
@@ -1330,14 +1327,14 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         let second = run_workflow(
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
             .run_id(out.run_id),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(second.status, RunStatus::Finished);
         let l = log.lock().unwrap();
@@ -1386,7 +1383,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         // mark a stale, rereun: a reruns, b stays cached
         fresh_a.store(false, Ordering::SeqCst);
@@ -1395,7 +1392,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id(out.run_id),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(second.status, RunStatus::Finished);
         let l = log.lock().unwrap();
@@ -1436,7 +1433,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         let l = log.lock().unwrap();
         assert!(idx(&l.timeline, ">b") > idx(&l.timeline, "<a"));
@@ -1470,7 +1467,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let events = store.get_events(&out.run_id).unwrap();
@@ -1500,7 +1497,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
 
@@ -1553,7 +1550,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
         assert!(out.error.unwrap().message.contains("boom"));
@@ -1587,7 +1584,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
         assert!(out.error.unwrap().message.contains("timed out"));
@@ -1614,7 +1611,7 @@ mod tests {
                 sink.lock().unwrap().push(e.clone())
             }))),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
 
@@ -1734,7 +1731,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("r1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Paused);
         assert!(out.error.is_none(), "挂起不是失败");
@@ -1770,7 +1767,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("r1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output, Some(serde_json::json!({ "approved": true })));
@@ -1830,7 +1827,7 @@ mod tests {
                     .input(serde_json::json!({}))
                 .run_id("r2"),
             )
-            .await
+            .outcome().await
         });
         wait_until(
             &store,
@@ -1851,7 +1848,7 @@ mod tests {
                     .input(serde_json::json!({}))
                 .run_id("r2"),
             )
-            .await
+            .outcome().await
         });
         wait_until(
             &store,
@@ -1916,7 +1913,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("s1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         let elapsed = started.elapsed();
         assert_eq!(out.status, RunStatus::Paused);
@@ -1949,7 +1946,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("s1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let st = store.get_run_state("s1").unwrap().unwrap();
@@ -1990,7 +1987,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("r3"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Paused);
         signal_run(
@@ -2005,7 +2002,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("r3"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output, Some(serde_json::json!({ "yes": 1 })));
@@ -2017,7 +2014,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("r3"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out2.status, RunStatus::Finished);
         assert_eq!(out2.output, Some(serde_json::json!({ "yes": 1 })));
@@ -2056,7 +2053,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("ne1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Paused);
         let st = store.get_run_state("ne1").unwrap().unwrap();
@@ -2082,7 +2079,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("ne1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output, Some(serde_json::json!({ "ok": true })));
@@ -2107,7 +2104,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("ne2"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Paused);
         signal_event(store.as_ref(), "ne2", "go", serde_json::json!(42)).unwrap();
@@ -2116,7 +2113,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("ne2"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output, Some(serde_json::json!(42)));
@@ -2129,7 +2126,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("ne2"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out2.status, RunStatus::Finished);
         assert_eq!(out2.output, Some(serde_json::json!(42)));
@@ -2160,7 +2157,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Paused);
         let st = store.get_run_state(&out.run_id).unwrap().unwrap();
@@ -2177,7 +2174,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id(out.run_id),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let evs = store.get_events(&out.run_id).unwrap();
@@ -2204,7 +2201,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("stu1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Paused);
 
@@ -2220,7 +2217,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("stu1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
     }
@@ -2246,7 +2243,7 @@ mod tests {
                 sink.lock().unwrap().push(e.clone())
             }))),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert!(
@@ -2294,7 +2291,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("det1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Paused);
         signal_run(store.as_ref(), "det1", "gate", serde_json::json!(true)).unwrap();
@@ -2304,7 +2301,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("det1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let o1 = out.output.clone().unwrap();
@@ -2315,7 +2312,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("det1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out2.status, RunStatus::Finished);
         assert_eq!(
@@ -2370,7 +2367,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let v = out.output.unwrap();
@@ -2395,7 +2392,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id(&out.run_id),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out2.status, RunStatus::Finished);
         assert_eq!(out2.output.clone().unwrap(), v, "并发 replay 也一致");
@@ -2429,7 +2426,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("ca1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Paused);
         let st = store.get_run_state("ca1").unwrap().unwrap();
@@ -2448,7 +2445,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("ca1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(
             out.status,
@@ -2474,7 +2471,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("ca1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(again.status, RunStatus::Aborted, "Aborted 是锁存的终态");
 
@@ -2522,7 +2519,7 @@ mod tests {
                     .input(serde_json::json!({}))
                 .run_id("sig1"),
             )
-            .await
+            .outcome().await
         });
         started.notified().await;
         cancel_run(store.as_ref(), "sig1").unwrap();
@@ -2557,7 +2554,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("ca2"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Paused);
         assert!(started.elapsed() < Duration::from_millis(500));
@@ -2575,7 +2572,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("ca2"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out2.status, RunStatus::Aborted);
 
@@ -2593,7 +2590,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("ca2"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out3.status, RunStatus::Aborted, "cancel 的 run 不会被唤醒");
     }
@@ -2609,7 +2606,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
     }
@@ -2646,7 +2643,7 @@ mod tests {
             .publish(// 500ms 内到期 → headroom < 1000
             None),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         {
@@ -2680,7 +2677,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("y1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Paused);
         let st = store.get_run_state("y1").unwrap().unwrap();
@@ -2696,7 +2693,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("y1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert!(store.get_events("y1").unwrap().iter().any(
@@ -2709,7 +2706,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("y1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out2.status, RunStatus::Finished);
         assert_eq!(
@@ -2739,7 +2736,7 @@ mod tests {
             .run_id("y2")
             .yield_resume_at(resume_at),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Paused);
         let st = store.get_run_state("y2").unwrap().unwrap();
@@ -2755,7 +2752,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("y2"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
     }
@@ -2795,7 +2792,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(
             out.status,
@@ -2841,7 +2838,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf2.clone()), store2.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(
             out2.status,
@@ -2890,7 +2887,7 @@ mod tests {
                 sink.lock().unwrap().push(e.clone())
             }))),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
 
@@ -2962,7 +2959,7 @@ mod tests {
                 sink.lock().unwrap().push(e.clone())
             }))),
         )
-        .await
+        .outcome().await
         .unwrap();
         let deltas: Vec<WorkflowEvent> = events
             .lock()
@@ -3009,7 +3006,7 @@ mod tests {
                 .input(serde_json::json!({}))
                 .run_id("aw1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Paused);
 
@@ -3073,7 +3070,7 @@ mod tests {
                 .input(serde_json::json!({}))
                 .run_id("ap1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Paused);
 
@@ -3121,7 +3118,7 @@ mod tests {
                 .input(serde_json::json!({}))
                 .run_id("sc1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Paused);
 
@@ -3132,7 +3129,7 @@ mod tests {
                 .input(serde_json::json!({}))
                 .run_id("sc1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out2.status, RunStatus::Errored, "坏 payload 应让 run 报错");
     }
@@ -3161,7 +3158,7 @@ mod tests {
                 .input(serde_json::json!({}))
                 .run_id("sc2"),
         )
-        .await
+        .outcome().await
         .unwrap();
         signal_run(
             store.as_ref(),
@@ -3175,7 +3172,7 @@ mod tests {
                 .input(serde_json::json!({}))
                 .run_id("sc2"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output.unwrap()["approved"], true);
@@ -3195,7 +3192,7 @@ mod tests {
                 .input(serde_json::json!({}))
                 .run_id("pl1"),
         )
-        .await
+        .outcome().await
         .unwrap();
         let st = store.get_run_state("pl1").unwrap().unwrap();
         let w = st.waiting_for.as_ref().unwrap();

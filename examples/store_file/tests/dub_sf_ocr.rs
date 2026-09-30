@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use aa_workflow_core::{WorkflowEvent, RunWorkflowOptions, run_workflow};
+use aa_workflow_core::{RunStatus, RunWorkflowOptions, WorkflowEvent, run_workflow};
 use aa_workflow_runtime::run_store_adapter::{WorkflowExecutionStore, WorkflowRunStoreAdapterStore, create_run_store_adapter};
 use aa_workflow_runtime::types::{ReadEventsArgs, StoredWorkflowEvent, WorkflowExecutionStatus};
 use aa_workflow_runtime::{RunResult, RunResultKind, WorkflowRegistration, WorkflowRuntimeConfig, WorkflowRuntimeDefinition, WorkflowRuntimeStartRunArgs, define_workflow_runtime};
@@ -437,7 +437,7 @@ async fn dub_sf_ocr_continue_from_is_unsupported_on_new_contract() {
     let out = run_workflow(
         &RunWorkflowOptions::new(Arc::new(wf.clone()), core_store.clone()).input(dub_input()),
     )
-    .await
+    .outcome().await
     .unwrap();
     let run_id = out.run_id.clone();
 
@@ -447,14 +447,24 @@ async fn dub_sf_ocr_continue_from_is_unsupported_on_new_contract() {
             .run_id(run_id.clone())
             .continue_from("tts"),
     )
-    .await;
+    .outcome().await
+    .unwrap();
 
-    let err = resumed.expect_err("新契约无 truncate，continue_from 应报错");
-    let msg = err.to_string();
+    // 失败是**事件**（`RUN_ERRORED`）而不是 `Err`——run_workflow 的流没有 Err
+    // 变体，对齐上游 `drive().catch()` 统一 emit `RUN_ERRORED`。
+    // 状态也从 store 读，所以这条 drive 的落盘状态必须是 `Errored`，不能还留着
+    // 上一次的 `Finished`。
+    assert_eq!(
+        resumed.status,
+        RunStatus::Errored,
+        "截断失败应把 run 标成 Errored，而不是留下上次的 Finished"
+    );
+    let msg = resumed.error.as_ref().expect("Errored 必须带 error").to_string();
     assert!(
         msg.contains("truncate_log_at_step"),
         "应明确指向缺失的 truncate_log_at_step，实际：{msg}"
     );
+    let run_id = resumed.run_id.clone();
 
     // 报错之后，原有的事件日志应**完好无损**（适配器报错而非静默改坏日志）。
     let events = store

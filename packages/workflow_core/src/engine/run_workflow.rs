@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use crate::define::{AnyWorkflowDefinition, WorkflowDefinition};
-use crate::engine::{DEFAULT_MIN_YIELD_REMAINING_MS, EngineRuntime, Fanout, StepHalt, WorkflowCancelled, WorkflowParked, now_ms};
+use crate::engine::{DEFAULT_MIN_YIELD_REMAINING_MS, EngineRuntime, StepHalt, WorkflowCancelled, WorkflowParked, now_ms};
 use crate::error::{RunError, RunErrorCode, WorkflowError};
 use crate::event::{RunStatus, StepStatus, WorkflowEvent, fold_step_states};
 use crate::resource::Gate;
@@ -73,6 +73,7 @@ use crate::run_store::{RunState, RunStore};
 pub type PublisherFn =
     Arc<dyn Fn(&str, WorkflowEvent) -> crate::define::BoxFuture<'static, ()> + Send + Sync>;
 
+#[derive(Clone)]
 pub struct RunWorkflowOptions {
     /// 要驱动的 workflow。**必填**（由 [`Self::new`] 保证）。
     ///
@@ -161,6 +162,15 @@ pub struct RunWorkflowOptions {
     /// 可选的事件回调（上游 `publish`）。多数宿主用同步的 [`Self::publish`]；
     /// 需要 `await` 落盘/发网络的用 [`Self::async_publish`]。
     pub publish: Option<PublisherFn>,
+}
+
+/// 让 `run_workflow(&opts)` 和 `run_workflow(opts)` 都能用——调用点不必因为
+/// 签名从「取引用」变成「取所有权」而全体改写。字段全是 `Arc` / `Option`，克隆很
+/// 便宜。
+impl From<&RunWorkflowOptions> for RunWorkflowOptions {
+    fn from(opts: &RunWorkflowOptions) -> Self {
+        opts.clone()
+    }
 }
 
 impl RunWorkflowOptions {
@@ -292,6 +302,47 @@ pub struct RunOutcome {
     pub error: Option<RunError>,
 }
 
+impl RunOutcome {
+    /// 从 **store 里的 [`RunState`]** 读出 run 结果，而不是从事件流末事件推。
+    ///
+    /// # 为什么不能看事件
+    ///
+    /// 上游把 iterable 定义成「本次 drive **append 到日志**的事件」，不是状态
+    /// 通道（`engine/run-workflow.ts:76-84`：*"an `AsyncIterable` of every event
+    /// the engine appends to the run's log […] the log IS the transport"*）。
+    /// runtime 因此把两者分开：`collectWorkflowEvents` 允许 `includeEvents:
+    /// false`（`events: []`）和 `maxEvents` 截断，而 `classifyRun` **只看
+    /// store**——`events: []` 时 `kind` 依然正确，所以状态不可能由事件推出
+    /// （`runtime-driver.ts:968-977`、`:1179-1214`、`types.ts:449-457`）。
+    /// 我们的 [`RunEventStream::outcome`] 就是这套顺序的直译：drain 完再读
+    /// `RunState`。
+    ///
+    /// # 幂等重放为什么让「看末事件」必然出错
+    ///
+    /// 重 drive 一个已挂起的 run 时，primitive 短路、**一条新日志都不写**
+    /// （上游：*"primitives short-circuit via `findCheckpoint` lookup in
+    /// history"*，commit `4f64b9c`；本仓对应 `exec_pause_with` 的
+    /// `already_paused` 门），流里只剩 `RUN_STARTED`——凭末事件分不出「挂起」
+    /// 和「结束」。`Paused` 只能从 `RunState.status` 拿。
+    ///
+    /// 完整决策记录见 `docs/tanstack-alignment.md` 的「决策（2026-09-30）」。
+    pub fn from_run_state(state: RunState) -> Self {
+        Self {
+            run_id: state.run_id,
+            status: state.status,
+            output: state.output,
+            error: state.error,
+        }
+    }
+
+    /// [`Self::from_run_state`] 的 `Result` 版——`RunState` 读不出来才算错。
+    pub fn try_from_run_state(state: Option<RunState>) -> Result<Self, WorkflowError> {
+        state.map(Self::from_run_state).ok_or_else(|| {
+            WorkflowError::Internal("run state not found after drive".into())
+        })
+    }
+}
+
 /// Resolves which workflow definition drives a run.
 ///
 /// 真正的实现在 [`crate::registry::select_workflow_version`]（对齐上游
@@ -311,24 +362,252 @@ pub use crate::registry::select_workflow_version;
 /// On resume, `ctx.step` short-circuits succeeded checkpoints (cached result,
 /// `run` not re-executed) and rethrows failed ones. Multiplex step results
 /// however you like — the log is the only source of truth.
-pub async fn run_workflow(
-    opts: &RunWorkflowOptions,
-) -> Result<RunOutcome, WorkflowError> {
-    let workflow: &WorkflowDefinition = &opts.workflow;
-    let store = Arc::clone(&opts.run_store);
-    let publish = opts.publish.clone();
-
+pub fn run_workflow(opts: impl Into<RunWorkflowOptions>) -> RunEventStream {
+    // run_id 必须**只在这里定一次**并写回 `opts`：stream 自己要按它回 store 读
+    // 结果（[`Self::outcome`]），drive 也要按它写日志。两处各生成一次的话，
+    // `opts.run_id` 为 `None` 时跨过一个 ms 边界就会拿到两个不同的 id。
+    // 定下来之后 `publish` 也能直接拿到它——上游得在循环里等 `RUN_STARTED`
+    // 出现才敢用（`runIdForPublish`，`run-workflow.ts:116-119`）。
+    let mut opts = opts.into();
     let run_id = opts
         .run_id
         .clone()
         .unwrap_or_else(|| format!("run_{}", now_ms()));
-    let ts = now_ms();
+    opts.run_id = Some(run_id.clone());
+    let publish = opts.publish.clone();
+    // `outcome()` 要在 drain 之后回 store 读状态，所以这条 clone 得活过引擎。
+    let store = opts.run_store.clone();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<WorkflowEvent>();
 
-    // continue_from lives at the store layer: cut the log at the step's latest
-    // terminal checkpoint so the replayed handler re-runs that suffix.
-    if let Some(cf) = &opts.continue_from {
-        store.truncate_log_at_step(&run_id, cf)?;
+    // 引擎在后台跑，事件往 `tx` 推。tx 的最后一个副本随引擎 future 一起
+    // drop，于是「关通道」就是流的终点（上游靠 `executionDone` 标志，
+    // 效果一样但我们不需要它——sender 的存活期就是执行期）。
+    tokio::spawn(async move {
+        if let Err(ev) = drive(opts, tx.clone()).await {
+            // **错误也是事件**（上游 `drive().catch()` 吞掉异常、所有失败都
+            // `emit(RUN_ERRORED)`，`run-workflow.ts:96-99`）。宿主只面对一种
+            // 失败通道。
+            let _ = tx.send(ev);
+        }
+    });
+
+    RunEventStream {
+        rx,
+        publish,
+        run_id,
+        store,
+        inflight: None,
+        pending: None,
+        finished: false,
     }
+}
+
+/// [`run_workflow`] 返回的事件流 —— 上游 `AsyncIterable<WorkflowEvent>` 的对应物
+/// （`run-workflow.ts:74-83`）。
+///
+/// ```ignore
+/// let mut stream = run_workflow(opts);
+/// while let Some(event) = stream.next().await {
+///     // event 是统一的 WorkflowEvent 联合类型 —— 耐久的 + 仅观测的
+/// }
+/// let outcome = run_workflow(opts).outcome().await?;    // drain 完回 store 读
+/// ```
+///
+/// # 与上游同一套机制
+///
+/// 上游是个 `async function*`：`queue` 是裸数组，`emit` push 进去并唤醒一个
+/// park 着的 promise，生成器循环 `shift()` → `await publish` → `yield`
+/// （`run-workflow.ts:85-134`）。Rust 没有生成器语法，所以这里是同一套东西的
+/// poll 机版本：
+///
+/// | 上游 | 这里 |
+/// | --- | --- |
+/// | `queue: Array<WorkflowEvent>` | `tokio::sync::mpsc::UnboundedReceiver` |
+/// | `emit` = `queue.push` + 唤醒 | `EngineRuntime::publish` = `tx.send`（非阻塞）|
+/// | `const exec = drive(...)` 后台跑 | [`run_workflow`] 里 `tokio::spawn(drive(...))` |
+/// | `await new Promise(r => resolveWait = r)` | `poll_recv` 返回 `Pending`，由 waker 唤醒 |
+/// | `if (executionDone) break` | `poll_recv` 返回 `None`（sender 全 drop 了）|
+/// | `await options.publish(...)` 然后 `yield` | [`Self::inflight`] + [`Self::pending`] 两个槽 |
+///
+/// 顺序是刻意的：**先 await publish，再把事件交给消费者**，跟上游一致。所以慢
+/// publisher 会拖慢消费端，但不会拖慢引擎——引擎只做一次非阻塞 `send`。
+///
+/// # 错误不在流里
+///
+/// 引擎的所有失败都变成 `RUN_ERRORED` 事件（上游 `drive().catch()` 同形），
+/// 所以这个流**没有** `Err` 变体：宿主只面对一种失败通道。
+///
+/// # 成败不在流里
+///
+/// 流里**只有本次 drive 写进日志的事件**（上游：*"every event the engine
+/// appends to the run's log"*）。run 现在什么状态要问 store——重放幂等，
+/// 重 drive 一个已挂起的 run 一条新事件都不写，凭末事件分不出「挂起」和
+/// 「结束」。[`Self::outcome`] 就是「drain 完 → `store.get_run_state`」，
+/// 对齐上游 `collectWorkflowEvents` + `loadRun` + `classifyRun` 的顺序。
+/// 详见 [`RunOutcome::from_run_state`]。
+pub struct RunEventStream {
+    rx: tokio::sync::mpsc::UnboundedReceiver<WorkflowEvent>,
+    /// 上游 `options.publish`：yield 之前 await 它。
+    publish: Option<PublisherFn>,
+    /// 正在 await 的 publish future。`PublisherFn` 返回 `BoxFuture<'static>`，
+    /// 所以它不借用 `self`——手写 poll 机里这是唯一能存的中间态。
+    inflight: Option<crate::define::BoxFuture<'static, ()>>,
+    /// 「已取到、正在等 publish 落地」的那条事件。对应上游
+    /// `await options.publish(ev)` 之后 `yield ev` 里那个还没交出去的 `ev`
+    /// ——poll 机里必须显式留住它，否则 await 完就不知道该 yield 哪条了。
+    pending: Option<WorkflowEvent>,
+    /// 建流时就算出来了，喂给 publish（上游得等 `RUN_STARTED` 出现才敢用）。
+    run_id: String,
+    /// drain 完之后用来读 run 结果的 store。上游 runtime 是 `collectWorkflowEvents`
+    /// 之后 `store.loadRun` 再 `classifyRun`（`runtime-driver.ts:783-795`），
+    /// 顺序一模一样——流负责「本次写了哪些日志」，store 负责「run 现在什么状态」。
+    store: Arc<dyn RunStore>,
+    finished: bool,
+}
+
+impl RunEventStream {
+    /// 排干事件流，然后从 store 读出 [`RunOutcome`]。
+    ///
+    /// 这是「只要结果、不留事件」那条路的落点，也是流化之后 `run_workflow` 的
+    /// 等价替代（旧的 `run_workflow(&opts).outcome().await -> Result<RunOutcome>`）。
+    ///
+    /// 两步的分工逐行对齐上游 runtime：先 `collectWorkflowEvents` 排干
+    /// （`runtime-driver.ts:1179-1214`），再 `store.loadRun` 拿状态
+    /// （`:783-795`）——**状态不从末事件推**。原因见
+    /// [`RunOutcome::from_run_state`]：重放幂等，重 drive 一个已挂起的 run
+    /// 一条新事件都不写，凭末事件分不出「挂起」和「结束」。
+    pub async fn outcome(self) -> Result<RunOutcome, WorkflowError> {
+        let store = self.store.clone();
+        let run_id = self.run_id.clone();
+        self.drain().await;
+        RunOutcome::try_from_run_state(store.get_run_state(&run_id)?)
+    }
+
+    /// 把流排干收成 `Vec`——`StreamExt::collect` 的零依赖版（`futures-core` 只有
+    /// `Stream` 本体，`.collect()` 在 `futures-util` 里，而那一个包只为了这一个
+    /// 方法不值）。
+    ///
+    /// 要逐条事件时用它；只要结果用 [`Self::outcome`]（它还会去 store 读状态）：
+    ///
+    /// ```ignore
+    /// let events = run_workflow(opts).collect().await;
+    /// let outcome = run_workflow(opts).outcome().await?;
+    /// ```
+    pub async fn collect(self) -> Vec<WorkflowEvent> {
+        let mut this = self;
+        let mut out = Vec::new();
+        while let Some(ev) = this.drain_one().await {
+            out.push(ev);
+        }
+        out
+    }
+
+    /// 排干但不留事件，回吐条数。对齐上游 `collectWorkflowEvents` 的
+    /// `includeEvents: false` + `maxEvents: 0` 那一档——事件照样计数、照样走
+    /// publish，只是数组是空的。
+    pub async fn drain(self) -> usize {
+        let mut this = self;
+        let mut n = 0;
+        while this.drain_one().await.is_some() {
+            n += 1;
+        }
+        n
+    }
+
+    /// 取下一条事件，`None` 表示流结束。`poll_fn` 把 `Poll` 拆开，只把值交出来。
+    async fn drain_one(&mut self) -> Option<WorkflowEvent> {
+        std::future::poll_fn(|cx| {
+            futures_core::Stream::poll_next(std::pin::Pin::new(&mut *self), cx)
+        })
+        .await
+    }
+}
+
+impl std::fmt::Debug for RunEventStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunEventStream")
+            .field("run_id", &self.run_id)
+            .field("has_publish", &self.publish.is_some())
+            .field("finished", &self.finished)
+            .finish()
+    }
+}
+
+impl futures_core::Stream for RunEventStream {
+    type Item = WorkflowEvent;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<WorkflowEvent>> {
+        use std::task::Poll;
+        let me = self.get_mut();
+        if me.finished {
+            return Poll::Ready(None);
+        }
+        loop {
+            // ① 上一次留下的 publish 还没 await 完？先 await 它——
+            //    对应上游 `await options.publish(...)` 在 `yield` 之前。
+            //    `take` 出来再放回去，免得和下面的 `me.rx` 撞借用。
+            if let Some(mut fut) = me.inflight.take() {
+                if fut.as_mut().poll(cx).is_pending() {
+                    me.inflight = Some(fut);
+                    return Poll::Pending;
+                }
+                // await 完了 → 把留住的那条事件交出去（`yield ev`）。
+                if let Some(ev) = me.pending.take() {
+                    return Poll::Ready(Some(ev));
+                }
+            }
+            // ② 取下一个事件。对应上游 `while (queue.length > 0) queue.shift()`。
+            match me.rx.poll_recv(cx) {
+                Poll::Pending => return Poll::Pending,
+                // 所有 sender 都 drop 了 = 引擎结束 = 流结束。上游是
+                // `executionDone` 标志，语义一样。
+                Poll::Ready(None) => {
+                    me.finished = true;
+                    return Poll::Ready(None);
+                }
+                Poll::Ready(Some(ev)) => {
+                    if let Some(publish) = me.publish.clone() {
+                        // 逐个兜住：宿主 panic 不得掀掉 run（上游 `try/catch`，
+                        // *"A misbehaving publisher must not break the run"*)。
+                        // future 在**构造**时才 panic，所以只能连 future 一起 catch。
+                        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            publish(&me.run_id, ev.clone())
+                        }));
+                        match caught {
+                            Ok(fut) => {
+                                me.pending = Some(ev);
+                                me.inflight = Some(fut);
+                                // 回到 ①：await 完 publish 才交出这条事件。
+                                continue;
+                            }
+                            // publisher 构造就炸了：吞掉，照常 yield（上游同策略）。
+                            Err(_) => return Poll::Ready(Some(ev)),
+                        }
+                    }
+                    return Poll::Ready(Some(ev));
+                }
+            }
+        }
+    }
+}
+
+/// run_workflow 的内部驱动：**只吐事件，不返回错误**。
+///
+/// 每条失败路径都 `Err(RunErrored{..})` 出去，由 [`run_workflow`] 转成事件投递。
+/// store 写失败时那条终局事件进不了日志（append 本身失败了），但仍会出现在流里
+/// ——和上游一样，流是内存里的队列，事件与日志不是同一件事。
+async fn drive(
+    opts: RunWorkflowOptions,
+    publish_tx: tokio::sync::mpsc::UnboundedSender<WorkflowEvent>,
+) -> Result<(), WorkflowEvent> {
+    let workflow: &WorkflowDefinition = &opts.workflow;
+    let store = Arc::clone(&opts.run_store);
+
+    let run_id = opts.run_id.clone().unwrap_or_else(|| format!("run_{}", now_ms()));
+    let ts = now_ms();
 
     // A run that was cancelled while parked must not be resurrected by a drive:
     // `cancel_run` flipped `status` to `Aborted` and nothing is watching a
@@ -339,18 +618,52 @@ pub async fn run_workflow(
     // from the log, which is how `resumed_run_replays_from_log_without_rewaiting`
     // asserts replay-safety; only `Aborted` is latched here, because a cancelled
     // run's handler has unfinished business and must not run again.)
-    if let Some(st) = store.get_run_state(&run_id)?
+    let persisted = match store.get_run_state(&run_id) {
+        Ok(st) => st,
+        Err(e) => return Err(err_event(&run_id, e, RunErrorCode::Error)),
+    };
+    // continue_from lives at the store layer: cut the log at the step's latest
+    // terminal checkpoint so the replayed handler re-runs that suffix.
+    //
+    // 放在读 `persisted` **之后**：截断失败时得有个 `RunState` 可写，否则
+    // `outcome()` 会把上一次 drive 留下的状态（比如 `Finished`）当成这次的结果
+    // ——一个「失败了但看起来成功」的 run。仍然在 `get_events` 与
+    // `set_run_state(Running)` 之前，所以截断语义不变。
+    if let Some(cf) = &opts.continue_from
+        && let Err(e) = store.truncate_log_at_step(&run_id, cf)
+    {
+        // run 从没存在过（没有 `persisted`）就没什么可写——事件照样报出去。
+        let Some(mut st) = persisted else {
+            return Err(err_event(&run_id, e, RunErrorCode::Error));
+        };
+        st.status = RunStatus::Errored;
+        st.error = Some(RunError {
+            name: "StoreError".to_string(),
+            message: e.to_string(),
+        });
+        st.updated_at = now_ms();
+        let _ = store.set_run_state(&run_id, &st);
+        return Err(err_event(&run_id, e, RunErrorCode::Error));
+    }
+
+    if let Some(st) = &persisted
         && st.status == RunStatus::Aborted
     {
-        return Ok(RunOutcome {
-            run_id,
-            status: RunStatus::Aborted,
-            output: None,
-            error: st.error,
+        // `cancel_run` 只翻 `RunState.status`、**不 append 终局事件**（它不是
+        // 引擎路径），所以这条事实只能 emit 到流里。日志保持原样——重复 append
+        // 一条终局事件会把「被取消」记成两次。
+        return Err(WorkflowEvent::RunErrored {
+            ts: now_ms(),
+            run_id: run_id.clone(),
+            error: st
+                .error
+                .clone()
+                .unwrap_or_else(|| RunError::cancelled()),
+            code: RunErrorCode::Aborted,
         });
     }
 
-    let run_state = match store.get_run_state(&run_id)? {
+    let run_state = match persisted {
         Some(mut st) => {
             st.status = RunStatus::Running;
             st.error = None;
@@ -378,7 +691,9 @@ pub async fn run_workflow(
             updated_at: ts,
         },
     };
-    store.set_run_state(&run_id, &run_state)?;
+    if let Err(e) = store.set_run_state(&run_id, &run_state) {
+        return Err(err_event(&run_id, e, RunErrorCode::Error));
+    }
 
     // Version routing: resume against the definition whose `version` the run
     // persisted (workflow or one of its `previous_versions`). 版本化 run 匹配
@@ -389,11 +704,19 @@ pub async fn run_workflow(
         .as_deref()
         .or(workflow.version.as_deref());
     let Some(active) = select_workflow_version(workflow, persisted_version) else {
-        return Err(WorkflowError::Validation(format!(
-            "workflow version mismatch: run `{run_id}` was started under version \
-             {persisted_version:?}, which is not the current version nor in \
-             `previous_versions`"
-        )));
+        let e = anyhow::anyhow!(
+            "run `{run_id}` was started under version {persisted_version:?}, \
+             which is not the current version nor in `previous_versions`"
+        );
+        // 必须落盘：状态是 store 的事（[`RunOutcome::from_run_state`]），只 emit
+        // 不写的话 `outcome()` 会读回 `Running`——一个永远不会自己结束的 run。
+        return Err(error_persisted(
+            &store,
+            run_state,
+            &run_id,
+            &e,
+            RunErrorCode::WorkflowVersionMismatch,
+        ));
     };
 
     // Per-invocation state: re-derived from `initialize(input)` on every
@@ -403,15 +726,18 @@ pub async fn run_workflow(
     // shares that source for consistency.
     let state = match (active.initialize)(&opts.input) {
         Ok(s) => s,
-        Err(e) => return init_failed(&store, run_state, &run_id, &e, publish.as_ref()).await,
+        Err(e) => return Err(error_persisted(&store, run_state, &run_id, &e, RunErrorCode::Validation)),
     };
     if let Some(validate) = &active.state_validator
         && let Err(e) = validate(&state)
     {
-        return init_failed(&store, run_state, &run_id, &e, publish.as_ref()).await;
+        return Err(error_persisted(&store, run_state, &run_id, &e, RunErrorCode::Validation));
     }
 
-    let events = store.get_events(&run_id)?;
+    let events = match store.get_events(&run_id) {
+        Ok(ev) => ev,
+        Err(e) => return Err(err_event(&run_id, e, RunErrorCode::Error)),
+    };
     let lives = fold_step_states(&events);
     let log_len = events.len();
 
@@ -425,43 +751,11 @@ pub async fn run_workflow(
 
     let state_mirror: Arc<Mutex<serde_json::Value>> = Arc::new(Mutex::new(state.clone()));
 
-    // 事件扇出：同步调用点只 `send`（非阻塞），drain task 独立 await publish。
-    // 上游等价物是 `runWorkflow` 这个 async generator：它在 `queue.shift()` 之后
-    // `await publish`，而执行在**另一个** task 里往 queue 推 —— 所以慢 publish
-    // 拖慢的是消费端吞吐，不是引擎进度（`run-workflow.ts:85-134`）。
-    let (publish_tx, drain) = match opts.publish.clone() {
-        None => (None, None),
-        Some(publish) => {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Fanout>();
-            // run_id 在 drain task 生命周期内恒定，clone 一份进去即可
-            // (`&'static` 借用需要独占所有权)。
-            let drain_run_id = run_id.clone();
-            let drain = tokio::spawn(async move {
-                // 串行 await，保证投递顺序 = 产生顺序（无界队列不会重排）。
-                while let Some(msg) = rx.recv().await {
-                    let ev = match msg {
-                        Fanout::Event(ev) => ev,
-                        // 显式收尾信号：保证「run_workflow 返回前最后一条事件
-                        // （RUN_FINISHED / RUN_ERRORED）也已投递」。
-                        Fanout::Shutdown => break,
-                    };
-                    // 逐个兜住：宿主 panic 不得掀掉 run（上游同形，见 publish 文档）。
-                    // future 在构造时才 panic，所以只能连 future 一起 catch。
-                    // 按值移交：drain task 独占这份事件，publish 也独占它，
-                    // 所以全程只有 publish() 那一次克隆。
-                    let fut = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        publish(&drain_run_id, ev)
-                    }));
-                    if let Ok(fut) = fut {
-                        // `await` 期间的 panic 由 task 级隔离兜住（见收尾 join）。
-                        let _ = fut.await;
-                    }
-                }
-            });
-            (Some(tx), Some(drain))
-        }
-    };
-
+    // 事件扇出只有一个动作：`send` 进无界通道。`publish` **不在这里**——它在
+    // [`RunEventStream::poll_next`] 里、yield 之前被 await，与上游
+    // `await options.publish(...)` 然后 `yield event`（`run-workflow.ts:120-129`）
+    // 同一个位置。慢 publish 因此只拖慢**消费端吞吐**，不拖慢引擎进度：引擎只做
+    // 一次非阻塞 `send`。
     let inner = Arc::new(EngineRuntime {
         run_id: run_id.clone(),
         input: opts.input.clone(),
@@ -473,7 +767,7 @@ pub async fn run_workflow(
         lives: Mutex::new(lives),
         target_step: opts.target_step.clone(),
         target_reached: AtomicBool::new(target_reached),
-        publish_tx: publish_tx.clone(),
+        publish_tx: Some(publish_tx.clone()),
         now_counter: AtomicUsize::new(0),
         uuid_counter: AtomicUsize::new(0),
         deadline: opts.deadline,
@@ -508,15 +802,13 @@ pub async fn run_workflow(
     let (status, output, failure) = match handler_result {
         Ok(output) => (RunStatus::Finished, Some(output), None),
         Err(e) if e.downcast_ref::<StepHalt>().is_some() => (RunStatus::Finished, None, None),
-        Err(e) if e.downcast_ref::<WorkflowParked>().is_some() => {
-            finish_fanout(publish_tx.as_ref(), drain).await;
-            return Ok(RunOutcome {
-                run_id,
-                status: RunStatus::Paused,
-                output: None,
-                error: None,
-            });
-        }
+        // 挂起不是失败、也不是正常结束：run 停在挂起点等外部投递，
+        // `exec_pause` 已经把 checkpoint 与 RunState 投影写好了。**不 append
+        // 终局事件**（对齐上游 `if (engine.paused) return`，`run-workflow.ts:529`），
+        // 流到此自然结束。注意这次 drive **可能一条新事件都没写**（重 drive 一个
+        // 已挂起的 run 时 `already_paused` 短路），所以 `Paused` 判不出来——它
+        // 已经由 `exec_pause_with` 写进 RunState 了，宿主从 store 读。
+        Err(e) if e.downcast_ref::<WorkflowParked>().is_some() => return Ok(()),
         Err(e) if e.downcast_ref::<WorkflowCancelled>().is_some() => (
             RunStatus::Aborted,
             None,
@@ -543,8 +835,7 @@ pub async fn run_workflow(
         },
     };
     if let Err(e) = inner.append(&terminal) {
-        finish_fanout(publish_tx.as_ref(), drain).await;
-        return Err(e);
+        return Err(err_event(&run_id, e, RunErrorCode::Error));
     }
     inner.publish(&terminal);
 
@@ -553,94 +844,80 @@ pub async fn run_workflow(
     st.output = output.clone();
     st.error = failure.as_ref().map(|(e, _)| e.clone());
     st.updated_at = now_ms();
-    store.set_run_state(&run_id, &st)?;
+    if let Err(e) = store.set_run_state(&run_id, &st) {
+        return Err(err_event(&run_id, e, RunErrorCode::Error));
+    }
 
-    finish_fanout(publish_tx.as_ref(), drain).await;
-
-    Ok(RunOutcome {
-        run_id,
-        status,
-        output,
-        error: failure.map(|(e, _)| e),
-    })
+    Ok(())
 }
 
-/// 收尾事件扇出：发 shutdown 信号并等 drain task 把队列排空。
-///
-/// **必须在每条 return 路径上调用**（Paused 早退、正常收尾、以及 append 失败
-/// 的 `?` 传播）——否则最后一条事件（`RUN_FINISHED` / `RUN_ERRORED`）可能还
-/// 在队列里，`run_workflow` 就返回了，宿主会漏掉终态。
-///
-/// 注意这会让「慢 publish」延迟 **run_workflow 的返回**，但不会延迟引擎执行
-/// （执行早已结束）。这和改造前一致：原先 publish 是内联同步调用，返回前必然
-/// 已投递完毕——语义是守住的，没有静默削弱成 fire-and-forget。
-///
-/// 死锁风险与改造前相同：publish 若 `await` 依赖本次 run 完成的东西，仍会挂。
-/// 那在旧语义下也会挂（内联调用时挂），所以不是回归。
-async fn finish_fanout(
-    tx: Option<&tokio::sync::mpsc::UnboundedSender<Fanout>>,
-    drain: Option<tokio::task::JoinHandle<()>>,
-) {
-    if let Some(tx) = tx {
-        let _ = tx.send(Fanout::Shutdown);
-    }
-    if let Some(drain) = drain {
-        let _ = drain.await;
+/// 把一条 store 层失败包成 `RUN_ERRORED` 事件（**不 append**——落盘失败时
+/// 再写日志大概率也会失败，且 store 状态可能已经不一致）。
+fn err_event(run_id: &str, e: impl std::fmt::Display, code: RunErrorCode) -> WorkflowEvent {
+    WorkflowEvent::RunErrored {
+        ts: now_ms(),
+        run_id: run_id.to_string(),
+        error: RunError {
+            name: "StoreError".to_string(),
+            message: e.to_string(),
+        },
+        code,
     }
 }
 
-/// Persists a run that failed during pre-handler initialization (state
-/// `initialize` returning an error, or the `state_schema` shape check
-/// rejecting the built state) and returns the errored outcome. Counterpart of
-/// TanStack zod `.safeParse` failing validation: the run is recorded as
-/// failed rather than left dangling.
+/// 把一条**引擎在跑起来之前**就知道的失败落盘，并返回对应的 `RUN_ERRORED` 事件。
 ///
-/// **只 publish，不 append**：什么都没跑，不该在日志里留下半条记录——TanStack
+/// 覆盖两类：pre-handler 初始化失败（state `initialize` 报错、`state_schema`
+/// 形状检查拒绝——对应 TanStack zod `.safeParse` 失败，报错而不是悬着），以及
+/// 版本路由失配。
+///
+/// **落盘是必须的，不是可选的**：状态归 store 管（[`RunOutcome::from_run_state`]），
+/// 只 emit 不写的话 `outcome()` 会读回上一个状态（通常是 `Running`）——一个看起来
+/// 永远不会自己结束的 run。对齐上游 `drive` 的 catch 分支：`status='errored'` +
+/// `error` + `setRunState`，然后 `emitAndAppend(RUN_ERRORED)`
+/// （`run-workflow.ts:555-570`）。
+///
+/// **只走流，不 append**：引擎还没开始跑，不该在日志里留下半条记录——TanStack
 /// 同理，他们的 validation 失败走 `emit(...)`（只进内存队列），不是
 /// `emitAndAppend`（`run-workflow.ts:215`）。
-async fn init_failed(
+fn error_persisted(
     store: &Arc<dyn RunStore>,
     mut run_state: RunState,
     run_id: &str,
     err: &anyhow::Error,
-    publish: Option<&PublisherFn>,
-) -> Result<RunOutcome, WorkflowError> {
+    code: RunErrorCode,
+) -> WorkflowEvent {
     let run_err = RunError::from_anyhow(err);
-    run_state.status = RunStatus::Errored;
+    run_state.status = match code {
+        RunErrorCode::Aborted => RunStatus::Aborted,
+        _ => RunStatus::Errored,
+    };
     run_state.error = Some(run_err.clone());
     run_state.updated_at = now_ms();
-    store.set_run_state(run_id, &run_state)?;
-    if let Some(publish) = publish {
-        // 这条路径在 drain task 建立**之前**返回（handler 都没跑起来），所以直接
-        // await 即可——没有引擎执行会被拖慢。panic 仍然吞掉，与 publish 同策略。
-        let ev = WorkflowEvent::RunErrored {
-            ts: now_ms(),
-            run_id: run_id.to_string(),
-            error: run_err.clone(),
-            code: RunErrorCode::Validation,
-        };
-        if let Ok(fut) =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| publish(run_id, ev)))
-        {
-            let _ = fut.await;
-        }
-    }
-    Ok(RunOutcome {
+    // 落盘失败不改变这条事件：流是内存队列，与日志是两件事（上游同形）。
+    let _ = store.set_run_state(run_id, &run_state);
+    WorkflowEvent::RunErrored {
+        ts: now_ms(),
         run_id: run_id.to_string(),
-        status: RunStatus::Errored,
-        output: None,
-        error: Some(run_err),
-    })
+        error: run_err,
+        code,
+    }
 }
 
 /// Sync convenience over a local multi-thread runtime for callers that are
 /// not async themselves (e.g. LocalDub's CLI entrypoint).
-pub fn run_workflow_sync(opts: &RunWorkflowOptions) -> Result<RunOutcome, WorkflowError> {
+///
+/// 事件流在这里被**排干**：本函数的契约是「跑到终态并交出 outcome」，中间事件
+/// 不外泄。要逐条看事件就用 async 的 [`run_workflow`]。`publish` 回调仍然逐条
+/// 触发（它在 [`RunEventStream`] 里被 await，与 async 路径同一处）。
+pub fn run_workflow_sync(
+    opts: impl Into<RunWorkflowOptions>,
+) -> Result<RunOutcome, WorkflowError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_time()
         .build()
         .map_err(|e| WorkflowError::Internal(format!("tokio runtime: {e}")))?;
-    rt.block_on(run_workflow(opts))
+    rt.block_on(async move { run_workflow(opts).outcome().await })
 }
 #[cfg(test)]
 mod tests {
@@ -669,7 +946,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(json!({ "x": 1 })),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert!(
             out.run_id.starts_with("run_"),
@@ -702,7 +979,7 @@ mod tests {
                 .input(json!({}))
             .run_id("bad-init:r"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
         assert!(out.error.unwrap().message.contains("cannot build state"));
@@ -734,7 +1011,7 @@ mod tests {
                 .input(json!({}))
             .run_id("bad-state:r"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
         assert!(
@@ -763,7 +1040,7 @@ mod tests {
                 .input(json!({}))
             .run_id("code:err"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
 
@@ -792,7 +1069,7 @@ mod tests {
                 .input(json!({}))
             .run_id("code:abort"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Aborted);
 
@@ -836,7 +1113,7 @@ mod tests {
                 .run_id("rid:1")
                 .publish(Some(publish)),
         )
-        .await
+        .outcome().await
         .unwrap();
 
         let seen = seen.lock().unwrap();
@@ -870,7 +1147,7 @@ mod tests {
             .run_id("code:validation")
             .publish(Some(publish)),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
         assert!(
@@ -914,7 +1191,7 @@ mod tests {
                 .input(json!({}))
             .run_id("one:r"),
         )
-        .await
+        .outcome().await
         .unwrap();
 
         let from_outcome = out.error.expect("RunOutcome.error");
@@ -977,7 +1254,7 @@ mod tests {
                         .input(serde_json::json!({}))
                     .run_id("ver:mismatch"),
                 )
-                .await
+                .outcome().await
             }
         });
         // 等挂起（`RunState` 信封此时已记下 `workflow_version = "v1"`）。
@@ -992,21 +1269,38 @@ mod tests {
         task.abort();
         let _ = task.await;
 
-        // v2 **不带** v1 作 previous_versions → resume 应报错而非回退到 v2。
+        // v2 **不带** v1 作 previous_versions → 应终局报错而非回退到 v2。
+        // 失败走**事件**（对齐上游：他们的版本失配也是 `emit(RUN_ERRORED{code:
+        // 'workflow_version_mismatch'})`，`run-workflow.ts:286-297`），不是
+        // `Err`——run_workflow 的流没有 Err 变体。
         let v2 = WorkflowDefinition::new("ver")
             .version("v2")
             .handler(|_ctx: WorkflowCtx| async move { Ok(serde_json::Value::Null) });
-        let err = run_workflow(
+        let events = run_workflow(
             &RunWorkflowOptions::new(Arc::new(v2.clone()), store.clone())
                 .input(serde_json::json!({}))
                 .run_id("ver:mismatch"),
         )
-        .await
-        .expect_err("版本不匹配应报错");
-        assert!(
-            matches!(err, WorkflowError::Validation(ref m) if m.contains("version mismatch")),
-            "应为版本不匹配错误，实际 {err:?}"
-        );
+        .collect()
+        .await;
+        match events.last() {
+            Some(WorkflowEvent::RunErrored { code, error, .. }) => {
+                assert_eq!(
+                    *code,
+                    RunErrorCode::WorkflowVersionMismatch,
+                    "错误码应为 workflow_version_mismatch"
+                );
+                assert!(
+                    error.message.contains("version"),
+                    "消息应说明是版本问题，实际 {error:?}"
+                );
+            }
+            other => panic!("末事件应为 RunErrored，实际 {other:?}"),
+        }
+        // 派生出的 outcome 是 Errored（不是 Err）——状态从 store 读
+        let state = store.get_run_state("ver:mismatch").unwrap().unwrap();
+        let outcome = RunOutcome::from_run_state(state);
+        assert_eq!(outcome.status, RunStatus::Errored);
     }
 
     #[tokio::test]
@@ -1050,7 +1344,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
         assert!(out.error.unwrap().message.contains("boom"));
@@ -1063,7 +1357,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id(run_id.clone()),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(again.status, RunStatus::Errored);
         assert_eq!(
@@ -1079,7 +1373,7 @@ mod tests {
             .run_id(run_id)
             .continue_from("b"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(resumed.status, RunStatus::Finished);
         let l = log.lock().unwrap();
@@ -1118,7 +1412,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         let second = run_workflow(
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
@@ -1126,7 +1420,7 @@ mod tests {
             .run_id(out.run_id)
             .continue_from("b"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(second.status, RunStatus::Finished);
         let l = log.lock().unwrap();
@@ -1167,7 +1461,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .target_step("b"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let l = log.lock().unwrap();
@@ -1195,7 +1489,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output, Some(serde_json::json!({ "out": { "x": 1 } })));
@@ -1206,6 +1500,70 @@ mod tests {
 
     /// resume 按持久化 `workflow_version` 路由到 previous version 的 handler；
     /// 全新 run 用当前版本。
+    /// 回归护栏：**重 drive 一个已挂起的 run，流里一条新事件都不写，但
+    /// `outcome()` 仍然报 `Paused`**。
+    ///
+    /// 这是把状态改成「从 store 读」的根本原因。`exec_pause_with` 的
+    /// `already_paused` 门让重放幂等（对齐上游 `findCheckpoint` 短路，
+    /// commit `4f64b9c`），代价是第二次 drive 的流只有 `RUN_STARTED`——
+    /// 凭末事件分不出「挂起」和「结束」。`Paused` 只能问 store。
+    ///
+    /// 顺带钉住 wait 投影的清除点：drive 前导会清掉上一轮挂起留下的
+    /// `pending_approval`（对齐上游 `run-workflow.ts:336-342`），重挂起再投影一次，
+    /// 所以跑完之后它必须还在——否则「清干净了但没重投影」和「没清」就分不开了。
+    #[tokio::test]
+    async fn redrive_of_parked_run_writes_no_new_events_but_still_reports_paused() {
+        let store = Arc::new(InMemoryStore::new());
+        let wf = WorkflowDefinition::new("park").handler(|ctx: WorkflowCtx| async move {
+            ctx.approve("gate", "等审批").await?;
+            Ok(serde_json::json!({ "ok": true }))
+        });
+        let opts = |store: Arc<dyn RunStore>| {
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store)
+                .input(serde_json::json!({}))
+                .run_id("park:1")
+        };
+
+        // 第一次 drive：真的挂起，写下 STEP_PAUSED。
+        let first = run_workflow(&opts(store.clone())).collect().await;
+        assert!(
+            first.iter().any(|e| matches!(e, WorkflowEvent::StepPaused { .. })),
+            "首次挂起应写 STEP_PAUSED，实际 {:?}",
+            first.iter().map(|e| e.type_name()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            run_workflow(&opts(store.clone())).outcome().await.unwrap().status,
+            RunStatus::Paused
+        );
+
+        // 第二次 drive：primitive 短路 → **零条新事件**（连 STEP_PAUSED 都不重写）。
+        let second = run_workflow(&opts(store.clone())).collect().await;
+        assert!(
+            !second.iter().any(|e| matches!(e, WorkflowEvent::StepPaused { .. })),
+            "重挂起不该重复 append STEP_PAUSED（日志幂等），实际 {:?}",
+            second.iter().map(|e| e.type_name()).collect::<Vec<_>>()
+        );
+        assert!(
+            !second.iter().any(|e| matches!(e, WorkflowEvent::RunFinished { .. })),
+            "重 drive 没跑完，不该有 RUN_FINISHED"
+        );
+
+        // 但状态仍然问得到，而且必须是 Paused——不是「流结束了所以不知道」。
+        assert_eq!(
+            run_workflow(&opts(store.clone())).outcome().await.unwrap().status,
+            RunStatus::Paused,
+            "Paused 只能从 RunState 来"
+        );
+        let st = store.get_run_state("park:1").unwrap().unwrap();
+        assert_eq!(st.status, RunStatus::Paused);
+        // 审批类挂起投影到 `pending_approval`（`waiting_for` 是 signal/sleep 那档，
+        // 见 `exec_pause_with` 里的 `WaitKind` 分支）。
+        assert!(
+            st.pending_approval.is_some(),
+            "重挂起后审批投影应重新写上，实际 {st:?}"
+        );
+    }
+
     #[tokio::test]
     async fn resume_routes_by_persisted_workflow_version() {
         let store = Arc::new(InMemoryStore::new());
@@ -1227,7 +1585,7 @@ mod tests {
                 .input(serde_json::json!({}))
             .run_id("ver:r"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out1.output, Some(serde_json::json!({ "ver": "v1" })));
 
@@ -1250,7 +1608,7 @@ mod tests {
                 .input(serde_json::json!({}))
                 .run_id("ver:r"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(
             out2.output,
@@ -1263,7 +1621,7 @@ mod tests {
                 .input(serde_json::json!({}))
                 .run_id("ver:r2"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(
             out3.output,

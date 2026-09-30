@@ -86,7 +86,7 @@ async fn slow_publisher_does_not_stall_the_engine() {
         &RunWorkflowOptions::new(wf, create_run_store_adapter(store))
             .input(serde_json::json!({}))
             .run_id("r")
-            .async_publish(move |_run_id, e| {
+            .async_publish(move |_run_id, _e| {
                 let slot = sink_slot.clone();
                 async move {
                     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -94,7 +94,7 @@ async fn slow_publisher_does_not_stall_the_engine() {
                 }
             }),
     )
-    .await
+    .outcome().await
     .unwrap();
     assert_eq!(out.status, RunStatus::Finished);
 
@@ -140,7 +140,7 @@ async fn async_publisher_can_await_without_blocking_the_runtime() {
                 }
             }),
     )
-    .await
+    .outcome().await
     .unwrap();
     assert_eq!(out.status, RunStatus::Finished);
     assert!(!seen.lock().unwrap().is_empty(), "async publisher 应被调用");
@@ -171,7 +171,7 @@ async fn delivery_order_matches_production_order() {
                 }
             }),
     )
-    .await
+    .outcome().await
     .unwrap();
 
     let got = seen.lock().unwrap().clone();
@@ -180,8 +180,10 @@ async fn delivery_order_matches_production_order() {
 
 /// **回归护栏：返回前终态事件已投递。**
 ///
-/// 收尾 `finish_fanout` 发 shutdown + join drain 就是为了这条。没有它，
-/// `RUN_FINISHED` 可能还躺在队列里，宿主就永远等不到 run 结束的通知。
+/// 这条护栏以前靠 `finish_fanout` 的 shutdown + join drain；现在流本身保证了它：
+/// 终态事件 `send` 进 channel 之后 sender 才 drop，channel 关闭时队列里的东西
+/// 仍会被逐条 `poll_recv` 取出（mpsc 语义），所以「关通道」不可能早于
+/// 「交付最后一条」。
 #[tokio::test]
 async fn terminal_event_is_delivered_before_run_workflow_returns() {
     let store = store_of("term");
@@ -201,7 +203,7 @@ async fn terminal_event_is_delivered_before_run_workflow_returns() {
                 }
             }),
     )
-    .await
+    .outcome().await
     .unwrap();
     assert_eq!(out.status, RunStatus::Finished);
 
@@ -246,7 +248,7 @@ async fn paused_path_also_drains_the_queue() {
                 }
             }),
     )
-    .await
+    .outcome().await
     .unwrap();
     assert_eq!(out.status, RunStatus::Paused);
 
@@ -285,7 +287,7 @@ async fn event_moves_into_the_future_with_no_extra_clone() {
                 }
             }),
     )
-    .await
+    .outcome().await
     .unwrap();
 
     let got = done.lock().unwrap().clone();

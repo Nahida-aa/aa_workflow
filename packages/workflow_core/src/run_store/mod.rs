@@ -128,13 +128,27 @@ pub enum RunAwaitable {
 /// `TInput` / `TOutput` 默认擦除为 [`serde_json::Value`]，因为 [`RunStore`] 的契约面
 /// 必须能装下任意 workflow 的 input/output（store 是 `dyn`，无法带泛型）。
 /// 想要具体类型的调用方用 [`RunState::into_typed`] 窄化。
+// `deserialize_with` 会让 serde 不再自动补 `TOutput: Deserialize` 这条 bound，
+// 得自己声明（`de_some` 的 `T: Deserialize` 要求）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "TInput: serde::Serialize, TOutput: serde::Serialize",
+    deserialize = "TInput: serde::de::DeserializeOwned, TOutput: serde::de::DeserializeOwned"
+))]
 pub struct RunState<TInput = serde_json::Value, TOutput = serde_json::Value> {
     pub run_id: String,
     pub workflow_id: String,
     pub workflow_version: Option<String>,
     pub status: RunStatus,
     pub input: TInput,
+    /// `Some(Value::Null)` 与 `None` 必须能区分——handler 返回 `null` 是合法的
+    /// （比如 `Ok(ctx.step(..).await?)` 而 step 的结果是 null）。
+    ///
+    /// serde 默认会把 `Some(Value::Null)` 序列化成 `null`、再把 `null` 读回成
+    /// `None`，两者在 JSON 层撞成一个值。`default` + `skip_serializing_if` 让
+    /// 「没有」表现为**键缺失**，`de_some` 让「键存在（哪怕是 null）」表现为
+    /// `Some`——用缺键来编码 `None`，两种状态就不撞了。
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "de_some")]
     pub output: Option<TOutput>,
     pub error: Option<RunError>,
     /// 挂起等待中的**全部** awaitable（对齐 TanStack `RunState.awaiting`，
@@ -150,6 +164,18 @@ pub struct RunState<TInput = serde_json::Value, TOutput = serde_json::Value> {
     pub pending_approval: Option<PendingApproval>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// 把「键存在」读成 `Some(v)`——包括 `v` 本身是 JSON `null` 的情况。
+///
+/// 配合 `#[serde(default)]`：键**缺失**时 serde 直接用 `Default::default()`
+/// （`None`）而不走这里，所以「缺失 = None」和「存在 = Some(含 null)」不冲突。
+fn de_some<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    T::deserialize(d).map(Some)
 }
 
 /// 从 store 的擦除形态（`RunState<Value, Value>`）窄化成具体类型。

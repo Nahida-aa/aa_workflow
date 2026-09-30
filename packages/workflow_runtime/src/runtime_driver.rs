@@ -882,7 +882,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
             opts = opts.yield_resume_at(at);
         }
         opts = opts.publish(Some(publish));
-        let drive_result = run_workflow(&opts).await;
+        let drive_result = run_workflow(&opts).outcome().await;
 
         // 心跳停止 + 释放 lease（无论 drive 成败）。
         let heartbeat_error = heartbeat.stop().await;

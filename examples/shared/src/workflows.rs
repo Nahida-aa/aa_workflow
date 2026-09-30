@@ -709,7 +709,7 @@ mod tests {
         opts: impl Fn(AnyWorkflowDefinition, Arc<dyn RunStore>) -> RunWorkflowOptions,
     ) -> RunStatus {
         run_workflow(&opts(wf.clone().into(), store.clone()))
-            .await
+            .outcome().await
             .unwrap()
             .status
     }
@@ -728,7 +728,7 @@ mod tests {
             .expect("测试应显式指定 run_id");
         signal_run(store.as_ref(), &run_id, step_id, payload).unwrap();
         run_workflow(&opts(wf.clone().into(), store.clone()))
-            .await
+            .outcome().await
             .unwrap()
     }
 
@@ -748,7 +748,7 @@ mod tests {
                 .clone()
                 .expect("测试应显式指定 run_id");
             let out = run_workflow(&opts(wf.clone().into(), store.clone()))
-                .await
+                .outcome().await
                 .unwrap();
             if out.status != RunStatus::Paused {
                 return out;
@@ -791,7 +791,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({ "orderId": "o-1", "expedited": true })),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
 
@@ -828,7 +828,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({ "orderId": "o-1" })),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Errored);
         assert!(out.error.unwrap().message.contains("payment gateway down"));
@@ -843,7 +843,7 @@ mod tests {
                 .input(serde_json::json!({ "orderId": "o-1" }))
                 .run_id(run_id.clone()),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(again.status, RunStatus::Errored);
         assert_eq!(
@@ -860,7 +860,7 @@ mod tests {
                 .run_id(run_id)
                 .continue_from("charge"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(resumed.status, RunStatus::Finished);
         assert_eq!(payment_gateway::attempts(), 4, "续跑只再跑一次 charge");
@@ -892,7 +892,7 @@ mod tests {
         let out = run_workflow(
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone()).input(input.clone()),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let run_id = out.run_id.clone();
@@ -906,7 +906,7 @@ mod tests {
                 .input(input.clone())
                 .run_id(run_id.clone()),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(again.status, RunStatus::Finished);
         let events_2 = store.get_events(&run_id).unwrap();
@@ -922,7 +922,7 @@ mod tests {
                 .run_id(run_id)
                 .continue_from("render"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(cont.status, RunStatus::Finished);
         let events_3 = store.get_events(&cont.run_id).unwrap();
@@ -1036,7 +1036,7 @@ mod tests {
             )
             .input(serde_json::json!({ "orderId": "o-1", "amount": 500 })),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(
@@ -1260,7 +1260,7 @@ mod tests {
                 .input(serde_json::json!({ "orderId": "o-1" }))
                 .run_id("fulfill:bad"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Errored, "缺 readyAt 应 schema 报错");
         let msg = out.error.unwrap().message;
@@ -1283,7 +1283,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(
             out.status,
@@ -1341,7 +1341,7 @@ mod tests {
             &RunWorkflowOptions::new(wf.clone(), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output, Some(serde_json::json!(99)));
@@ -1547,7 +1547,7 @@ mod tests {
                 .input(serde_json::json!({ "amount": 5 }))
                 .run_id("state:edge"),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         let o = out.output.unwrap();
@@ -1584,7 +1584,7 @@ mod tests {
                 move |_run_id: &str, e: WorkflowEvent| sink.lock().unwrap().push(e.clone()),
             ))),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(first.status, RunStatus::Paused);
 

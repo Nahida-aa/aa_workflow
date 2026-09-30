@@ -10,3 +10,6 @@ serde_json = "1"
 anyhow = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 uuid = { version = "1", features = ["v4"] }
+# `Stream` trait only (no executor, no combinators) — `RunEventStream` 手写
+# `poll_next`，对齐上游 `AsyncIterable<WorkflowEvent>`。
+futures-core = "0.3"

@@ -31,7 +31,7 @@ async fn run(tag: &str) -> serde_json::Value {
         &RunWorkflowOptions::new(step_write(), core)
             .input(serde_json::json!({ "base": 7 })),
     )
-    .await
+    .outcome().await
     .unwrap();
     assert_eq!(out.status, RunStatus::Finished);
     let o = out.output.unwrap();
@@ -140,7 +140,7 @@ async fn step_return_values_reach_the_log_for_all_three_steps() {
             .input(serde_json::json!({ "base": 7 }))
             .run_id("step-write-logged".to_string()),
     )
-    .await
+    .outcome().await
     .unwrap();
     assert_eq!(out.status, RunStatus::Finished);
 

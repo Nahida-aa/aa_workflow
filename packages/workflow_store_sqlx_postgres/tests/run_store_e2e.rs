@@ -115,7 +115,7 @@ fn run_workflow_against_postgres_store() {
                 &RunWorkflowOptions::new(wf.clone(), core_store)
                     .input(serde_json::json!({ "n": 1 })),
             )
-            .await
+            .outcome().await
         })
         .expect("run_workflow");
 

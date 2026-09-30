@@ -42,7 +42,7 @@ async fn typed_input_is_deserialized_and_reaches_the_handler() {
         &RunWorkflowOptions::new(charge_workflow(), store)
             .input(serde_json::json!({ "amount": 4200, "userId": "cus_123" })),
     )
-    .await
+    .outcome().await
     .unwrap();
 
     assert_eq!(outcome.status, RunStatus::Finished);
@@ -68,7 +68,7 @@ async fn typed_input_rejects_missing_field() {
         &RunWorkflowOptions::new(charge_workflow(), store.clone())
             .input(serde_json::json!({ "amount": 4200 })), // 缺 userId
     )
-    .await
+    .outcome().await
     .unwrap();
 
     assert_eq!(outcome.status, RunStatus::Errored);
@@ -103,7 +103,7 @@ async fn step_ctx_id_is_stable_across_resume() {
             .input(input.clone())
             .run_id("charge-1"),
     )
-    .await
+    .outcome().await
     .unwrap();
     assert_eq!(first.status, RunStatus::Finished);
 
@@ -113,7 +113,7 @@ async fn step_ctx_id_is_stable_across_resume() {
             .input(input)
             .run_id("charge-1"),
     )
-    .await
+    .outcome().await
     .unwrap();
 
     assert_eq!(second.status, RunStatus::Finished);

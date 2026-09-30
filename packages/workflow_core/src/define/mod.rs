@@ -873,7 +873,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(
@@ -897,7 +897,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf2.clone()), store2)
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out2.output, Some(serde_json::json!({ "user": "" })));
     }
@@ -947,7 +947,7 @@ mod tests {
             &RunWorkflowOptions::new(wf.clone(), store)
                 .input(serde_json::json!({})),
         )
-        .await
+        .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(

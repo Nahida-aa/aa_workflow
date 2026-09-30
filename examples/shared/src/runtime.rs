@@ -62,7 +62,7 @@ pub async fn drive<TInput, TOutput, TState, TCtxExt>(
 ) -> anyhow::Result<RunOutcome> {
     let options = opts.into_run_options(Arc::new(workflow.clone()), store, input);
     run_workflow(&options)
-        .await
+        .outcome().await
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 

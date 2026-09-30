@@ -43,7 +43,7 @@ async fn panicking_publisher_does_not_break_the_run() {
                 panic!("publisher 炸了");
             }))),
     )
-    .await
+    .outcome().await
     .expect("publisher panic 不得逃逸出 run_workflow");
 
     assert_eq!(out.status, RunStatus::Finished, "run 应照常跑完");
@@ -87,7 +87,7 @@ async fn publisher_keeps_working_after_one_panic() {
                 sink.lock().unwrap().push(t.to_string());
             }))),
     )
-    .await
+    .outcome().await
     .expect("单次 panic 不得逃逸");
 
     let got = seen.lock().unwrap().clone();

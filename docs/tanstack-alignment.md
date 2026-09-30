@@ -11,6 +11,11 @@
 （代码即 DAG），`needs` 图和调度器删除。continue_from / target_step 继续保留为
 本地一等公民，以 store 层截断 / `StepHalt` 哨兵承载。
 
+第三轮（2026-09-30）：**驱动入口的返回类型也换成事件流**——`run_workflow`
+返回 `RunEventStream`（上游 `AsyncIterable<WorkflowEvent>`，单路），run 状态改从
+store 读。这轮连带修掉三个既有 bug（run_id 双算、失败不落盘、`output: null` 被
+吞成「无输出」），决策依据见下文「决策（2026-09-30）」。
+
 ## 我们采纳了什么
 
 ### 命名对齐（两轮一致，仅为降低 TS/Rust 双语言切换心智负担）
@@ -306,6 +311,121 @@ RunWorkflowOptions::new(workflow, run_store)   // 必填两项由 new() 强制
 名字差异：旧版本仓叫 `RunOptions`，2026-09-18 起对齐为 `RunWorkflowOptions`。
 另注：上游把这个接口定义在 `engine/run-workflow.ts` 而非 `types.ts`（与 `RunStore`
 的放法不一致），对照时容易漏。
+
+## 决策（2026-09-30）：`run_workflow` 返回事件流，run 状态从 store 读
+
+**决策**：`run_workflow` 从 `Future<Result<RunOutcome>>` 改成
+`-> RunEventStream`（对齐上游 `AsyncIterable<WorkflowEvent>`，单路、不保留
+`run_workflow_stream` 双轨）。**run 的终态不从事件流派生，改从
+`RunState` 读**（`RunOutcome::from_run_state`）。
+
+### 为什么状态不能从事件流派生
+
+上游自己的文档就把 iterable 定义成「本次 drive **append 到日志**的事件」，
+而不是状态通道（`engine/run-workflow.ts:76-84`）：
+
+> Returns an `AsyncIterable` of every event the engine appends to the run's
+> log, in order. […] the iterable and the persisted log share one shape
+> (**the log IS the transport**).
+
+runtime 层把两件事**分开**，这是三处独立证据：
+
+1. `collectWorkflowEvents`（`runtime-driver.ts:1179-1214`）允许
+   `includeEvents: false`（→ `events: []`）和 `maxEvents` 截断（→ 残缺数组），
+   只另外数一个 `eventCount`。
+2. `classifyRun`（`runtime-driver.ts:968-977`）**只看 store**：
+   `run.status` 决定 `completed/paused/errored/running`，`eventCount` 只在
+   run 行缺失时区分 `'running'` 与 `'not-found'`。
+3. 结果类型把两者并列成互不推导的字段（`types.ts:449-457`）：
+   `{ kind, run, events, eventCount, eventsTruncated? }`。
+
+推论很硬：**`events: []` 时 `kind` 依然正确**，所以状态不可能由事件推出。
+调用顺序也是 `runtime-driver.ts:783-795`——先 drain 完 iterable，再
+`store.loadRun`，再 classify。
+
+RFC 把分工写成了明文（`research/WORKFLOW_STORE_RUNTIME_CONTRACT.md`）：
+
+> The runtime owns: […] executing a bounded slice / **draining events** /
+> **interpreting paused/timer/signal states** / recovery behavior
+
+### 幂等重放 ⇒ 重挂起不产生新事件（本仓踩到的坑）
+
+本仓的 `exec_pause_with` 对已挂起的 step 不重复 append（`engine/mod.rs:658-675`
+的 `already_paused` 门）。于是**重 drive 一个已挂起的 run 时，本次 drive 一条新
+事件都不写**，流里只有 `RUN_STARTED`——凭末事件无法区分「挂起了」和「结束了」。
+
+这不是 bug，是上游语义的直接对应物。起源 commit `4f64b9c` 写得很清楚：
+
+> - Unified `WorkflowEvent` shape: **log entry IS transport event**
+> - Closure replay: every invocation runs the handler fresh; **primitives
+>   short-circuit via `findCheckpoint` lookup in history**
+
+`already_paused` 就是 `findCheckpoint` 的对应物：重放时 primitive 短路、不写新
+日志，replay 才保持幂等。上游 `engineApprove` 的 cached 路径同理直接 return、
+不 emit。
+
+**所以正确解法是「从 RunState 读 Paused」，不是给流补事件。**
+
+### 被否掉的两个方案
+
+| 方案 | 内容 | 否掉的原因 |
+| --- | --- | --- |
+| A. `publish ⊃ append` | 日志仍幂等，但每次挂起都 `publish` 一遍 `StepPaused` | 流会撒谎：把「本次没写日志」报成「本次写了」。且 `log IS the transport` 的前提被破坏 |
+| B. 精确上游 + 收尾时回落 store | 流只放新事件，关通道时读一次 `RunState` 定终态 | 结论对但机制绕：既然状态本来就该来自 store，就该显式承认，而不是藏在「关通道」这个副作用里 |
+
+### 落地形状
+
+```rust
+// 流 = 本次 drive 的日志写入（对齐 AsyncIterable），publish 在 yield 之前 await
+pub fn run_workflow(opts: impl Into<RunWorkflowOptions>) -> RunEventStream
+
+// 状态 = store 读（对齐 classifyRun(loadRun(...), eventCount)）
+RunOutcome::from_run_state(state: RunState) -> RunOutcome
+impl RunEventStream { async fn outcome(self) -> Result<RunOutcome, WorkflowError> }
+```
+
+- 引擎失败 → `RUN_ERRORED` 事件（对齐上游 `drive().catch()` 吞异常、统一
+  `emit(RUN_ERRORED)`，`run-workflow.ts:96-99`）。流的 item 里**没有** `Err` 变体。
+- `RunOutcome` 字段不变（`run_id` / `status` / `output` / `error`）——它本来就是
+  `RunState` 的窄视图，不引入新类型。另留 `event_count`，只为对齐
+  `classifyRun` 的 not-found 兜底。
+- `RunEventStream` 因此多持一份 `store`：它已有 `run_id`，`outcome()` 就是
+  「drain 完 → `store.get_run_state(run_id)`」，逐行对应
+  `collectWorkflowEvents` + `loadRun` + `classifyRun`。
+
+### 顺带修掉的三个既有 bug
+
+改成「状态从 store 读」之后，原本被事件路径掩盖的三个问题立刻暴露——它们本来
+就在，只是没人走过那条路：
+
+1. **run_id 被算两次**。`run_workflow` 算一个（喂 publish + 回读 store），
+   `drive` 又算一个。`opts.run_id` 为 `None` 时两处各自
+   `format!("run_{}", now_ms())`，跨一个 ms 边界就是两个 id。现在只算一次并写回
+   `opts`。
+2. **失败路径不落盘**。版本失配、`continue_from` 截断失败这些路径只
+   `emit(RUN_ERRORED)`、不写 `RunState`，`outcome()` 于是读回上一次 drive 留下的
+   状态——「失败了但看起来是 `Finished`」。上游在 `drive` 的 catch 里统一
+   `status='errored'` + `setRunState` 再 emit（`run-workflow.ts:555-570`），我们
+   照做（`error_persisted`）。
+3. **`output: null` 被吞成「无输出」**。`RunState.output: Option<Value>` 经 JSON
+   往返时 `Some(Value::Null)` → `null` → `None`，与「handler 没返回 output」撞成
+   同一个值。事件路径不落盘所以看不出来。修法不用加依赖：`skip_serializing_if`
+   把 `None` 编码成**键缺失**，`deserialize_with` 把「键存在（含 null）」读成
+   `Some`（`de_some`）。这也是 `#[serde(bound(...))]` 得手写的原因——
+   `deserialize_with` 之后 serde 不再自动补 `TOutput: Deserialize`。
+
+### 依赖选择
+
+只加 `futures-core`，手写 `poll_next`；不引 `async-stream` / `futures-util`。
+`PublisherFn` 返回 `BoxFuture<'static>`（不借用 `self`），所以手写 poll 机的
+唯一中间态是 `inflight` + `pending` 两个槽：
+
+- `inflight` = 正在 await 的 publish future；
+- `pending` = 已从 channel 取出、正在等 publish 落地的那条事件（对应上游
+  `await publish(ev)` 之后 `yield ev` 里那个还没交出去的 `ev`）。
+
+漏掉 `pending` 会静默吞掉每一条走 publish 的事件——poll 机 await 完就不知道该
+yield 哪条了。
 
 ## 换了模型仍没变的硬设计
 

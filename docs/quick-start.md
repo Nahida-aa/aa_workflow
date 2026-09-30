@@ -54,7 +54,7 @@ let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
 let outcome = run_workflow(
     &RunWorkflowOptions::new(Arc::new(charge_workflow().into_workflow()), store)
         .input(serde_json::json!({ "amount": 4200, "userId": "cus_123" })),
-).await?;
+).outcome().await?;
 
 // RunOutcome { run_id, status, output, error }
 ```
@@ -112,7 +112,7 @@ let out = run_workflow(
     &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
         .input(serde_json::json!({ "amount": 1500 }))
         .run_id("order-1"),
-).await?;
+).outcome().await?;
 assert_eq!(out.status, RunStatus::Paused);
 
 // 外部投递审批决定，再 drive 一次：前缀 checkpoint 短路，直接从唤醒点继续。
@@ -122,7 +122,7 @@ let out = run_workflow(
     &RunWorkflowOptions::new(Arc::new(wf.clone()), store)
         .input(serde_json::json!({ "amount": 1500 }))
         .run_id("order-1"),
-).await?;
+).outcome().await?;
 assert_eq!(out.status, RunStatus::Finished);
 ```
 
@@ -248,7 +248,7 @@ let outcome = run_workflow(
         .input(input)
         .run_id("run-1")
         .continue_from("charge"),   // 截断 charge 的终态 checkpoint 及后缀
-).await?;
+).outcome().await?;
 // 重放：前缀短路，charge 起的后缀从零重跑
 ```
 
@@ -278,8 +278,15 @@ store 是可插拔的，workflow 代码不动。本仓三个实现跑**同一份
   JSON 往返——只有 replay 时才从日志反序列化，所以「首次能过、resume 炸」是可能的。
   另：workflow **出口**（`RunOutcome.output` / handler 返回值）仍是 `Value`，
   因为 store 是 `dyn`。
-- `run_workflow` **不是** async generator——返回 `RunOutcome`，事件回调走
-  `.publish(Some(..))`（对应上游 `publish`，回调签名同为 `(run_id, event)`）。
+- `run_workflow` 返回**事件流** `RunEventStream`（对齐上游
+  `AsyncIterable<WorkflowEvent>`，单路；`emit` 在 yield 之前 await
+  `.publish(Some(..))`，回调签名同为 `(run_id, event)`）。要逐条事件就
+  `.collect().await`，只要结果就 `.outcome().await`。
+- **run 状态从 store 读，不从末事件推**（`.outcome()` = drain 完
+  `store.get_run_state`）。上游同理：`runWorkflow` 的 iterable 是「本次写进日志的
+  事件」，runtime 的 `classifyRun` 只看 store。原因是重放幂等——重 drive 一个已
+  挂起的 run 一条新事件都不写。推导见 `docs/tanstack-alignment.md` 的「决策
+  (2026-09-30)」。
 - 多了 `continue_from` / `target_step`；少了 `recover` / `attach` / `signal` /
   `threadId` / `outputSink` / `telemetry`（对照表见 `docs/tanstack-alignment.md`）。
 - 挂起即返回：所有 pause 类原语写完 checkpoint 就结束本次 drive。

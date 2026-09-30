@@ -138,7 +138,7 @@ async fn drives_a_parallel_workflow() {
         &RunWorkflowOptions::new(wf.clone(), core_store)
             .input(serde_json::json!({ "n": 1 })),
     )
-    .await
+    .outcome().await
     .expect("run_workflow");
 
     assert_eq!(out.status, RunStatus::Finished, "workflow 应跑完");

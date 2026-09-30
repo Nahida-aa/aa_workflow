@@ -48,7 +48,7 @@ async fn drive(
                 sink.lock().unwrap().push(e.clone())
             }))),
     )
-    .await
+    .outcome().await
     .unwrap();
     assert_eq!(out.status, RunStatus::Finished);
     assert_eq!(out.output.unwrap()["slow"]["rounds"], ROUNDS);
@@ -175,7 +175,7 @@ async fn resume_does_not_continue_the_progress_counter() {
             .input(input.clone())
             .run_id("r"),
     )
-    .await
+    .outcome().await
     .unwrap();
     assert_eq!(first.output.unwrap()["slow"]["reported"], ROUNDS);
 
@@ -191,7 +191,7 @@ async fn resume_does_not_continue_the_progress_counter() {
                 sink.lock().unwrap().push(e.clone())
             }))),
     )
-    .await
+    .outcome().await
     .unwrap();
     assert_eq!(second.status, RunStatus::Finished);
     assert_eq!(
