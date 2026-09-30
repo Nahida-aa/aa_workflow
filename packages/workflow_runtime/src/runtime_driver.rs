@@ -17,6 +17,11 @@
 //! # 与上游的另两处差异
 //!
 //! - **telemetry**：core 无 OTel 集成，省略（上游每个 store 调用包一个 span）。
+//! - **publisher 签名**：上游 `WorkflowRuntimeEventPublisher`（`types.ts:21`）可
+//!   async（`void | Promise<void>`），我们是同步 `Fn`——runtime 的 fan-out 闭包
+//!   里还塞着事件收集计数，改 async 会把收集也拖成异步。需要落盘走 core 的
+//!   `async_publish`。合并语义（去重 + 都调 + 配置级在前）已对齐上游
+//!   `combinePublishers`（`:1139-1161`）。
 //! - **threadId**：已接（`startRun` / `deliverSignal` / `deliverApproval` 三个
 //!   args 各带一个，透传进 `RUN_STARTED`）。注意 `sweep` **不带**——上游
 //!   `WorkflowRuntimeSweepArgs`（`types.ts:459-474`）就没这个字段。
@@ -105,6 +110,16 @@ impl WorkflowRegistry for HashMap<WorkflowId, WorkflowRegistration> {
 ///
 /// 上游的 `telemetry` 项省略（core 无 OTel 集成）。`TWorkflows` 默认擦除为
 /// `HashMap<WorkflowId, WorkflowRegistration>`——上游靠 `const TWorkflows` 把
+/// 事件 fan-out 回调（上游 `WorkflowRuntimeEventPublisher`，`types.ts:21`）。
+///
+/// 上游签名是 `(runId, event) => void | Promise<void>`，可以 async；我们是**同步**
+/// `Fn`——runtime 的 fan-out 闭包里还塞着事件收集器（`include_events` /
+/// `max_events` 计数），改成 async 会把收集也拖成异步，没好处。需要落盘 / 发网络
+/// 走 core 的 `RunWorkflowOptions::async_publish`。
+///
+/// 事件按 `&WorkflowEvent` **借**给回调，不强制调用方 clone（上游按值）。
+pub type WorkflowRuntimeEventPublisher = Arc<dyn Fn(&str, &WorkflowEvent) + Send + Sync>;
+
 /// 注册表类型带在定义上；Rust 无 keyof，先做形状对齐（start_run 的 id 仍按
 /// 注册表运行期查找），按 id 校验 input 的类型安全留待后续设计。
 #[derive(Clone)]
@@ -115,7 +130,7 @@ pub struct WorkflowRuntimeConfig<TWorkflows = HashMap<WorkflowId, WorkflowRegist
     /// lease 默认时长；单次调用可用 `lease_ms` 覆盖。
     pub default_lease_ms: Option<i64>,
     /// 全局事件 fan-out（best-effort，不参与耐久执行）。
-    pub publish: Option<Arc<dyn Fn(&str, &WorkflowEvent) + Send + Sync>>,
+    pub publish: Option<WorkflowRuntimeEventPublisher>,
 }
 
 impl<TWorkflows> WorkflowRuntimeConfig<TWorkflows> {
@@ -172,7 +187,7 @@ pub struct WorkflowRuntimeRunResult {
     pub events_truncated: Option<bool>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct WorkflowRuntimeStartRunArgs {
     pub workflow_id: WorkflowId,
     pub run_id: RunId,
@@ -191,9 +206,12 @@ pub struct WorkflowRuntimeStartRunArgs {
     pub include_events: Option<bool>,
     /// 结果里最多保留多少事件（总数仍计入 `event_count`）。
     pub max_events: Option<usize>,
+    /// 单次调用级 fan-out。与 `config.publish` **合并**（两个都调），见
+    /// [`combine_publishers`]。
+    pub publish: Option<WorkflowRuntimeEventPublisher>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct WorkflowRuntimeDeliverSignalArgs {
     pub run_id: RunId,
     /// 幂等令牌：同一 `signal_id` 重复投递 = no-op。
@@ -213,9 +231,12 @@ pub struct WorkflowRuntimeDeliverSignalArgs {
     pub min_yield_remaining_ms: Option<u64>,
     pub include_events: Option<bool>,
     pub max_events: Option<usize>,
+    /// 单次调用级 fan-out。与 `config.publish` **合并**（两个都调），见
+    /// [`combine_publishers`]。
+    pub publish: Option<WorkflowRuntimeEventPublisher>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct WorkflowRuntimeDeliverApprovalArgs {
     pub run_id: RunId,
     pub approval: ApprovalResult,
@@ -229,9 +250,12 @@ pub struct WorkflowRuntimeDeliverApprovalArgs {
     pub min_yield_remaining_ms: Option<u64>,
     pub include_events: Option<bool>,
     pub max_events: Option<usize>,
+    /// 单次调用级 fan-out。与 `config.publish` **合并**（两个都调），见
+    /// [`combine_publishers`]。
+    pub publish: Option<WorkflowRuntimeEventPublisher>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct WorkflowRuntimeSweepArgs {
     pub now: Option<i64>,
     pub deadline: Option<i64>,
@@ -246,6 +270,9 @@ pub struct WorkflowRuntimeSweepArgs {
     pub limit: Option<usize>,
     pub include_events: Option<bool>,
     pub max_events: Option<usize>,
+    /// 单次调用级 fan-out。与 `config.publish` **合并**（两个都调），见
+    /// [`combine_publishers`]。
+    pub publish: Option<WorkflowRuntimeEventPublisher>,
 }
 
 /// sweep 摘要里的分类计数。
@@ -328,6 +355,37 @@ fn normalize_lease_ms(v: i64) -> anyhow::Result<i64> {
 /// `create_run` 已经在 store 落过一遍，"已归一" 也没写进类型。
 fn normalize_min_yield_remaining_ms(value: Option<u64>) -> u64 {
     value.unwrap_or(DEFAULT_MIN_YIELD_REMAINING_MS)
+}
+
+/// 把 config 级和单次调用级的 publisher 合并（上游 `combinePublishers`，
+/// `runtime-driver.ts:1139-1161`）。语义照抄三点：
+/// - 两个都没有 ⇒ `None`（不造空闭包，省一次调用）；
+/// - **同一个** publisher 同时配在两处只调一次（上游用 `Set` 按引用去重，
+///   我们用 `Arc::ptr_eq`）；
+/// - 配置级在前、单次级在后，两个都调。
+///
+/// best-effort 不变：publisher 抛错**不会**掀掉 run。这里不必自己兜——回调最终
+/// 是在 core 的 publisher 闭包里被调的，而 core 用 `catch_unwind` 逐个兜住
+/// （`run_workflow.rs:611`，注释直接引上游 *"A misbehaving publisher must not
+/// break the run"*）。
+fn combine_publishers(
+    configured: Option<WorkflowRuntimeEventPublisher>,
+    requested: Option<WorkflowRuntimeEventPublisher>,
+) -> Option<WorkflowRuntimeEventPublisher> {
+    match (configured, requested) {
+        (None, None) => None,
+        (Some(c), None) => Some(c),
+        (None, Some(r)) => Some(r),
+        (Some(c), Some(r)) => {
+            if Arc::ptr_eq(&c, &r) {
+                return Some(c);
+            }
+            Some(Arc::new(move |run_id: &str, event: &WorkflowEvent| {
+                c(run_id, event);
+                r(run_id, event);
+            }))
+        }
+    }
 }
 
 fn resolve_lease_ms<TWorkflows>(
@@ -434,6 +492,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
 
         self.drive_claimed_run(DriveArgs {
             thread_id: args.thread_id.clone(),
+            publish: args.publish.clone(),
             workflow: &workflow,
             workflow_id: &args.workflow_id,
             run_id: &args.run_id,
@@ -486,6 +545,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                 return self
                     .drive_claimed_run(DriveArgs {
             thread_id: args.thread_id.clone(),
+            publish: args.publish.clone(),
                         workflow: &workflow,
                         workflow_id: &workflow_id,
                         run_id: &args.run_id,
@@ -602,6 +662,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
             .unwrap_or(serde_json::Value::Null);
         self.drive_claimed_run(DriveArgs {
             thread_id: args.thread_id.clone(),
+            publish: args.publish.clone(),
             workflow: &workflow,
             workflow_id: &workflow_id,
             run_id: &args.run_id,
@@ -679,6 +740,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                     lease_owner: Some(lease_owner.clone()),
                     lease_ms: Some(lease_ms),
                     thread_id: None,
+                    publish: None,
                     now,
                     deadline,
                     min_yield_remaining_ms: min_yield,
@@ -720,6 +782,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                     lease_owner: Some(lease_owner.clone()),
                     lease_ms: Some(lease_ms),
                     thread_id: None,
+                    publish: args.publish.clone(),
                     include_events: args.include_events,
                     max_events: args.max_events,
                 })
@@ -766,6 +829,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                     lease_owner: Some(lease_owner.clone()),
                     lease_ms: Some(lease_ms),
                     thread_id: None,
+                    publish: args.publish.clone(),
                     deadline,
                     max_duration_ms: None,
                     min_yield_remaining_ms: args.min_yield_remaining_ms,
@@ -862,7 +926,8 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         let max_events = args.max_events;
         // core 现在直接把 run_id 交给 publish（对齐上游 `(runId, event)`），
         // 所以这里不必再自己 capture 一份——闭包首参就是它。
-        let runtime_publish = self.config.publish.clone();
+        // 合并在汇合点做：config 级在前、单次级在后，同一个只调一次。
+        let runtime_publish = combine_publishers(self.config.publish.clone(), args.publish.clone());
         let publish: Arc<dyn Fn(&str, WorkflowEvent) + Send + Sync> = {
             let collected = collected.clone();
             let total = total.clone();
@@ -975,6 +1040,10 @@ struct DriveArgs<'a> {
     /// 客户端关联标识，透传进 `RUN_STARTED`（上游 `DriveOptions.threadId`）。
     /// sweep 传 `None`——上游 `sweep` 不带 threadId（`types.ts:459-474`）。
     thread_id: Option<String>,
+    /// **单次调用级** fan-out；与 `config.publish` 的合并发生在
+    /// [`Self::drive_claimed_run`]（四个入口的唯一汇合点，避免每处重复调
+    /// [`combine_publishers`]）。
+    publish: Option<WorkflowRuntimeEventPublisher>,
     /// 本次 drive 的「现在」，入口算一次一路传下去。**不要**在下游重读墙钟：
     /// 上游把 `args.now` 一路传到 `syncTimerFromRunState`
     /// （`runtime-driver.ts:761`）就是这个原因。
@@ -1141,6 +1210,100 @@ mod driver_tests {
             ))),
             mem,
         }
+    }
+
+    /// `combine_publishers` 的三条语义（上游 `combinePublishers`，
+    /// `runtime-driver.ts:1139-1161`）：两个都没有 ⇒ `None`；同一个 publisher
+    /// 配在两处**只调一次**（上游 `Set` 去重）；两个不同 ⇒ 都调，配置级在前。
+    #[test]
+    fn combine_publishers_semantics() {
+        assert!(combine_publishers(None, None).is_none(), "两个都没有不该造空闭包");
+
+        let only_cfg = combine_publishers(Some(Arc::new(|_: &str, _: &WorkflowEvent| {})), None);
+        assert!(only_cfg.is_some(), "只有 config 级时应原样返回");
+
+        let only_req = combine_publishers(None, Some(Arc::new(|_: &str, _: &WorkflowEvent| {})));
+        assert!(only_req.is_some(), "只有单次级时应原样返回");
+
+        // 同一个 Arc 配在两处 ⇒ 只调一次
+        let calls = Arc::new(std::sync::Mutex::new(0usize));
+        let c1 = calls.clone();
+        let shared: WorkflowRuntimeEventPublisher =
+            Arc::new(move |_: &str, _: &WorkflowEvent| {
+                *c1.lock().unwrap() += 1;
+            });
+        let combined = combine_publishers(Some(shared.clone()), Some(shared.clone()))
+            .expect("同一 publisher 仍应产出回调");
+        combined("r", &WorkflowEvent::RunFinished {
+            ts: 0,
+            run_id: "r".into(),
+            output: None,
+        });
+        assert_eq!(*calls.lock().unwrap(), 1, "同一 publisher 只该调一次");
+
+        // 两个不同 ⇒ 都调，且配置级在前
+        let order = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let o1 = order.clone();
+        let cfg: WorkflowRuntimeEventPublisher = Arc::new(move |_: &str, _: &WorkflowEvent| {
+            o1.lock().unwrap().push("cfg");
+        });
+        let o2 = order.clone();
+        let req: WorkflowRuntimeEventPublisher = Arc::new(move |_: &str, _: &WorkflowEvent| {
+            o2.lock().unwrap().push("req");
+        });
+        let combined = combine_publishers(Some(cfg), Some(req)).unwrap();
+        combined("r", &WorkflowEvent::RunFinished {
+            ts: 0,
+            run_id: "r".into(),
+            output: None,
+        });
+        assert_eq!(*order.lock().unwrap(), vec!["cfg", "req"], "配置级应在前");
+    }
+
+    /// 端到端：config 级与单次调用级**都**收到事件（上游 `combinePublishers` 的
+    /// 存在意义就是让单次调用不必牺牲全局订阅）。
+    #[tokio::test]
+    async fn config_and_per_call_publishers_both_fire() {
+        let mem: Arc<InMemoryExecutionStore> = Arc::new(InMemoryExecutionStore::default());
+        let store: Arc<dyn WorkflowExecutionStore> = mem.clone();
+        let mut workflows = HashMap::new();
+        workflows.insert(
+            "simple".to_string(),
+            WorkflowRegistration {
+                load: Arc::new(move || simple_workflow().into()),
+                previous_versions: HashMap::new(),
+                version: None,
+                schedules: vec![],
+            },
+        );
+        let cfg_hits = Arc::new(std::sync::Mutex::new(0usize));
+        let req_hits = Arc::new(std::sync::Mutex::new(0usize));
+        let c = cfg_hits.clone();
+        let config_publish: WorkflowRuntimeEventPublisher =
+            Arc::new(move |_: &str, _: &WorkflowEvent| {
+                *c.lock().unwrap() += 1;
+            });
+        let r = req_hits.clone();
+        let per_call_publish: WorkflowRuntimeEventPublisher =
+            Arc::new(move |_: &str, _: &WorkflowEvent| {
+                *r.lock().unwrap() += 1;
+            });
+
+        let mut cfg = WorkflowRuntimeConfig::new(store, workflows);
+        cfg.publish = Some(config_publish);
+        let rt = define_workflow_runtime(cfg);
+        rt.start_run(WorkflowRuntimeStartRunArgs {
+            workflow_id: "simple".into(),
+            run_id: "both".into(),
+            input: serde_json::json!({}),
+            publish: Some(per_call_publish),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        assert!(*cfg_hits.lock().unwrap() > 0, "config 级 publisher 应收到事件");
+        assert!(*req_hits.lock().unwrap() > 0, "单次调用级 publisher 应收到事件");
     }
 
     fn simple_workflow() -> WorkflowDefinition {
