@@ -117,6 +117,8 @@ pub enum RunErrorCode {
     /// `previous_versions` 里（对齐上游 `workflow_version_mismatch`
     /// 错误码）。**不回退**——那会把旧版 run 路由进新版代码，是确定性违规。
     WorkflowVersionMismatch,
+    /// `attach` 指向的 run 在 store 里不存在（对齐上游 `run_lost`）。
+    RunLost,
 }
 
 impl RunErrorCode {
@@ -126,6 +128,7 @@ impl RunErrorCode {
             RunErrorCode::Aborted => "aborted",
             RunErrorCode::Validation => "validation_error",
             RunErrorCode::WorkflowVersionMismatch => "workflow_version_mismatch",
+            RunErrorCode::RunLost => "run_lost",
         }
     }
 }

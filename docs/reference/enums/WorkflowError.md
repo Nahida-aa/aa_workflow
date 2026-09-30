@@ -5,7 +5,7 @@ title: WorkflowError
 
 # Enum: WorkflowError
 
-Defined in: [`packages/workflow_core/src/error.rs:147`](../../../packages/workflow_core/src/error.rs#L147)
+Defined in: [`packages/workflow_core/src/error.rs:150`](../../../packages/workflow_core/src/error.rs#L150)
 
 Errors produced by the engine.
 
@@ -17,7 +17,7 @@ Errors produced by the engine.
 (String)
 ```
 
-Defined in: [`packages/workflow_core/src/error.rs:149`](../../../packages/workflow_core/src/error.rs#L149)
+Defined in: [`packages/workflow_core/src/error.rs:152`](../../../packages/workflow_core/src/error.rs#L152)
 
 The workflow graph is invalid (duplicate ids, unknown `needs`, cycle).
 
@@ -30,7 +30,7 @@ The workflow graph is invalid (duplicate ids, unknown `needs`, cycle).
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/error.rs:151`](../../../packages/workflow_core/src/error.rs#L151)
+Defined in: [`packages/workflow_core/src/error.rs:154`](../../../packages/workflow_core/src/error.rs#L154)
 
 A workflow step failed after exhausting its retry policy.
 
@@ -43,7 +43,7 @@ A workflow step failed after exhausting its retry policy.
 (String)
 ```
 
-Defined in: [`packages/workflow_core/src/error.rs:153`](../../../packages/workflow_core/src/error.rs#L153)
+Defined in: [`packages/workflow_core/src/error.rs:156`](../../../packages/workflow_core/src/error.rs#L156)
 
 The finalize step failed.
 
@@ -56,7 +56,7 @@ The finalize step failed.
 (StoreError)
 ```
 
-Defined in: [`packages/workflow_core/src/error.rs:155`](../../../packages/workflow_core/src/error.rs#L155)
+Defined in: [`packages/workflow_core/src/error.rs:158`](../../../packages/workflow_core/src/error.rs#L158)
 
 Transport/persistence error while talking to the store.
 
@@ -69,7 +69,7 @@ Transport/persistence error while talking to the store.
 (String)
 ```
 
-Defined in: [`packages/workflow_core/src/error.rs:157`](../../../packages/workflow_core/src/error.rs#L157)
+Defined in: [`packages/workflow_core/src/error.rs:160`](../../../packages/workflow_core/src/error.rs#L160)
 
 No `RunState` exists for the requested run id.
 
@@ -82,7 +82,7 @@ No `RunState` exists for the requested run id.
 (String)
 ```
 
-Defined in: [`packages/workflow_core/src/error.rs:160`](../../../packages/workflow_core/src/error.rs#L160)
+Defined in: [`packages/workflow_core/src/error.rs:163`](../../../packages/workflow_core/src/error.rs#L163)
 
 A delivered signal could not be matched to a parked wait point (from
 [`crate::engine::signal_event`](../functions/signal_event.md): nothing was paused on that event name).
@@ -96,7 +96,7 @@ A delivered signal could not be matched to a parked wait point (from
 (String)
 ```
 
-Defined in: [`packages/workflow_core/src/error.rs:162`](../../../packages/workflow_core/src/error.rs#L162)
+Defined in: [`packages/workflow_core/src/error.rs:165`](../../../packages/workflow_core/src/error.rs#L165)
 
 An internal invariant was violated (deadlock guard, channel closed).
 

@@ -55,6 +55,15 @@ Defined in: [`packages/workflow_core/src/error.rs:119`](../../../packages/workfl
 `previous_versions` 里（对齐上游 `workflow_version_mismatch`
 错误码）。**不回退**——那会把旧版 run 路由进新版代码，是确定性违规。
 
+
+***
+
+### RunLost
+
+Defined in: [`packages/workflow_core/src/error.rs:121`](../../../packages/workflow_core/src/error.rs#L121)
+
+`attach` 指向的 run 在 store 里不存在（对齐上游 `run_lost`）。
+
 ## Implementations
 
 ### as_str()
@@ -63,7 +72,7 @@ Defined in: [`packages/workflow_core/src/error.rs:119`](../../../packages/workfl
 pub fn as_str(&self) -> &'static str
 ```
 
-Defined in: [`packages/workflow_core/src/error.rs:123`](../../../packages/workflow_core/src/error.rs#L123)
+Defined in: [`packages/workflow_core/src/error.rs:125`](../../../packages/workflow_core/src/error.rs#L125)
 
 #### Returns
 

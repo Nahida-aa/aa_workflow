@@ -9,7 +9,7 @@ title: run_workflow
 pub fn run_workflow(opts: RunWorkflowOptions) -> RunEventStream
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:356`](../../../packages/workflow_core/src/engine/run_workflow.rs#L356)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:376`](../../../packages/workflow_core/src/engine/run_workflow.rs#L376)
 
 Runs (or resumes) a workflow by driving its async handler.
 

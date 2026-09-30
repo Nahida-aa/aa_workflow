@@ -135,6 +135,22 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunWorkflowOptions.r
     `workflow_version_mismatch`）。无版本的老 run（版本机制引入前）仍回退
     到当前定义——它跑的本就是无版本代码，是语义正确的兼容路径。
 
+12. **`attach` 只认显式，不抄上游的隐式 redirect**：上游 `startRun`
+    （`run-workflow.ts:194-200`）在「给了 `runId` 而该 id 已有 run」时自动
+    redirect 到 attach。没抄，两个原因：
+
+    - 上游靠 `signalDelivery || approval` 标志位区分 start / resume（`:173`）；
+      我们没有这个标志位——resume 就是「同一 `run_id` + `input`」，照抄会把
+      **每次正常 resume 都变成 attach**，workflow 不再推进。
+    - 重驱动已完成的 run 在本仓是**故意的能力**，不是副作用：
+      `replay_shape_mismatch_fails_instead_of_yielding_null` 靠再 drive 一次，
+      发现「日志里的 step 结果已经反序列化不回 handler 声明的类型」。改成只读
+      回放，形状漂移就永远查不出来。
+
+    所以：调用方要只读订阅时显式 `.attach()`；重复 start 的防护放在调用点判断，
+    而不是悄悄改掉 `run_id` 的含义。真要重跑已完成的 run 仍照旧重驱动，或用
+    `continue_from` 显式截断。
+
     与上游的签名差异：上游是 `selectWorkflowVersion(versions[], runId, store)`
     （显式数组 + 读 store），我们是 `select_workflow_version(workflow,
     persisted_version)`（从 `.previous_versions` 取候选 + 版本由调用方传入，
@@ -157,6 +173,7 @@ L198）+ `types.ts`（`Ctx<TIn, TState, TExt>` L386）。
 | `config.defaultStepRetry` | `.default_step_retry(RetryPolicy::new(...))` | ✅ | |
 | `builder.middleware(md)` | `.middleware::<PExt>(Middleware { produce, wrap })` | ◐ | Ext 为单一字段（差异 #9） |
 | `builder.previousVersions(v)` | `.previous_versions(Vec<Workflow>)` | ✅ | TS 传 `Array<{..., workflow}>`; Rust 传已构建的 `Workflow` 或 `WorkflowDefinition.into_workflow()` |
+| `attach` | `.attach()` | ◐ | 只读回放（合成 `RUN_STARTED` 头 + 整份日志重放 + status-only 时补终态事件）；**只认显式**，不抄上游 `startRun` 的隐式 redirect（见 #12） |
 | `builder.handler(\|ctx\| ...)` | `.handler(\|ctx: BaseCtx<In, St, Ext>\| async move { ... })` | ✅ | AOut 从返回值推断；输出用 `output_validator` 校验 |
 | `WorkflowDefinition.deref` | `impl Deref<Target = Workflow>` for `WorkflowDefinition<...>` | ✅ | |
 | `WorkflowDefinition.intoWorkflow()` | `.into_workflow()` | ✅ | |

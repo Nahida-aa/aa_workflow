@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::define::{AnyWorkflowDefinition, WorkflowDefinition};
 use crate::engine::{DEFAULT_MIN_YIELD_REMAINING_MS, EngineRuntime, StepHalt, WorkflowCancelled, WorkflowParked, now_ms};
@@ -58,7 +58,8 @@ pub type PublisherFn =
 /// | `input` / `runId` / `deadline` / `minYieldRemainingMs` / `yieldResumeAt` | ✅ | 同名同义 |
 /// | `publish` | ✅ `publish` | 位置从参数移进结构体 |
 /// | `signalDelivery` / `approval` | — | 我们走 `signal_run` / `signal_event` 先落盘再 drive（D3 的形态差异） |
-/// | `recover` / `attach` / `signal` / `threadId` / `outputSink` / `telemetry` | — | **暂无**；未做，不是不做 |
+/// | `attach` | ✅ `attach` | 只读回放，见 [`RunWorkflowOptions::attach`] |
+/// | `recover` / `signal` / `threadId` / `outputSink` / `telemetry` | — | **暂无**；未做，不是不做 |
 /// | — | ➕ `continue_from` / `target_step` | **本地扩展**（上游连这两个概念都没有） |
 ///
 /// # 为什么字段类型是 `AnyWorkflowDefinition`（newtype）而不是裸 `WorkflowDefinition`
@@ -93,6 +94,18 @@ pub struct RunWorkflowOptions {
     pub target_step: Option<String>,
     /// 从该 step 的最新终态 checkpoint 处截断后重跑后缀（**本地扩展**）。
     pub continue_from: Option<String>,
+    /// 只读回放一个已存在的 run（上游 `attach`，`run-workflow.ts:48` / `:371`）。
+    ///
+    /// 不碰 handler、不写日志、不改 `RunState`——把日志里已有的事件原样重放
+    /// 一遍，让调用方拿到和"从头 drive 一次"同样形状的事件包。run 不存在时报
+    /// `run_lost`（上游 `attachRun` 的第一条分支）。
+    ///
+    /// **只认显式**：不照抄上游 `startRun` 的隐式幂等 redirect
+    /// （`run-workflow.ts:194-200`），因为我们没有 `signalDelivery` 标志位去区分
+    /// start 和 resume——照抄会把每次 resume 都变成 attach；另外重驱动已完成的 run
+    /// 在本仓是**故意的**（`replay_shape_mismatch_fails_instead_of_yielding_null`
+    /// 靠它做日志形状漂移自检）。理由详见 [`attach_decision`] 的文档。
+    pub attach: bool,
     /// 本次 drive 的绝对 UTC ms 预算（上游 `deadline`）。设了之后
     /// `time_remaining()` / `should_yield()` / `ctx.yield_()` 才生效；
     /// 每次 resume 都可以给一个新的。
@@ -180,6 +193,7 @@ impl RunWorkflowOptions {
             input: serde_json::Value::Null,
             target_step: None,
             continue_from: None,
+            attach: false,
             deadline: None,
             min_yield_remaining_ms: None,
             yield_resume_at: None,
@@ -208,6 +222,12 @@ impl RunWorkflowOptions {
     /// 从该 step 截断后重跑后缀。
     pub fn continue_from(mut self, v: impl Into<String>) -> Self {
         self.continue_from = Some(v.into());
+        self
+    }
+
+    /// 只读回放已存在的 run（上游 `attach`）。见 [`RunWorkflowOptions::attach`]。
+    pub fn attach(mut self) -> Self {
+        self.attach = true;
         self
     }
 
@@ -368,6 +388,20 @@ pub fn run_workflow(mut opts: RunWorkflowOptions) -> RunEventStream {
     // `outcome()` 要在 drain 之后回 store 读状态，所以这条 clone 得活过引擎。
     let store = opts.run_store.clone();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<WorkflowEvent>();
+
+    // 入口分派（上游 `run-workflow.ts:165-168` 的 attach 分支）。attach 是
+    // **只读**的：不 spawn drive、不写日志、不改 RunState，直接把日志重放进流。
+    // 事件仍会过 `poll_next` 里的 publish —— 与上游一致（上游 publish 挂在生成器
+    // 的 yielding loop 上，attachRun emit 的事件也走同一个 loop）。
+    if let Some(ev) = attach_decision(&opts, &store, &run_id) {
+        for e in ev {
+            let _ = tx.send(e);
+        }
+        drop(tx);
+        // `finished` 必须留 false：`poll_next` 见到 true 会直接返回 `None`，
+        // 刚塞进 rx 的回放事件会被丢掉。靠 `drop(tx)` 让 `poll_recv` 排空后自然收尾。
+        return RunEventStream { rx, publish, run_id, store, inflight: None, pending: None, finished: false };
+    }
 
     // 引擎在后台跑，事件往 `tx` 推。tx 的最后一个副本随引擎 future 一起
     // drop，于是「关通道」就是流的终点（上游靠 `executionDone` 标志，
@@ -854,6 +888,98 @@ async fn drive(
 
 /// 把一条 store 层失败包成 `RUN_ERRORED` 事件（**不 append**——落盘失败时
 /// 再写日志大概率也会失败，且 store 状态可能已经不一致）。
+/// 该不该走 attach（只读回放），以及回放哪些事件。对齐上游 `attachRun`
+/// （`run-workflow.ts:371-430`）那五步。返回 `None` = 正常 drive。
+///
+/// # 为什么**只**认显式 `attach`，不照抄上游的隐式 redirect
+///
+/// 上游 `startRun` 有个幂等检查（`run-workflow.ts:194-200`）：给了 `runId` 而
+/// 该 id 已有 run，就 redirect 到 attach，「instead of a second start」。看着
+/// 很该抄，但抄过来会踩两个坑，**其中一个是本仓有意的能力**：
+///
+/// 1. **上游分得清 start 和 resume，我们分不清。** 它的 resume 入口带
+///    `signalDelivery || approval` 标志（`:173`），所以「同 runId 再来一次」
+///    必然是误触发。我们的 resume 就是「同一 run_id + input」
+///    （`runtime_driver.rs` 的 `drive_claimed_run`），**没有标志位**——照抄那条
+///    redirect 会把每一次正常 resume 都变成 attach，workflow 直接不再推进。
+/// 2. **重驱动已完成的 run 在这里是故意的，不只是"能跑"。**
+///    `replay_shape_mismatch_fails_instead_of_yielding_null` 就是靠再 drive 一次
+///    来发现「日志里的 step 结果已经反序列化不回 handler 声明的类型」——
+///
+/// 这是**日志形状漂移的自检**。redirect 会把它变成只读回放，漂移就永远查不出来了
+/// （实测：改完之后该测试 `left: Finished, right: Errored`）。
+///
+/// 所以差异是自觉的：上游「重复 start 自动降级为 attach」，我们要求调用方显式
+/// `.attach()`。重复 start 的防护留给调用点判断，而不是悄悄改掉 `run_id` 的含义。
+/// 真要重跑一个已完成的 run，仍然照旧直接重驱动（或用 `continue_from` 显式截断）。
+fn attach_decision(
+    opts: &RunWorkflowOptions,
+    store: &Arc<dyn RunStore>,
+    run_id: &str,
+) -> Option<Vec<WorkflowEvent>> {
+    if !opts.attach {
+        return None;
+    }
+    let persisted = match store.get_run_state(run_id) {
+        Ok(st) => st,
+        // 读不到状态就按正常 drive 走，让 `drive` 报它自己的错。
+        Err(_) => return None,
+    };
+    // 显式 `attach` 指向不存在的 run 才是 `run_lost`；隐式 redirect 到这里时
+    // 状态刚读出来过，不可能不存在。
+    let Some(state) = persisted else {
+        return Some(vec![WorkflowEvent::RunErrored {
+            ts: now_ms(),
+            run_id: run_id.to_string(),
+            error: RunError {
+                name: "RunLost".to_string(),
+                message: format!("Run {run_id} not found."),
+            },
+            code: RunErrorCode::RunLost,
+        }]);
+    };
+
+    // ① 合成的 `RUN_STARTED` 当信封头（上游 `:393-398`）——日志里那条是上一次
+    //    drive 写的，attach 要给订阅方一个"这次回放现在开始"的边界。
+    let mut out = vec![WorkflowEvent::RunStarted { ts: now_ms(), run_id: run_id.to_string() }];
+    // ② 整份日志重放（上游 `:401`）。
+    match store.get_events(run_id) {
+        Ok(evs) => out.extend(evs),
+        Err(e) => return Some(vec![err_event(run_id, e, RunErrorCode::Error)]),
+    }
+    // ③ 日志里没有终态事件时，用持久化的 status 补一条（上游 `:404-428`）。
+    //    `cancel_run` 只翻 status 不写事件，所以 aborted 的 run 必然走这条。
+    let has_terminal = out.iter().any(|e| {
+        matches!(e, WorkflowEvent::RunFinished { .. } | WorkflowEvent::RunErrored { .. })
+    });
+    if !has_terminal {
+        match state.status {
+            RunStatus::Finished => out.push(WorkflowEvent::RunFinished {
+                ts: now_ms(),
+                run_id: run_id.to_string(),
+                output: state.output.clone(),
+            }),
+            RunStatus::Errored | RunStatus::Aborted => out.push(WorkflowEvent::RunErrored {
+                ts: now_ms(),
+                run_id: run_id.to_string(),
+                error: state.error.clone().unwrap_or(RunError {
+                    name: "Unknown".to_string(),
+                    message: "Run ended in non-terminal state".to_string(),
+                }),
+                code: if state.status == RunStatus::Aborted {
+                    RunErrorCode::Aborted
+                } else {
+                    RunErrorCode::Error
+                },
+            }),
+            // `paused` / `running`：快照已经在上面的回放里了，要跟后续事件
+            // 就得靠 `publish` 钩子（上游 `:429-430` 同一句）。
+            RunStatus::Paused | RunStatus::Running => {}
+        }
+    }
+    Some(out)
+}
+
 fn err_event(run_id: &str, e: impl std::fmt::Display, code: RunErrorCode) -> WorkflowEvent {
     WorkflowEvent::RunErrored {
         ts: now_ms(),
@@ -920,6 +1046,169 @@ pub fn run_workflow_sync(mut opts: RunWorkflowOptions) -> Result<RunOutcome, Wor
 }
 #[cfg(test)]
 mod tests {
+    /// attach 是**只读**的：不重跑 handler、不写日志、不改 RunState。
+    ///
+    /// 三件事分别钉住：事件包形状（合成 RUN_STARTED 头 + 整份日志重放）、
+    /// handler 没被再跑、日志长度不变。
+    #[tokio::test]
+    async fn attach_replays_log_without_reexecuting_or_writing() {
+        let store = Arc::new(InMemoryStore::new());
+        let runs = Arc::new(AtomicUsize::new(0));
+        let r = runs.clone();
+        let wf = WorkflowDefinition::new("w").handler(move |ctx: WorkflowCtx| {
+            let r = r.clone();
+            async move {
+                r.fetch_add(1, Ordering::SeqCst);
+                ctx.step("s", |_sc: StepCtx| async move { Ok(serde_json::json!({"v": 1})) })
+                    .await
+            }
+        });
+        let first = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("att"),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        assert_eq!(first.status, RunStatus::Finished);
+        let log_before = store.get_events("att").unwrap().len();
+        let state_before = store.get_run_state("att").unwrap().unwrap();
+
+        let events = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("att")
+                .attach(),
+        )
+        .collect()
+        .await;
+
+        // 合成头 + 日志重放（头不在原日志里，所以比原日志多一条）。
+        assert!(
+            matches!(events.first(), Some(WorkflowEvent::RunStarted { .. })),
+            "attach 要先给一个合成的 RUN_STARTED 当信封头，实际：{:?}",
+            events.first()
+        );
+        assert_eq!(events.len(), log_before + 1, "attach 应重放整份日志再加一个头");
+        assert!(
+            events.iter().any(|e| matches!(e, WorkflowEvent::RunFinished { .. })),
+            "重放里要有原来的终态事件"
+        );
+        // 只读：handler 没跑、日志没长、状态没动。
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "attach 不得重跑 handler");
+        assert_eq!(store.get_events("att").unwrap().len(), log_before, "attach 不得写日志");
+        assert_eq!(store.get_run_state("att").unwrap().unwrap().status, state_before.status);
+    }
+
+    /// attach 一个不存在的 run ⇒ `run_lost`（上游 `attachRun` 第一条分支，
+    /// `run-workflow.ts:376-385`）。这是**唯一**产得出 `run_lost` 的地方。
+    #[tokio::test]
+    async fn attach_to_missing_run_is_run_lost() {
+        let store = Arc::new(InMemoryStore::new());
+        let wf = WorkflowDefinition::new("w").handler(|_ctx: WorkflowCtx| async move { Ok(serde_json::Value::Null) });
+        let events = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf), store)
+                .run_id("nope")
+                .attach(),
+        )
+        .collect()
+        .await;
+        match events.as_slice() {
+            [WorkflowEvent::RunErrored { code, error, .. }] => {
+                assert_eq!(*code, RunErrorCode::RunLost);
+                assert_eq!(error.name, "RunLost");
+            }
+            other => panic!("应只报 run_lost，实际：{other:?}"),
+        }
+    }
+
+    /// `cancel_run` 只翻 status、**不写终态事件**（`drive` 里那条注释说得对）。
+    /// 所以 attach 一个被取消的 run 时，日志里没有终态事件，信封得靠持久化状态
+    /// 补一条 `RUN_ERRORED` —— 走的就是上游 `:414-428` 那个 `!hasPersistedTerminal`
+    /// 分支，否则订阅方永远等不到收尾。
+    #[tokio::test]
+    async fn attach_synthesizes_terminal_event_for_status_only_runs() {
+        let store = Arc::new(InMemoryStore::new());
+        let wf = WorkflowDefinition::new("w").handler(|ctx: WorkflowCtx| async move {
+            ctx.approve("gate", "ok?").await?;
+            Ok(serde_json::Value::Null)
+        });
+        run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("ab"),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        crate::engine::cancel_run(store.as_ref(), "ab").unwrap();
+
+        let events = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf), store.clone())
+                .run_id("ab")
+                .attach(),
+        )
+        .collect()
+        .await;
+        match events.last() {
+            Some(WorkflowEvent::RunErrored { run_id, code, .. }) => {
+                assert_eq!(run_id, "ab");
+                assert_eq!(
+                    *code,
+                    RunErrorCode::Aborted,
+                    "cancel_run 不写终态事件，attach 得按持久化 status 补一条 aborted"
+                );
+            }
+            other => panic!("末尾应是合成的 RUN_ERRORED，实际：{other:?}"),
+        }
+        // 补的这条只在流里，日志仍然没有终态事件（attach 只读）。
+        assert!(
+            !store
+                .get_events("ab")
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, WorkflowEvent::RunFinished { .. } | WorkflowEvent::RunErrored { .. })),
+            "attach 不得往日志里补写终态事件"
+        );
+    }
+
+    /// 没有 `signalDelivery` 这类标志位时，**重驱动一个已完成的 run 必须仍然是
+    /// 重驱动**，不能被 attach 吃掉 —— 上游靠标志位区分 start/resume，我们靠
+    /// 「同一 run_id + input」这个形状区分。少一个标志位就得靠日志形状自检来兜底
+    /// （见 `replay_shape_mismatch_fails_instead_of_yielding_null`）。
+    #[tokio::test]
+    async fn redrive_of_finished_run_is_still_a_redi_rive_not_an_attach() {
+        let store = Arc::new(InMemoryStore::new());
+        let runs = Arc::new(AtomicUsize::new(0));
+        let r = runs.clone();
+        let wf = WorkflowDefinition::new("w").handler(move |ctx: WorkflowCtx| {
+            let r = r.clone();
+            async move {
+                r.fetch_add(1, Ordering::SeqCst);
+                ctx.step("s", |_sc: StepCtx| async move { Ok(serde_json::json!({"v": 1})) })
+                    .await
+            }
+        });
+        run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("rd"),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("rd"),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        assert_eq!(runs.load(Ordering::SeqCst), 2, "没写 attach 就该照常重驱动");
+    }
+
     use super::*;
     use crate::define::{BaseCtx, CreateWorkflowConfig, StepCtx, WorkflowDefinition, WorkflowCtx, create_workflow};
     use crate::engine::testkit::TestLog;
