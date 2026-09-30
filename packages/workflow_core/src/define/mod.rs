@@ -609,6 +609,12 @@ pub struct WorkflowDefinition<
     pub previous_versions: Vec<AnyWorkflowDefinition>,
     pub handler: WorkflowHandler,
     pub initialize: InitializeFn,
+    /// Shape-check for the run input (`config.inputSchema` counterpart,
+    /// installed by `CreateWorkflowConfig::input::<T>()`). Checked by the
+    /// engine **before** `initialize` and the handler, so bad input fails the
+    /// run with [`RunErrorCode::Validation`] instead of surfacing later as a
+    /// generic handler error.
+    pub input_validator: Option<StateValidatorFn>,
     pub state_validator: Option<StateValidatorFn>,
     /// Shape-check for the handler's `TOutput` value (config `output` schema).
     pub output_validator: Option<StateValidatorFn>,
@@ -635,6 +641,7 @@ impl<TInput, TOutput, TState, TCtxExt> Clone
             previous_versions: self.previous_versions.clone(),
             handler: Arc::clone(&self.handler),
             initialize: Arc::clone(&self.initialize),
+            input_validator: self.input_validator.clone(),
             state_validator: self.state_validator.clone(),
             output_validator: self.output_validator.clone(),
             _input: PhantomData,
@@ -740,6 +747,7 @@ impl<TInput, TOutput, TState, TCtxExt> WorkflowDefinition<TInput, TOutput, TStat
             previous_versions: self.previous_versions,
             handler: self.handler,
             initialize: self.initialize,
+            input_validator: self.input_validator,
             state_validator: self.state_validator,
             output_validator: self.output_validator,
             _input: PhantomData,
@@ -766,6 +774,7 @@ impl WorkflowDefinition {
             previous_versions: Vec::new(),
             handler: Arc::new(|_ctx: WorkflowCtx| Box::pin(async { Ok(serde_json::Value::Null) })),
             initialize: Arc::new(|_| Ok(serde_json::Value::Object(Default::default()))),
+            input_validator: None,
             state_validator: None,
             output_validator: None,
             _input: PhantomData,

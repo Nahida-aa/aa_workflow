@@ -88,6 +88,49 @@ async fn typed_input_rejects_missing_field() {
     );
 }
 
+/// input 形状不对 ⇒ `RunErrorCode::Validation`（上游 `validation_error`），
+/// **不是**通用的 `Error`。
+///
+/// 这条单独钉，是因为它和「能不能发现」无关——serde 一直都拦得住（上一个测试
+/// 就证了）。真正的差别是**错误码**：上游把「你给的 input 不合法」和「数据库
+/// 挂了」分成两个码（`run-workflow.ts:219`），宿主的正确反应完全不同——前者是
+/// 调用方的 400，不该重试；后者是我们自己的事。我们曾经两者都报 `error`。
+///
+/// 顺带钉住时机：校验发生在 `initialize` / handler **之前**（上游
+/// `run-workflow.ts:209-213` 把两者放同一个 guarded block，先 input 后 state），
+/// 所以不合法的 input 不会先把 workflow 跑起来。
+#[tokio::test]
+async fn bad_input_is_a_validation_error_not_a_generic_error() {
+    let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+    let events = run_workflow(
+        RunWorkflowOptions::new(charge_workflow(), store.clone())
+            .input(serde_json::json!({ "amount": 4200 })) // 缺 userId
+            .run_id("typed-input-validation"),
+    )
+    .collect()
+    .await;
+
+    let code = events
+        .iter()
+        .find_map(|e| match e {
+            aa_workflow_core::WorkflowEvent::RunErrored { code, .. } => Some(*code),
+            _ => None,
+        })
+        .expect("形状不对的 input 必须以 RUN_ERRORED 收场");
+    assert_eq!(
+        code,
+        aa_workflow_core::RunErrorCode::Validation,
+        "input 形状失败要报 validation，对齐上游 validation_error"
+    );
+    // 时机：handler 一步都没跑。
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, aa_workflow_core::WorkflowEvent::StepStarted { .. })),
+        "input 校验在 handler 之前，不该有任何 step 被启动"
+    );
+}
+
 /// `sc.id` 是**确定性**的——resume 时 step 走缓存结果，chargeId 必须一致。
 ///
 /// 这是 recipe 里「拿它当外部系统幂等键」这条承诺的回归：sc.id 若漂移，

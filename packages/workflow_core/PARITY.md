@@ -107,6 +107,17 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunWorkflowOptions.r
     是运行时 zod schema；Rust 用 serde `DeserializeOwned` 类型代替（`.input::<T>()` /
     `.state::<T>()` / `.output::<T>()`），解析失败 = 类型错误，语义与 zod
     `.safeParse` 一致，但无 schema 实例对象（差异 #10）。
+
+    三个声明方法都装 `fn(&Value) -> Result<()>` 校验器，由引擎在 pre-flight 调用
+    （`TInput` 到引擎手上已被 `AnyWorkflowDefinition` 擦除，只能这样捕获类型）。
+    差别只在**错误码**：state 不过 → `Validation`；output 不过 → 通用 `Error`
+    （对齐：上游 output 校验失败也走通用 catch，`run-workflow.ts:567` 报
+    `code: 'error'`）；**input 不过 → 必须是 `Validation`**，对齐上游
+    `run-workflow.ts:219` 的 `validation_error`。这条曾经是错的：`.input::<T>()`
+    只换 `PhantomData` 不装校验器，input 反序列化因此落在 typed handler 闭包里
+    （workflow 已经开始才炸），且报通用 `Error`——宿主无法把「调用方给错参数」
+    和「我们自己出故障」分开处理。回归见 `tests/quickstart.rs`
+    `bad_input_is_a_validation_error_not_a_generic_error`。
 11. **`previousVersions` + `selectWorkflowVersion` 内建**：resume 时引擎自动
     按 `RunState.workflow_version` 在 `[current, ...previous_versions]` 中
     路由到正确的 handler（`select_workflow_version`，在 `registry/`
@@ -137,7 +148,7 @@ L198）+ `types.ts`（`Ctx<TIn, TState, TExt>` L386）。
 | TanStack | Rust（`WorkflowBuilder<In, Out, St, Ext>`） | 状态 | 备注 |
 | -------- | ------------------------------------------------ | ---- | ---- |
 | `createWorkflow({ id, ... })` | `create_workflow(CreateWorkflowConfig::new(id).input::<In>()...)` | ◐ | config `.initialize()` 重写 `initialize`；TS config 用 `zod object`；Rust 用 serde `DeserializeOwned` 类型 |
-| `config.inputSchema` | `.input::<In>()` | ◐ | 同 #10（serde 类型） |
+| `config.inputSchema` | `.input::<In>()` | ◐ | 同 #10；装 `input_validator`，pre-flight 校验，不过 → `Validation` |
 | `config.stateSchema` | `.state::<St>()` | ◐ | 同 #10 |
 | `config.outputSchema` | `.output::<Out>()` | ◐ | 同 #10 |
 | `config.description` | `.description()` | ✅ | |

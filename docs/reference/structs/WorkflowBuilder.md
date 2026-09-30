@@ -5,7 +5,7 @@ title: WorkflowBuilder
 
 # Struct: WorkflowBuilder
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:214`](../../../packages/workflow_core/src/define/define_workflow.rs#L214)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:222`](../../../packages/workflow_core/src/define/define_workflow.rs#L222)
 
 The typed builder — `TInput`/`TOutput`/`TState` mirror the workflow's schema
 at build time, `TCtxExt` is the ctx extension type declared by the last
@@ -21,7 +21,7 @@ _（存在非公开字段）_
 pub fn middleware<PExt>(self, m: Middleware) -> WorkflowBuilder<TInput, TOutput, TState, PExt>
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:227`](../../../packages/workflow_core/src/define/define_workflow.rs#L227)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:235`](../../../packages/workflow_core/src/define/define_workflow.rs#L235)
 
 Attach a runtime middleware and re-key `TCtxExt` to `PExt` — the type of
 `ctx.ext` the handler reads (`produce`'s JSON output is deserialized
@@ -48,7 +48,7 @@ bundle; extra `wrap`s still compose in registration order.
 pub fn previous_versions<impl Into<AnyWorkflowDefinition>: Into, impl IntoIterator<Item = impl Into<AnyWorkflowDefinition>>: IntoIterator>(self, v: impl ?) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:242`](../../../packages/workflow_core/src/define/define_workflow.rs#L242)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:250`](../../../packages/workflow_core/src/define/define_workflow.rs#L250)
 
 Older versions of the same workflow to route resumed runs to (see
 [`select_workflow_version`](../functions/select_workflow_version.md)).
@@ -79,7 +79,7 @@ where
     Fut: Future + Send + 'static
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:254`](../../../packages/workflow_core/src/define/define_workflow.rs#L254)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:262`](../../../packages/workflow_core/src/define/define_workflow.rs#L262)
 
 Finalize with the orchestrating closure. `AOut` is inferred from the
 handler's return value; the engine stores it serialized as JSON, so on

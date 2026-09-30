@@ -709,6 +709,17 @@ async fn drive(
         ));
     };
 
+    // Input shape-check **before** `initialize`: upstream validates the input
+    // then builds state in one guarded block (`run-workflow.ts:209-213`), and a
+    // bad input is a `validation_error`, not a handler crash. This has to live
+    // here rather than in the typed handler because `TInput` is erased by the
+    // time the engine sees the workflow (`AnyWorkflowDefinition`).
+    if let Some(validate) = &active.input_validator
+        && let Err(e) = validate(&opts.input)
+    {
+        return Err(error_persisted(&store, run_state, &run_id, &e, RunErrorCode::Validation));
+    }
+
     // Per-invocation state: re-derived from `initialize(input)` on every
     // start and resume (mirrors TanStack, where state is rebuilt from
     // `initialize({ input })` and never persisted). The handler input the

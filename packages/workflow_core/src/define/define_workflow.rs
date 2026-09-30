@@ -26,6 +26,7 @@ pub struct CreateWorkflowConfig<TInput = (), TOutput = (), TState = serde_json::
     pub description: Option<String>,
     pub version: Option<String>,
     pub initialize: InitializeFn,
+    pub input_validator: Option<StateValidatorFn>,
     pub state_validator: Option<StateValidatorFn>,
     pub output_validator: Option<StateValidatorFn>,
     pub default_step_retry: Option<RetryPolicy>,
@@ -42,6 +43,7 @@ impl CreateWorkflowConfig<(), (), serde_json::Value> {
             description: None,
             version: None,
             initialize: Arc::new(|_| Ok(serde_json::Value::Object(Default::default()))),
+            input_validator: None,
             state_validator: None,
             output_validator: None,
             default_step_retry: None,
@@ -109,6 +111,10 @@ impl<TInput, TOutput, TState> CreateWorkflowConfig<TInput, TOutput, TState> {
             description: self.description,
             version: self.version,
             initialize: self.initialize,
+            input_validator: Some(Arc::new(|v| {
+                serde_json::from_value::<NewIn>(v.clone())?;
+                Ok(())
+            })),
             state_validator: self.state_validator,
             output_validator: self.output_validator,
             default_step_retry: self.default_step_retry,
@@ -131,6 +137,7 @@ impl<TInput, TOutput, TState> CreateWorkflowConfig<TInput, TOutput, TState> {
             description: self.description,
             version: self.version,
             initialize: self.initialize,
+            input_validator: self.input_validator,
             state_validator: Some(Arc::new(|v| {
                 serde_json::from_value::<NewSt>(v.clone())?;
                 Ok(())
@@ -158,6 +165,7 @@ impl<TInput, TOutput, TState> CreateWorkflowConfig<TInput, TOutput, TState> {
             description: self.description,
             version: self.version,
             initialize: self.initialize,
+            input_validator: self.input_validator,
             state_validator: self.state_validator,
             output_validator: Some(Arc::new(|v| {
                 serde_json::from_value::<NewOut>(v.clone())?;
@@ -268,6 +276,7 @@ impl<TInput, TOutput, TState, TCtxExt> WorkflowBuilder<TInput, TOutput, TState, 
             description,
             version,
             initialize,
+            input_validator,
             state_validator,
             output_validator,
             default_step_retry,
@@ -342,6 +351,7 @@ impl<TInput, TOutput, TState, TCtxExt> WorkflowBuilder<TInput, TOutput, TState, 
             previous_versions: self.previous,
             handler: engine_handler,
             initialize,
+            input_validator,
             state_validator,
             output_validator: validator,
             _input: PhantomData,
