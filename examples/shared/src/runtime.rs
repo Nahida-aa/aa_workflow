@@ -6,9 +6,7 @@
 
 use std::sync::Arc;
 
-use aa_workflow_core::{
-    RunOutcome, RunStore, RunWorkflowOptions, Workflow, WorkflowEvent, run_workflow,
-};
+use aa_workflow_core::{RunOutcome, RunStore, RunWorkflowOptions, WorkflowDefinition, WorkflowEvent, run_workflow};
 
 /// 可选的事件订阅者（每个 `ctx.step` 落盘事件都会回调）。
 pub type EventSubscriber = Arc<dyn Fn(WorkflowEvent) + Send + Sync>;
@@ -34,9 +32,9 @@ pub struct DriveOpts<'a> {
 impl DriveOpts<'_> {
     /// 组装引擎入参。`workflow` / `store` 由调用方传入——它们是
     /// [`RunWorkflowOptions`] 的**必填项**（对齐上游 `RunWorkflowOptions`）。
-    fn into_run_options(
+    fn into_run_options<TInput, TOutput, TState, TCtxExt>(
         &self,
-        workflow: Arc<Workflow>,
+        workflow: Arc<WorkflowDefinition<TInput, TOutput, TState, TCtxExt>>,
         store: Arc<dyn RunStore>,
         input: serde_json::Value,
     ) -> RunWorkflowOptions {
@@ -55,8 +53,8 @@ impl DriveOpts<'_> {
 }
 
 /// 跑/续跑一条 workflow，返回引擎的 [`RunOutcome`]。
-pub async fn drive(
-    workflow: &Workflow,
+pub async fn drive<TInput, TOutput, TState, TCtxExt>(
+    workflow: &WorkflowDefinition<TInput, TOutput, TState, TCtxExt>,
     store: Arc<dyn RunStore>,
     input: serde_json::Value,
     opts: DriveOpts<'_>,

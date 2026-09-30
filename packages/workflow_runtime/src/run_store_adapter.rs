@@ -88,10 +88,7 @@ use std::sync::mpsc::Receiver;
 
 use aa_workflow_core::{DeleteReason, RunState, RunStore, StoreError, WorkflowEvent};
 
-use crate::types::{
-    AppendEventsArgs, AppendEventsResult, LoadedExecution, ReadEventsArgs, SaveRunStateArgs,
-    StoredWorkflowEvent, WorkflowExecution,
-};
+use crate::types::{AppendEventsArgs, AppendEventsResult, LoadedExecution, ReadEventsArgs, SaveRunStateArgs, StoredWorkflowEvent, WorkflowExecution};
 
 /// 执行存储的基础契约。对齐上游 `WorkflowRunStoreAdapterStore`
 /// （`workflow-runtime/src/types.ts:290`，六个方法）。
@@ -586,15 +583,13 @@ mod e2e_tests {
     //! 端到端验证适配器：用 `WorkflowExecutionStore` 实现驱动 core 的引擎。
     use super::*;
     use crate::in_memory_store::InMemoryExecutionStore;
-    use aa_workflow_core::{
-        BaseCtx, CreateWorkflowConfig, RunWorkflowOptions, RunStatus, StepCtx, Workflow, create_workflow,
-    };
+    use aa_workflow_core::{BaseCtx, CreateWorkflowConfig, RunWorkflowOptions, RunStatus, StepCtx, WorkflowDefinition, create_workflow};
 
     /// 用适配器把一个 `WorkflowExecutionStore` 实现接进 core，跑通一次真实
     /// workflow：**这是「不需要实现者手写两套方法」的实证。**
     #[tokio::test]
     async fn core_runs_against_adapted_store() {
-        let wf: Workflow =
+        let wf: WorkflowDefinition =
             create_workflow(CreateWorkflowConfig::new("e2e").input::<serde_json::Value>())
                 .handler(|ctx: BaseCtx<serde_json::Value>| async move {
                     let a = ctx
@@ -604,7 +599,7 @@ mod e2e_tests {
                         .await?;
                     Ok(serde_json::json!({ "got": a }))
                 })
-                .into_workflow();
+                .into();
 
         let mem = Arc::new(InMemoryExecutionStore::default());
         let exec: Arc<dyn WorkflowExecutionStore> = mem.clone();

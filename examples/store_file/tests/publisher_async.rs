@@ -18,10 +18,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use aa_workflow_core::{
-    BaseCtx, CreateWorkflowConfig, RunStatus, RunWorkflowOptions, StepCtx, WorkflowEvent,
-    create_workflow, run_workflow,
-};
+use aa_workflow_core::{BaseCtx, CreateWorkflowConfig, RunStatus, RunWorkflowOptions, StepCtx, WorkflowEvent, create_workflow, run_workflow};
 use aa_workflow_runtime::run_store_adapter::{WorkflowExecutionStore, create_run_store_adapter};
 use example_store_file::FileExecutionStore;
 
@@ -35,7 +32,7 @@ fn store_of(tag: &str) -> Arc<dyn WorkflowExecutionStore> {
 }
 
 /// 三个 step 的 workflow，返回 step id 序列。
-fn three_steps() -> Arc<aa_workflow_core::Workflow> {
+fn three_steps() -> Arc<aa_workflow_core::WorkflowDefinition> {
     Arc::new(
         create_workflow(CreateWorkflowConfig::new("t").input::<serde_json::Value>())
             .handler(|ctx: BaseCtx<serde_json::Value>| async move {
@@ -48,7 +45,7 @@ fn three_steps() -> Arc<aa_workflow_core::Workflow> {
                 }
                 Ok(serde_json::json!(done))
             })
-            .into_workflow(),
+            .into(),
     )
 }
 
@@ -83,7 +80,6 @@ async fn slow_publisher_does_not_stall_the_engine() {
                     Ok(serde_json::json!(done))
                 }
             })
-            .into_workflow(),
     );
 
     let out = run_workflow(
@@ -236,7 +232,6 @@ async fn paused_path_also_drains_the_queue() {
                 ctx.approve("need-ok", "等外部批准").await?;
                 Ok(serde_json::Value::Null)
             })
-            .into_workflow(),
     );
 
     let out = run_workflow(

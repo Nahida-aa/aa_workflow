@@ -9,11 +9,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 
-use crate::define::Workflow;
-use crate::engine::{
-    DEFAULT_MIN_YIELD_REMAINING_MS, EngineRuntime, Fanout, StepHalt, WorkflowCancelled,
-    WorkflowParked, now_ms,
-};
+use crate::define::{AnyWorkflowDefinition, WorkflowDefinition};
+use crate::engine::{DEFAULT_MIN_YIELD_REMAINING_MS, EngineRuntime, Fanout, StepHalt, WorkflowCancelled, WorkflowParked, now_ms};
 use crate::error::{RunError, RunErrorCode, WorkflowError};
 use crate::event::{RunStatus, StepStatus, WorkflowEvent, fold_step_states};
 use crate::resource::Gate;
@@ -40,11 +37,18 @@ use crate::run_store::{RunState, RunStore};
 /// | `recover` / `attach` / `signal` / `threadId` / `outputSink` / `telemetry` | — | **暂无**；未做，不是不做 |
 /// | — | ➕ `continue_from` / `target_step` | **本地扩展**（上游连这两个概念都没有） |
 ///
-/// # 为什么 `workflow` 是 `Arc<Workflow>` 而不是 `Workflow`
+/// # 为什么字段类型是 `AnyWorkflowDefinition`（newtype）而不是裸 `WorkflowDefinition`
 ///
-/// `Workflow` 内含 `Vec<Workflow>`（`previous_versions`）与若干 `Arc`，
-/// 直接持有所有权会让每次 builder 调用都要 clone 一遍。`Arc` 让 clone 变成
-/// 引用计数自增，同时避免给结构体引入生命周期参数（那会让 builder 链很难写）。
+/// 上游这个字段是 `AnyWorkflowDefinition`，而它**本身就是别名**
+/// `WorkflowDefinition<any, any, any>`（`types.ts:466`）——TS 的 `any` 双向可赋值，
+/// 一个类型同时充当「带类型的声明」和「擦除的运行站点」。Rust 做不到：
+/// `WorkflowDefinition<ChargeInput, Draft>` 与 `WorkflowDefinition<Value, Value>`
+/// 是两个互不 coercion 的类型，所以擦除态必须是**独立的类型**，也就是这个 newtype。
+/// 它的名字沿用上游，于是本字段与上游一字不差。
+///
+/// newtype 内部持 `Arc<WorkflowDefinition>`：`previous_versions` 是 `Vec`、另有
+/// 若干 `Arc`，按值持有会让每次 run 都 deep-copy 一遍；`Arc` 让 clone 变引用计数自增，
+/// 也避免给结构体引入生命周期参数（那会让 builder 链很难写）。
 /// 事件回调的**已擦除**类型：返回 future 而非直接调用，所以宿主可以给异步实现
 /// （对齐上游 `publish?: (runId, event) => void | Promise<void>`）。
 ///
@@ -63,7 +67,12 @@ pub type Publisher =
 
 pub struct RunWorkflowOptions {
     /// 要驱动的 workflow。**必填**（由 [`Self::new`] 保证）。
-    pub workflow: Arc<Workflow>,
+    ///
+    /// 用上游的名字，让本字段与 TanStack 的 `RunWorkflowOptions.workflow` 一字不差。
+    /// `AnyWorkflowDefinition` = 擦除态的 [`WorkflowDefinition`]（上游是
+    /// `WorkflowDefinition<any,any,any>` 的别名；Rust 没有 `any` 的双向可赋值，
+    /// 所以擦除态是独立类型）。内部持 `Arc`，clone 只加引用计数。
+    pub workflow: AnyWorkflowDefinition,
     /// 事件日志 / run 元数据的落盘位置。**必填**（由 [`Self::new`] 保证）。
     pub run_store: Arc<dyn RunStore>,
 
@@ -148,9 +157,15 @@ pub struct RunWorkflowOptions {
 
 impl RunWorkflowOptions {
     /// **必填项在这里**：`workflow` + `run_store`。构造完这两个就一定齐了。
-    pub fn new(workflow: Arc<Workflow>, run_store: Arc<dyn RunStore>) -> Self {
+    /// `workflow` 收 `impl Into<AnyWorkflowDefinition>`，所以三种写法都直接可用：
+    /// 擦除态 `WorkflowDefinition`、带类型的 `WorkflowDefinition<TInput, …>`
+    /// （`create_workflow` 的产物），以及它们的 `Arc`。
+    pub fn new(
+        workflow: impl Into<AnyWorkflowDefinition>,
+        run_store: Arc<dyn RunStore>,
+    ) -> Self {
         Self {
-            workflow,
+            workflow: workflow.into(),
             run_store,
             run_id: None,
             input: serde_json::Value::Null,
@@ -291,7 +306,7 @@ pub use crate::registry::select_workflow_version;
 pub async fn run_workflow(
     opts: &RunWorkflowOptions,
 ) -> Result<RunOutcome, WorkflowError> {
-    let workflow = &opts.workflow;
+    let workflow: &WorkflowDefinition = &opts.workflow;
     let store = Arc::clone(&opts.run_store);
     let publisher = opts.publisher.clone();
 
@@ -619,9 +634,7 @@ pub fn run_workflow_sync(opts: &RunWorkflowOptions) -> Result<RunOutcome, Workfl
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::define::{
-        BaseCtx, CreateWorkflowConfig, StepCtx, Workflow, WorkflowCtx, create_workflow,
-    };
+    use crate::define::{BaseCtx, CreateWorkflowConfig, StepCtx, WorkflowDefinition, WorkflowCtx, create_workflow};
     use crate::engine::testkit::TestLog;
     use crate::run_store::InMemoryStore;
     use serde_json::json;
@@ -637,7 +650,7 @@ mod tests {
     #[tokio::test]
     async fn run_id_defaults_to_generated_when_absent() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("gen-id").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("gen-id").handler(|ctx: WorkflowCtx| async move {
             ctx.step("a", |_sc: StepCtx| async move { Ok(json!({ "ok": true })) })
                 .await
         });
@@ -665,7 +678,7 @@ mod tests {
     #[tokio::test]
     async fn initialize_failure_errors_run_without_events() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("bad-init")
+        let wf = WorkflowDefinition::new("bad-init")
             .initialize(|_| Err(anyhow::anyhow!("cannot build state")))
             .handler(|ctx: WorkflowCtx| async move {
                 ctx.step("never", |_sc: StepCtx| async move {
@@ -704,7 +717,7 @@ mod tests {
         .handler(|ctx: BaseCtx<serde_json::Value, StrictState>| async move {
             Ok(json!({ "n": ctx.state.n }))
         });
-        let wf: Workflow = wf.into_workflow();
+        let wf: AnyWorkflowDefinition = wf.into();
         let out = run_workflow(
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(json!({}))
@@ -730,7 +743,7 @@ mod tests {
     #[tokio::test]
     async fn handler_failure_errored_with_error_code() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("bad").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("bad").handler(|ctx: WorkflowCtx| async move {
             ctx.step("a", |_sc: StepCtx| async move { anyhow::bail!("boom") })
                 .await
         });
@@ -760,7 +773,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_run_errored_with_aborted_code() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("c").handler(|_ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("c").handler(|_ctx: WorkflowCtx| async move {
             Err(crate::engine::WorkflowCancelled.into())
         });
         let out = run_workflow(
@@ -795,7 +808,7 @@ mod tests {
             let seen = seen.clone();
             Arc::new(move |ev| seen.lock().unwrap().push(ev))
         };
-        let wf = Workflow::new("bad-init")
+        let wf = WorkflowDefinition::new("bad-init")
             .initialize(|_| Err(anyhow::anyhow!("nope")))
             .handler(|_ctx: WorkflowCtx| async move { Ok(json!({ "unreachable": true })) });
         let out = run_workflow(
@@ -836,7 +849,7 @@ mod tests {
     #[tokio::test]
     async fn one_failure_is_one_run_error_everywhere() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("one-error").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("one-error").handler(|ctx: WorkflowCtx| async move {
             ctx.step(
                 "a",
                 |_sc: StepCtx| async move { anyhow::bail!("same failure") },
@@ -896,7 +909,7 @@ mod tests {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
 
         // 先以 v1 起一个 run（挂起在 approve，保持非终态以便后续 resume）。
-        let v1 = Workflow::new("ver")
+        let v1 = WorkflowDefinition::new("ver")
             .version("v1")
             .handler(|ctx: WorkflowCtx| async move {
                 ctx.approve("gate", "hold").await?;
@@ -927,7 +940,7 @@ mod tests {
         let _ = task.await;
 
         // v2 **不带** v1 作 previous_versions → resume 应报错而非回退到 v2。
-        let v2 = Workflow::new("ver")
+        let v2 = WorkflowDefinition::new("ver")
             .version("v2")
             .handler(|_ctx: WorkflowCtx| async move { Ok(serde_json::Value::Null) });
         let err = run_workflow(
@@ -948,7 +961,7 @@ mod tests {
         let store = Arc::new(InMemoryStore::new());
         let log = Arc::new(Mutex::new(TestLog::default()));
         let fail = Arc::new(AtomicBool::new(true));
-        let wf = Workflow::new("w").handler({
+        let wf = WorkflowDefinition::new("w").handler({
             let log = log.clone();
             let fail = fail.clone();
             move |ctx: WorkflowCtx| {
@@ -1025,7 +1038,7 @@ mod tests {
     async fn continue_from_resets_downstream() {
         let store = Arc::new(InMemoryStore::new());
         let log = Arc::new(Mutex::new(TestLog::default()));
-        let wf = Workflow::new("w").handler({
+        let wf = WorkflowDefinition::new("w").handler({
             let log = log.clone();
             move |ctx: WorkflowCtx| {
                 let log = log.clone();
@@ -1073,7 +1086,7 @@ mod tests {
     async fn target_step_stops_downstream() {
         let store = Arc::new(InMemoryStore::new());
         let log = Arc::new(Mutex::new(TestLog::default()));
-        let wf = Workflow::new("w").handler({
+        let wf = WorkflowDefinition::new("w").handler({
             let log = log.clone();
             move |ctx: WorkflowCtx| {
                 let log = log.clone();
@@ -1117,7 +1130,7 @@ mod tests {
     #[tokio::test]
     async fn handler_output_is_run_output() {
         let store = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("w").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("w").handler(|ctx: WorkflowCtx| async move {
             let v = ctx
                 .step("a", move |_sc: StepCtx| async move {
                     Ok(serde_json::json!({"x": 1}))
@@ -1143,7 +1156,7 @@ mod tests {
     #[tokio::test]
     async fn resume_routes_by_persisted_workflow_version() {
         let store = Arc::new(InMemoryStore::new());
-        let v1 = create_workflow(
+        let v1: AnyWorkflowDefinition = create_workflow(
             CreateWorkflowConfig::new("ver-wf")
                 .version("v1")
                 .input::<serde_json::Value>(),
@@ -1154,7 +1167,7 @@ mod tests {
             })
             .await
         })
-        .into_workflow();
+        .into();
 
         let out1 = run_workflow(
             &RunWorkflowOptions::new(Arc::new(v1.clone()), store.clone())
@@ -1165,7 +1178,7 @@ mod tests {
         .unwrap();
         assert_eq!(out1.output, Some(serde_json::json!({ "ver": "v1" })));
 
-        let v2 = create_workflow(
+        let v2: AnyWorkflowDefinition = create_workflow(
             CreateWorkflowConfig::new("ver-wf")
                 .version("v2")
                 .input::<serde_json::Value>(),
@@ -1176,10 +1189,11 @@ mod tests {
                 Ok(serde_json::json!({ "ver": "v2" }))
             })
             .await
-        });
+        })
+        .into();
 
         let out2 = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(v2.clone().into_workflow()), store.clone())
+            &RunWorkflowOptions::new(v2.clone(), store.clone())
                 .input(serde_json::json!({}))
                 .run_id("ver:r"),
         )
@@ -1192,7 +1206,7 @@ mod tests {
         );
 
         let out3 = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(v2.clone().into_workflow()), store.clone())
+            &RunWorkflowOptions::new(v2.clone(), store.clone())
                 .input(serde_json::json!({}))
                 .run_id("ver:r2"),
         )

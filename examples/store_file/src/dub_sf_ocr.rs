@@ -39,9 +39,7 @@
 
 use std::sync::Arc;
 
-use aa_workflow_core::{
-    BaseCtx, CreateWorkflowConfig, StepCtx, WorkflowDefinition, create_workflow,
-};
+use aa_workflow_core::{BaseCtx, CreateWorkflowConfig, StepCtx, WorkflowDefinition, create_workflow};
 
 // ========================================================================
 // dub_sf_ocr 的定义

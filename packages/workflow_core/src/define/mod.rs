@@ -1,8 +1,8 @@
-//! Workflow 定义层。按职责分文件（对齐 TanStack `src/define/` 的划分）：
+//! WorkflowDefinition 定义层。按职责分文件（对齐 TanStack `src/define/` 的划分）：
 //!
 //! - 本文件：handler **运行时**能看到的东西 —— [`BaseCtx`]（`ctx`）、
 //!   [`StepCtx`]、[`StepOptions`] / [`RetryPolicy`] / [`Backoff`]，以及 workflow
-//!   本体 [`Workflow`]。
+//!   本体 [`WorkflowDefinition`]。
 //! - `define_workflow` 子模块：**声明**一个 workflow 的入口 ——
 //!   [`CreateWorkflowConfig`] / [`WorkflowBuilder`] / [`create_workflow`] /
 //!   [`WorkflowDefinition`]。
@@ -10,6 +10,7 @@
 //! [`Middleware`] 与其扩展类型在 [`crate::middleware`]（TS 侧同为独立目录）。
 
 use std::future::Future;
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,9 +21,7 @@ use crate::middleware::Middleware;
 
 mod define_workflow;
 mod state_handle;
-pub use define_workflow::{
-    CreateWorkflowConfig, WorkflowBuilder, WorkflowDefinition, create_workflow,
-};
+pub use define_workflow::{CreateWorkflowConfig, WorkflowBuilder, create_workflow};
 pub use state_handle::StateHandle;
 
 /// Boxed async step-returning future. Steps are spawned inside the engine's
@@ -515,7 +514,7 @@ impl StepOptions {
 type InitializeFn =
     Arc<dyn Fn(&serde_json::Value) -> anyhow::Result<serde_json::Value> + Send + Sync>;
 
-/// Shape-check for the initial state (installed by `Workflow::state_schema::<T>()`).
+/// Shape-check for the initial state (installed by `WorkflowDefinition::state_schema::<T>()`).
 type StateValidatorFn = Arc<dyn Fn(&serde_json::Value) -> anyhow::Result<()> + Send + Sync>;
 
 /// 恢复 payload 的形状校验器（对齐 TanStack `WaitForEventOptions.schema`，
@@ -527,7 +526,7 @@ pub type PayloadValidator = Arc<dyn Fn(&serde_json::Value) -> anyhow::Result<()>
 ///
 /// 上游用 `StandardSchemaV1`（zod/valibot 通用接口）；Rust 侧没有那种运行时
 /// schema 生态，最接近的既有物是 `serde` 的 `Deserialize`（和
-/// `Workflow::state_schema::<T>()` 同一个约定：`T` 就是 schema）。
+/// `WorkflowDefinition::state_schema::<T>()` 同一个约定：`T` 就是 schema）。
 #[derive(Clone)]
 pub struct PayloadSchema {
     validator: PayloadValidator,
@@ -580,8 +579,21 @@ pub struct ApproveOptions {
 /// builder-derived extras (`description`, `default_step_retry`, `middlewares`,
 /// `previous_versions`, `output_validator`) that TanStack carries on the
 /// workflow object.
-#[derive(Clone)]
-pub struct Workflow {
+///
+/// Mirrors TanStack's `WorkflowDefinition<TInput, TOutput, TState>`
+/// (`types.ts:442-460`) member-for-member — **including the generics**, which is
+/// the whole point: upstream's erased alias (`AnyWorkflowDefinition`) and its
+/// typed form are the same type, and here they are too, just spelled out.
+///
+/// Every type parameter is defaulted to the erased form, so a **bare
+/// `WorkflowDefinition` is the type-erased workflow** — what the engine and
+/// every run site see. See [`AnyWorkflowDefinition`] for the run-site spelling.
+pub struct WorkflowDefinition<
+    TInput = serde_json::Value,
+    TOutput = serde_json::Value,
+    TState = serde_json::Value,
+    TCtxExt = (),
+> {
     pub id: String,
     pub version: Option<String>,
     pub description: Option<String>,
@@ -594,15 +606,156 @@ pub struct Workflow {
     /// Older versions of the same workflow. Resume routes by the persisted
     /// `workflow_version` to the matching entry (see
     /// [`select_workflow_version`](crate::engine::select_workflow_version)).
-    pub previous_versions: Vec<Workflow>,
+    pub previous_versions: Vec<AnyWorkflowDefinition>,
     pub handler: WorkflowHandler,
     pub initialize: InitializeFn,
     pub state_validator: Option<StateValidatorFn>,
     /// Shape-check for the handler's `TOutput` value (config `output` schema).
     pub output_validator: Option<StateValidatorFn>,
+    _input: PhantomData<TInput>,
+    _output: PhantomData<TOutput>,
+    _state: PhantomData<TState>,
+    _ext: PhantomData<TCtxExt>,
 }
 
-impl Workflow {
+// `#[derive(Clone)]` would demand `TInput: Clone + TOutput: Clone + …` for what
+// is only `PhantomData`. The type parameters carry no data, so `Clone` holds
+// unconditionally — a definition stays cloneable whatever the authoring site
+// declared.
+impl<TInput, TOutput, TState, TCtxExt> Clone
+    for WorkflowDefinition<TInput, TOutput, TState, TCtxExt>
+{
+    fn clone(&self) -> Self {
+        WorkflowDefinition {
+            id: self.id.clone(),
+            version: self.version.clone(),
+            description: self.description.clone(),
+            default_step_retry: self.default_step_retry.clone(),
+            middlewares: self.middlewares.clone(),
+            previous_versions: self.previous_versions.clone(),
+            handler: Arc::clone(&self.handler),
+            initialize: Arc::clone(&self.initialize),
+            state_validator: self.state_validator.clone(),
+            output_validator: self.output_validator.clone(),
+            _input: PhantomData,
+            _output: PhantomData,
+            _state: PhantomData,
+            _ext: PhantomData,
+        }
+    }
+}
+
+/// The erased workflow, and the type every run site takes — TanStack's
+/// `AnyWorkflowDefinition` (`types.ts:466`).
+///
+/// # Why this is a newtype and not an alias
+///
+/// Upstream that name **is** an alias: `WorkflowDefinition<any, any, any>`.
+/// TypeScript's `any` is bidirectionally assignable, so a single type serves
+/// both the typed declaration site and the erased run site. Rust has no such
+/// assignability — `WorkflowDefinition<ChargeInput, Draft>` is a *different
+/// type* from `WorkflowDefinition<Value, Value>` and neither coerces to the
+/// other — so the erased form has to be a type of its own. That is this.
+///
+/// Conversion is explicit, lossless, and free (both directions go through an
+/// `Arc`, so no deep clone):
+///
+/// ```
+/// use aa_workflow_core::{AnyWorkflowDefinition, CreateWorkflowConfig, WorkflowDefinition, create_workflow};
+///
+/// // the erased form — what a run site takes
+/// let erased: AnyWorkflowDefinition = WorkflowDefinition::new("charge").into();
+/// assert_eq!(erased.id, "charge");
+///
+/// // a typed declaration site erases just as cheaply
+/// let typed = create_workflow(CreateWorkflowConfig::new("charge"))
+///     .handler(|_ctx| async { Ok(()) });
+/// let erased: AnyWorkflowDefinition = typed.into();
+/// assert_eq!(erased.id, "charge");
+/// ```
+///
+/// # Why it holds an `Arc`
+///
+/// `WorkflowDefinition` owns `Vec`s and several `Arc`s, so a by-value clone on
+/// every run would deep-copy the middleware and previous-version lists. `Arc`
+/// makes clone a refcount bump and keeps the struct lifetime-parameter-free
+/// (lifetimes would make the builder chain very unpleasant to write).
+#[derive(Clone)]
+pub struct AnyWorkflowDefinition(Arc<WorkflowDefinition>);
+
+impl AnyWorkflowDefinition {
+    /// The shared field carrier. Cloning this is a refcount bump, so a host
+    /// that already holds an `Arc<AnyWorkflowDefinition>` can hand it to a run
+    /// site without copying the middleware / previous-version lists.
+    fn shared(&self) -> Arc<WorkflowDefinition> {
+        Arc::clone(&self.0)
+    }
+}
+
+impl std::ops::Deref for AnyWorkflowDefinition {
+    type Target = WorkflowDefinition;
+
+    fn deref(&self) -> &WorkflowDefinition {
+        &self.0
+    }
+}
+
+impl<TInput, TOutput, TState, TCtxExt> From<WorkflowDefinition<TInput, TOutput, TState, TCtxExt>>
+    for AnyWorkflowDefinition
+{
+    fn from(w: WorkflowDefinition<TInput, TOutput, TState, TCtxExt>) -> Self {
+        Self(Arc::new(w.erase()))
+    }
+}
+
+impl<TInput, TOutput, TState, TCtxExt> From<Arc<WorkflowDefinition<TInput, TOutput, TState, TCtxExt>>>
+    for AnyWorkflowDefinition
+{
+    fn from(w: Arc<WorkflowDefinition<TInput, TOutput, TState, TCtxExt>>) -> Self {
+        // Unique refcount → move the fields out, no clone at all. Shared →
+        // fall back to a clone (only PhantomData actually differs).
+        let inner = Arc::try_unwrap(w).unwrap_or_else(|shared| (*shared).clone());
+        Self(Arc::new(inner.erase()))
+    }
+}
+
+impl From<Arc<AnyWorkflowDefinition>> for AnyWorkflowDefinition {
+    fn from(w: Arc<AnyWorkflowDefinition>) -> Self {
+        Self(Arc::clone(&w.0))
+    }
+}
+
+impl<TInput, TOutput, TState, TCtxExt> WorkflowDefinition<TInput, TOutput, TState, TCtxExt> {
+    /// Drop the type parameters, keeping every real field. The parameters are
+    /// `PhantomData` only — the handler, validator and middleware types are
+    /// already erased (`WorkflowHandler` etc.) — so this is a field move, and
+    /// the only thing erased is the *authoring-site* type information.
+    fn erase(self) -> WorkflowDefinition {
+        WorkflowDefinition {
+            id: self.id,
+            version: self.version,
+            description: self.description,
+            default_step_retry: self.default_step_retry,
+            middlewares: self.middlewares,
+            previous_versions: self.previous_versions,
+            handler: self.handler,
+            initialize: self.initialize,
+            state_validator: self.state_validator,
+            output_validator: self.output_validator,
+            _input: PhantomData,
+            _output: PhantomData,
+            _state: PhantomData,
+            _ext: PhantomData,
+        }
+    }
+}
+
+impl WorkflowDefinition {
+    /// The erased workflow: no `TInput`/`TOutput`/`TState`/`TCtxExt`. This is
+    /// the engine-facing constructor (it replaces the old standalone `Workflow`
+    /// type); a *typed* definition comes from
+    /// [`create_workflow`](super::create_workflow)(...).handler(...), which
+    /// pins the parameters from the declaration site.
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -615,6 +768,10 @@ impl Workflow {
             initialize: Arc::new(|_| Ok(serde_json::Value::Object(Default::default()))),
             state_validator: None,
             output_validator: None,
+            _input: PhantomData,
+            _output: PhantomData,
+            _state: PhantomData,
+            _ext: PhantomData,
         }
     }
 
@@ -637,9 +794,12 @@ impl Workflow {
 
     /// Same as
     /// [`WorkflowBuilder::previous_versions`](WorkflowBuilder::previous_versions) —
-    /// the erased-`Workflow` variant for engine-facing construction.
-    pub fn previous_versions(mut self, v: Vec<Workflow>) -> Self {
-        self.previous_versions = v;
+    /// the direct-construction variant for engine-facing code.
+    pub fn previous_versions(
+        mut self,
+        v: impl IntoIterator<Item = impl Into<AnyWorkflowDefinition>>,
+    ) -> Self {
+        self.previous_versions = v.into_iter().map(Into::into).collect();
         self
     }
 
@@ -784,7 +944,7 @@ mod tests {
                 });
         let store = Arc::new(InMemoryStore::new());
         let out = run_workflow(
-            &RunWorkflowOptions::new(Arc::new(wf.clone().into_workflow()), store)
+            &RunWorkflowOptions::new(wf.clone(), store)
                 .input(serde_json::json!({})),
         )
         .await

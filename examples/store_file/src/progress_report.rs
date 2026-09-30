@@ -67,9 +67,7 @@
 
 use std::time::Duration;
 
-use aa_workflow_core::{
-    BaseCtx, CreateWorkflowConfig, StepCtx, WorkflowDefinition, create_workflow,
-};
+use aa_workflow_core::{BaseCtx, CreateWorkflowConfig, StepCtx, WorkflowDefinition, create_workflow};
 
 /// `progress_report` 的输入。
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]

@@ -112,7 +112,7 @@ fn run_workflow_against_postgres_store() {
     let outcome = rt
         .block_on(async {
             run_workflow(
-                &RunWorkflowOptions::new(Arc::new(wf.clone().into_workflow()), core_store)
+                &RunWorkflowOptions::new(wf.clone(), core_store)
                     .input(serde_json::json!({ "n": 1 })),
             )
             .await

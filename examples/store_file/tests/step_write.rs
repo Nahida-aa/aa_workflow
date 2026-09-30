@@ -28,7 +28,7 @@ async fn run(tag: &str) -> serde_json::Value {
     let (store, dir) = core_store(tag);
     let core = create_run_store_adapter(store);
     let out = run_workflow(
-        &RunWorkflowOptions::new(Arc::new(step_write().into_workflow()), core)
+        &RunWorkflowOptions::new(step_write(), core)
             .input(serde_json::json!({ "base": 7 })),
     )
     .await
@@ -136,7 +136,7 @@ async fn step_return_values_reach_the_log_for_all_three_steps() {
     let (store, dir) = core_store("logged");
     let core = create_run_store_adapter(store.clone());
     let out = run_workflow(
-        &RunWorkflowOptions::new(Arc::new(step_write().into_workflow()), core)
+        &RunWorkflowOptions::new(step_write(), core)
             .input(serde_json::json!({ "base": 7 }))
             .run_id("step-write-logged".to_string()),
     )

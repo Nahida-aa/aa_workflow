@@ -20,14 +20,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use aa_workflow_core::{WorkflowEvent, RunWorkflowOptions, run_workflow};
-use aa_workflow_runtime::run_store_adapter::{
-    WorkflowExecutionStore, WorkflowRunStoreAdapterStore, create_run_store_adapter,
-};
+use aa_workflow_runtime::run_store_adapter::{WorkflowExecutionStore, WorkflowRunStoreAdapterStore, create_run_store_adapter};
 use aa_workflow_runtime::types::{ReadEventsArgs, StoredWorkflowEvent, WorkflowExecutionStatus};
-use aa_workflow_runtime::{
-    RunResult, RunResultKind, WorkflowRegistration, WorkflowRuntimeConfig,
-    WorkflowRuntimeDefinition, WorkflowRuntimeStartRunArgs, define_workflow_runtime,
-};
+use aa_workflow_runtime::{RunResult, RunResultKind, WorkflowRegistration, WorkflowRuntimeConfig, WorkflowRuntimeDefinition, WorkflowRuntimeStartRunArgs, define_workflow_runtime};
 use example_store_file::dub_sf_ocr::{dub_probe, dub_sf_ocr};
 use example_store_file::FileExecutionStore;
 
@@ -60,7 +55,7 @@ fn get_workflow_runtime(base: &std::path::Path) -> Arc<WorkflowRuntimeDefinition
             workflows.insert(
                 "dub_sf_ocr".to_string(),
                 WorkflowRegistration {
-                    load: Arc::new(|| dub_sf_ocr().into_workflow()),
+                    load: Arc::new(|| dub_sf_ocr().into()),
                     previous_versions: HashMap::new(),
                     version: None,
                     schedules: vec![],
@@ -436,7 +431,7 @@ async fn dub_sf_ocr_continue_from_is_unsupported_on_new_contract() {
     dub_probe::reset();
 
     let (store, dir) = temp_store("continue_from");
-    let wf = dub_sf_ocr().into_workflow();
+    let wf = dub_sf_ocr();
     let core_store =
         create_run_store_adapter(store.clone() as Arc<dyn WorkflowExecutionStore>);
     let out = run_workflow(

@@ -11,13 +11,8 @@
 
 use std::sync::Arc;
 
-use aa_workflow_core::{
-    BaseCtx, CreateWorkflowConfig, RunStatus, RunWorkflowOptions, StepCtx, WorkflowEvent,
-    create_workflow, run_workflow,
-};
-use aa_workflow_runtime::run_store_adapter::{
-    WorkflowExecutionStore, create_run_store_adapter,
-};
+use aa_workflow_core::{BaseCtx, CreateWorkflowConfig, RunStatus, RunWorkflowOptions, StepCtx, WorkflowEvent, create_workflow, run_workflow};
+use aa_workflow_runtime::run_store_adapter::{WorkflowExecutionStore, create_run_store_adapter};
 use aa_workflow_runtime::types::ReadEventsArgs;
 use example_store_file::FileExecutionStore;
 
@@ -41,7 +36,7 @@ async fn panicking_publisher_does_not_break_the_run() {
         });
 
     let out = run_workflow(
-        &RunWorkflowOptions::new(Arc::new(wf.into_workflow()), create_run_store_adapter(store.clone()))
+        &RunWorkflowOptions::new(wf, create_run_store_adapter(store.clone()))
             .input(serde_json::json!({}))
             .run_id("r")
             .publisher(Some(Arc::new(|_e: WorkflowEvent| {
@@ -82,7 +77,7 @@ async fn publisher_keeps_working_after_one_panic() {
         });
 
     run_workflow(
-        &RunWorkflowOptions::new(Arc::new(wf.into_workflow()), create_run_store_adapter(store))
+        &RunWorkflowOptions::new(wf, create_run_store_adapter(store))
             .input(serde_json::json!({}))
             .run_id("r")
             .publisher(Some(Arc::new(move |e: WorkflowEvent| {

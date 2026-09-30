@@ -1,4 +1,4 @@
-//! Workflow 的**执行所有权层**：lease、sweep、timer、schedule。
+//! WorkflowDefinition 的**执行所有权层**：lease、sweep、timer、schedule。
 //!
 //! 对齐 TanStack `@tanstack/workflow-runtime`。定位见
 //! `docs/runtime-design.md`（决策记录）与 core 的 `run_store` 模块文档
@@ -56,26 +56,7 @@ pub mod types;
 
 pub use define_runtime::{cron, every};
 pub use in_memory_store::{InMemoryExecutionStore, in_memory_execution_store};
-pub use run_store_adapter::{
-    WorkflowExecutionStore, WorkflowRunStoreAdapterStore, create_run_store_adapter,
-};
-pub use runtime_driver::{
-    DEFAULT_LEASE_MS, DEFAULT_MIN_YIELD_REMAINING_MS, DEFAULT_SWEEP_LIMIT, RunResult,
-    RunResultKind, SweepSummary, WorkflowRegistration, WorkflowRegistry,
-    WorkflowRuntimeConfig, WorkflowRuntimeDefinition, WorkflowRuntimeDeliverApprovalArgs,
-    WorkflowRuntimeDeliverSignalArgs, WorkflowRuntimeStartRunArgs, WorkflowRuntimeSweepArgs,
-    WorkflowRuntimeSweepResult, define_workflow_runtime,
-};
-pub use schedule_materializer::{
-    DEFAULT_CRON_LOOKBACK_MS, MaterializeWorkflowSchedulesOptions, MaterializedWorkflowSchedule,
-    materialize_workflow_schedules,
-};
-pub use types::{
-    AppendEventsArgs, AppendEventsResult, ClaimDueTimersArgs, ClaimRunArgs, ClaimRunResult,
-    ClaimStaleRunsArgs, CreateRunArgs, CreateRunResult, HeartbeatRunLeaseArgs, LeaseOwner,
-    LoadedExecution, MarkRunErroredArgs, MarkRunFinishedArgs, MarkRunPausedArgs, ReadEventsArgs,
-    ReleaseRunLeaseArgs, RunClaim, RunId, RunSummary, RunTimeline, SaveRunStateArgs,
-    ScheduleTimerArgs, StoredWorkflowEvent, TimerWakeup, WorkflowExecution,
-    WorkflowExecutionStatus, WorkflowId, WorkflowLease, WorkflowScheduleDefinition,
-    WorkflowVersion,
-};
+pub use run_store_adapter::{WorkflowExecutionStore, WorkflowRunStoreAdapterStore, create_run_store_adapter};
+pub use runtime_driver::{DEFAULT_LEASE_MS, DEFAULT_MIN_YIELD_REMAINING_MS, DEFAULT_SWEEP_LIMIT, RunResult, RunResultKind, SweepSummary, WorkflowRegistration, WorkflowRegistry, WorkflowRuntimeConfig, WorkflowRuntimeDefinition, WorkflowRuntimeDeliverApprovalArgs, WorkflowRuntimeDeliverSignalArgs, WorkflowRuntimeStartRunArgs, WorkflowRuntimeSweepArgs, WorkflowRuntimeSweepResult, define_workflow_runtime};
+pub use schedule_materializer::{DEFAULT_CRON_LOOKBACK_MS, MaterializeWorkflowSchedulesOptions, MaterializedWorkflowSchedule, materialize_workflow_schedules};
+pub use types::{AppendEventsArgs, AppendEventsResult, ClaimDueTimersArgs, ClaimRunArgs, ClaimRunResult, ClaimStaleRunsArgs, CreateRunArgs, CreateRunResult, HeartbeatRunLeaseArgs, LeaseOwner, LoadedExecution, MarkRunErroredArgs, MarkRunFinishedArgs, MarkRunPausedArgs, ReadEventsArgs, ReleaseRunLeaseArgs, RunClaim, RunId, RunSummary, RunTimeline, SaveRunStateArgs, ScheduleTimerArgs, StoredWorkflowEvent, TimerWakeup, WorkflowExecution, WorkflowExecutionStatus, WorkflowId, WorkflowLease, WorkflowScheduleDefinition, WorkflowVersion};

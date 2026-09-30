@@ -202,7 +202,7 @@ impl DeleteReason {
     }
 }
 
-/// The store contract, modelled after TanStack Workflow's two-surface design:
+/// The store contract, modelled after TanStack WorkflowDefinition's two-surface design:
 ///
 /// 1. **Metadata surface** — `get/set/delete` a small [`RunState`] envelope.
 /// 2. **Append-only event-log surface** — `append_event` with a CAS

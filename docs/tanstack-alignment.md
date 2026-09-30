@@ -17,12 +17,20 @@
 
 | aa-workflow | TanStack |
 | ----------- | -------- |
-| `Workflow` / `WorkflowCtx` / `StepCtx` / `StepState` / `StepStatus` / `StepAttempt` | `Workflow` / handler ctx / `StepContext` / 派生 / — / `StepAttempt` |
+| `WorkflowDefinition`（带类型）/ `AnyWorkflowDefinition`（擦除态）/ `WorkflowCtx` / `StepCtx` / `StepState` / `StepStatus` / `StepAttempt` | `WorkflowDefinition<TInput, TOutput, TState>` / `AnyWorkflowDefinition`（= 它的 `any` 别名）/ handler ctx / `StepContext` / 派生 / — / `StepAttempt` |
 | `WorkflowEvent` 变体 `STEP_*`；serde tag `type` | `WorkflowEvent` 的 `type: 'STEP_FINISHED'` 等 |
 | `RunStore` trait（CAS append + subscribe） | `RunStore` interface |
 | `RunState` 信封 | `RunState`（runId/status/workflowId/input/output/error/...） |
 | `run_workflow` / `run_workflow_sync` | `runWorkflow` |
 | `step_id` | `stepId` |
+
+> **上游没有叫 `Workflow` 的类型。** 2026-09-30 之前本仓有个自造的 `Workflow`（擦除态
+> 字段载体），而 `WorkflowDefinition<T..>` 是个只带 `PhantomData` 的手柄——两个名字
+> 跟上游**正好对调**，对着 TS 文档写代码必然读反。已重构为严格镜像：
+> `WorkflowDefinition<TInput = Value, TOutput = Value, TState = Value, TCtxExt = ()>`
+> 携带全部字段（泛参全默认，裸写即擦除态），`AnyWorkflowDefinition` 是它的 newtype。
+> Rust 不能像 TS 的 `any` 那样双向可赋值，所以擦除态只能是独立类型而不是别名——
+> 这是全仓唯一与上游形状不同的地方，且只有这一处。
 
 对齐后事件**类型名**与 TS 一致（`type` 标签 + `SCREAMING_SNAKE` 取值），所以
 grep 日志、对照 TS 源码读事件序列时是直接对应的。

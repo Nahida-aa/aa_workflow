@@ -90,9 +90,7 @@
 //!
 use std::sync::{Arc, Mutex};
 
-use aa_workflow_core::{
-    BaseCtx, CreateWorkflowConfig, StepCtx, WorkflowDefinition, create_workflow,
-};
+use aa_workflow_core::{BaseCtx, CreateWorkflowConfig, StepCtx, WorkflowDefinition, create_workflow};
 
 /// [`step_write`] 的输入：播种 `base`。
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Default)]

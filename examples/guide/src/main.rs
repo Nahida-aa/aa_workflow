@@ -1,4 +1,4 @@
-//! TanStack Workflow [guide/index.md] 的 Rust 可运行移植。章节顺序与 guide
+//! TanStack WorkflowDefinition [guide/index.md] 的 Rust 可运行移植。章节顺序与 guide
 //! 一致，从上往下读就是执行顺序。
 //!
 //! 覆盖 guide 的 §1（定义 workflow）、§2（创建 runtime）、§5（启动与恢复）、
@@ -23,11 +23,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use aa_workflow_core::{CreateWorkflowConfig, WorkflowDefinition, create_workflow};
-use aa_workflow_runtime::{
-    InMemoryExecutionStore, RunResultKind, WorkflowExecutionStatus, WorkflowExecutionStore,
-    WorkflowRegistration, WorkflowRuntimeConfig, WorkflowRuntimeDefinition,
-    WorkflowRuntimeDeliverSignalArgs, WorkflowRuntimeStartRunArgs, define_workflow_runtime,
-};
+use aa_workflow_runtime::{InMemoryExecutionStore, RunResultKind, WorkflowExecutionStatus, WorkflowExecutionStore, WorkflowRegistration, WorkflowRuntimeConfig, WorkflowRuntimeDefinition, WorkflowRuntimeDeliverSignalArgs, WorkflowRuntimeStartRunArgs, define_workflow_runtime};
 
 // ============================================================
 // §1 Define a workflow
@@ -129,7 +125,7 @@ pub fn define_runtime() -> Fixture {
     workflows.insert(
         "fulfillment".to_string(),
         WorkflowRegistration {
-            load: Arc::new(|| fulfillment_workflow().into_workflow()),
+            load: Arc::new(|| fulfillment_workflow().into()),
             previous_versions: HashMap::new(),
             version: None,
             schedules: vec![],

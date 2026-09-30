@@ -11,12 +11,8 @@
 
 use std::sync::Arc;
 
-use aa_workflow_core::{
-    BaseCtx, CreateWorkflowConfig, RunStatus, RunWorkflowOptions, StepCtx, create_workflow, run_workflow,
-};
-use aa_workflow_runtime::run_store_adapter::{
-    WorkflowExecutionStore, WorkflowRunStoreAdapterStore, create_run_store_adapter,
-};
+use aa_workflow_core::{BaseCtx, CreateWorkflowConfig, RunStatus, RunWorkflowOptions, StepCtx, create_workflow, run_workflow};
+use aa_workflow_runtime::run_store_adapter::{WorkflowExecutionStore, WorkflowRunStoreAdapterStore, create_run_store_adapter};
 use aa_workflow_runtime::types::*;
 use example_store_file::FileExecutionStore;
 
@@ -139,7 +135,7 @@ async fn drives_a_parallel_workflow() {
     let core_store = create_run_store_adapter(store.clone());
 
     let out = run_workflow(
-        &RunWorkflowOptions::new(Arc::new(wf.clone().into_workflow()), core_store)
+        &RunWorkflowOptions::new(wf.clone(), core_store)
             .input(serde_json::json!({ "n": 1 })),
     )
     .await

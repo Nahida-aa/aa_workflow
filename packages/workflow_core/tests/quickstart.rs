@@ -7,10 +7,7 @@
 
 use std::sync::Arc;
 
-use aa_workflow_core::{
-    CreateWorkflowConfig, InMemoryStore, RunStatus, RunStore, RunWorkflowOptions, StepCtx,
-    WorkflowDefinition, create_workflow, run_workflow,
-};
+use aa_workflow_core::{CreateWorkflowConfig, InMemoryStore, RunStatus, RunStore, RunWorkflowOptions, StepCtx, WorkflowDefinition, create_workflow, run_workflow};
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -42,7 +39,7 @@ fn charge_workflow() -> WorkflowDefinition<ChargeInput, serde_json::Value> {
 async fn typed_input_is_deserialized_and_reaches_the_handler() {
     let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
     let outcome = run_workflow(
-        &RunWorkflowOptions::new(Arc::new(charge_workflow().into_workflow()), store)
+        &RunWorkflowOptions::new(charge_workflow(), store)
             .input(serde_json::json!({ "amount": 4200, "userId": "cus_123" })),
     )
     .await
@@ -68,7 +65,7 @@ async fn typed_input_is_deserialized_and_reaches_the_handler() {
 async fn typed_input_rejects_missing_field() {
     let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
     let outcome = run_workflow(
-        &RunWorkflowOptions::new(Arc::new(charge_workflow().into_workflow()), store.clone())
+        &RunWorkflowOptions::new(charge_workflow(), store.clone())
             .input(serde_json::json!({ "amount": 4200 })), // 缺 userId
     )
     .await
@@ -98,11 +95,11 @@ async fn typed_input_rejects_missing_field() {
 #[tokio::test]
 async fn step_ctx_id_is_stable_across_resume() {
     let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-    let wf = Arc::new(charge_workflow().into_workflow());
+    let wf = charge_workflow();
     let input = serde_json::json!({ "amount": 4200, "userId": "cus_123" });
 
     let first = run_workflow(
-        &RunWorkflowOptions::new(Arc::clone(&wf), store.clone())
+        &RunWorkflowOptions::new(wf.clone(), store.clone())
             .input(input.clone())
             .run_id("charge-1"),
     )
@@ -112,7 +109,7 @@ async fn step_ctx_id_is_stable_across_resume() {
 
     // 同 run_id 再 drive：已成功 step 短路，输出（含 chargeId）应逐字相同。
     let second = run_workflow(
-        &RunWorkflowOptions::new(Arc::clone(&wf), store.clone())
+        &RunWorkflowOptions::new(wf.clone(), store.clone())
             .input(input)
             .run_id("charge-1"),
     )

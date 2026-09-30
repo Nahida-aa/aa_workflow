@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::define::{StepCtx, StepOptions};
+use crate::define::{AnyWorkflowDefinition, StepCtx, StepOptions};
 use crate::error::{RunError, StoreError, WorkflowError};
 use crate::event::{RunStatus, StepAttempt, StepState, StepStatus, WorkflowEvent};
 use crate::resource::Gate;
@@ -18,9 +18,7 @@ use crate::run_store::RunStore;
 
 mod run_workflow;
 pub mod state_diff;
-pub use run_workflow::{
-    RunOutcome, RunWorkflowOptions, run_workflow, run_workflow_sync, select_workflow_version,
-};
+pub use run_workflow::{RunOutcome, RunWorkflowOptions, run_workflow, run_workflow_sync, select_workflow_version};
 pub use state_diff::{Operation, diff_state, snapshot_state};
 
 pub(crate) fn now_ms() -> i64 {
@@ -130,7 +128,7 @@ pub struct EngineRuntime {
     pub run_id: String,
     pub input: serde_json::Value,
     /// Per-invocation state, rebuilt from `initialize(input)` on every start
-    /// and resume (see `define::Workflow::initialize`). Guarded by a
+    /// and resume (see `define::WorkflowDefinition::initialize`). Guarded by a
     /// `std::sync::RwLock`; it is the live image that `BaseCtx::state` (the
     /// handler's field working copy) snapshots at drive start and flushes back
     /// to before every durable primitive. Never persisted.
@@ -169,7 +167,7 @@ pub struct EngineRuntime {
     /// async generator：`queue.shift()` 后 `await publish`，而执行在另一个 task
     /// 里继续往 queue 推（`run-workflow.ts:85-134`）。
     pub(crate) publish_tx: Option<tokio::sync::mpsc::UnboundedSender<Fanout>>,
-    /// Workflow-level fallback retry (TanStack `defaultStepRetry`); steps that
+    /// WorkflowDefinition-level fallback retry (TanStack `defaultStepRetry`); steps that
     /// declare their own [`StepOptions::retry`](crate::define::StepOptions::retry)
     /// win.
     pub(crate) default_step_retry: Option<crate::define::RetryPolicy>,
@@ -928,9 +926,7 @@ pub(crate) mod testkit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::define::{
-        Backoff, BaseCtx, CreateWorkflowConfig, RetryPolicy, Workflow, WorkflowCtx, create_workflow,
-    };
+    use crate::define::{Backoff, BaseCtx, CreateWorkflowConfig, RetryPolicy, WorkflowDefinition, WorkflowCtx, create_workflow};
     use crate::engine::testkit::{TestLog, idx};
     use crate::run_store::InMemoryStore;
     use serde::{Deserialize, Serialize};
@@ -962,7 +958,7 @@ mod tests {
     #[tokio::test]
     async fn step_resolves_to_the_closure_type() {
         let store = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("w").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("w").handler(|ctx: WorkflowCtx| async move {
             // 无 turbofish、无 `from_value`：T 由闭包的返回类型推出来。
             let probe = ctx
                 .step("probe", move |_sc: StepCtx| async move {
@@ -987,7 +983,7 @@ mod tests {
     async fn typed_step_replays_back_into_the_same_type() {
         let store = Arc::new(InMemoryStore::new());
         let log = Arc::new(Mutex::new(TestLog::default()));
-        let wf = Workflow::new("w").handler({
+        let wf = WorkflowDefinition::new("w").handler({
             let log = log.clone();
             move |ctx: WorkflowCtx| {
                 let log = log.clone();
@@ -1032,7 +1028,7 @@ mod tests {
     #[tokio::test]
     async fn replay_shape_mismatch_fails_instead_of_yielding_null() {
         let store = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("w").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("w").handler(|ctx: WorkflowCtx| async move {
             let v = ctx
                 .step("skipped", move |_sc: StepCtx| async move {
                     Ok(SkippedOnZero { n: 0 })
@@ -1080,7 +1076,7 @@ mod tests {
     #[tokio::test]
     async fn unserializable_result_fails_the_step_not_a_stuck_run() {
         let store = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("w").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("w").handler(|ctx: WorkflowCtx| async move {
             ctx.step("unserializable", move |_sc: StepCtx| async move {
                 // 闭包本身是成功的——失败点在**记录**这一步。
                 Ok(Unserializable)
@@ -1109,7 +1105,7 @@ mod tests {
     async fn serial_handler_runs_in_order() {
         let store = Arc::new(InMemoryStore::new());
         let log = Arc::new(Mutex::new(TestLog::default()));
-        let wf = Workflow::new("w").handler({
+        let wf = WorkflowDefinition::new("w").handler({
             let log = log.clone();
             move |ctx: WorkflowCtx| {
                 let log = log.clone();
@@ -1148,7 +1144,7 @@ mod tests {
     async fn parallel_siblings_share_harness() {
         let store = Arc::new(InMemoryStore::new());
         let log = Arc::new(Mutex::new(TestLog::default()));
-        let wf = Workflow::new("w").handler({
+        let wf = WorkflowDefinition::new("w").handler({
             let log = log.clone();
             move |ctx: WorkflowCtx| {
                 let log = log.clone();
@@ -1201,7 +1197,7 @@ mod tests {
         // b → c → d, then everything joins before e.
         let store = Arc::new(InMemoryStore::new());
         let log = Arc::new(Mutex::new(TestLog::default()));
-        let wf = Workflow::new("w").handler({
+        let wf = WorkflowDefinition::new("w").handler({
             let log = log.clone();
             move |ctx: WorkflowCtx| {
                 let log = log.clone();
@@ -1305,7 +1301,7 @@ mod tests {
     async fn resume_short_circuits_success() {
         let store = Arc::new(InMemoryStore::new());
         let log = Arc::new(Mutex::new(TestLog::default()));
-        let wf = Workflow::new("w").handler({
+        let wf = WorkflowDefinition::new("w").handler({
             let log = log.clone();
             move |ctx: WorkflowCtx| {
                 let log = log.clone();
@@ -1353,7 +1349,7 @@ mod tests {
         let log = Arc::new(Mutex::new(TestLog::default()));
         let fresh_a = Arc::new(AtomicBool::new(true));
         let fresh_b = Arc::new(AtomicBool::new(true));
-        let wf = Workflow::new("w").handler({
+        let wf = WorkflowDefinition::new("w").handler({
             let log = log.clone();
             let fresh_a = fresh_a.clone();
             let fresh_b = fresh_b.clone();
@@ -1409,7 +1405,7 @@ mod tests {
     async fn resource_gate_serializes_same_key() {
         let store = Arc::new(InMemoryStore::new());
         let log = Arc::new(Mutex::new(TestLog::default()));
-        let wf = Workflow::new("w").handler({
+        let wf = WorkflowDefinition::new("w").handler({
             let log = log.clone();
             move |ctx: WorkflowCtx| {
                 let log = log.clone();
@@ -1450,7 +1446,7 @@ mod tests {
     async fn retry_records_attempts_then_succeeds() {
         let store = Arc::new(InMemoryStore::new());
         let fail = Arc::new(AtomicBool::new(true));
-        let wf = Workflow::new("w").handler(move |ctx: WorkflowCtx| {
+        let wf = WorkflowDefinition::new("w").handler(move |ctx: WorkflowCtx| {
             let fail = fail.clone();
             async move {
                 let fail = fail.clone();
@@ -1490,7 +1486,7 @@ mod tests {
     #[tokio::test]
     async fn failed_attempts_record_structured_error() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("w").handler(move |ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("w").handler(move |ctx: WorkflowCtx| async move {
             ctx.step_with(
                 "a",
                 StepOptions::new().retry(RetryPolicy::new(2, Backoff::Fixed { base_ms: 1 })),
@@ -1542,7 +1538,7 @@ mod tests {
     #[tokio::test]
     async fn exhausted_retries_error() {
         let store = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("w").handler(move |ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("w").handler(move |ctx: WorkflowCtx| async move {
             let retry = RetryPolicy::new(2, Backoff::Fixed { base_ms: 1 });
             ctx.step_with(
                 "a",
@@ -1572,7 +1568,7 @@ mod tests {
     #[tokio::test]
     async fn timeout_marks_step_failed() {
         let store = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("w").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("w").handler(|ctx: WorkflowCtx| async move {
             let _ = ctx
                 .step_with(
                     "a",
@@ -1601,7 +1597,7 @@ mod tests {
         let rx = store.subscribe("prog_run").unwrap();
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = events.clone();
-        let wf = Workflow::new("w").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("w").handler(|ctx: WorkflowCtx| async move {
             ctx.step("a", move |sc: StepCtx| async move {
                 sc.progress(0.5);
                 Ok(serde_json::Value::Null)
@@ -1712,7 +1708,7 @@ mod tests {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let decided = Arc::new(Mutex::new(None::<serde_json::Value>));
         let decided_in = decided.clone();
-        let wf = Workflow::new("approval").handler(move |ctx: WorkflowCtx| {
+        let wf = WorkflowDefinition::new("approval").handler(move |ctx: WorkflowCtx| {
             let decided = decided_in.clone();
             async move {
                 ctx.step("charge", move |_sc: StepCtx| async move {
@@ -1810,7 +1806,7 @@ mod tests {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let decided = Arc::new(Mutex::new(None::<serde_json::Value>));
         let decided_in = decided.clone();
-        let wf = Workflow::new("approval").handler(move |ctx: WorkflowCtx| {
+        let wf = WorkflowDefinition::new("approval").handler(move |ctx: WorkflowCtx| {
             let decided = decided_in.clone();
             async move {
                 ctx.step("charge", move |_sc: StepCtx| async move {
@@ -1902,7 +1898,7 @@ mod tests {
     #[tokio::test]
     async fn sleep_parks_then_external_timer_resumes() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("sleeper").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("sleeper").handler(|ctx: WorkflowCtx| async move {
             ctx.sleep("cooldown", Duration::from_millis(250)).await?;
             ctx.step("after", move |_sc: StepCtx| async move {
                 Ok(serde_json::json!({ "done": true }))
@@ -1977,7 +1973,7 @@ mod tests {
     #[tokio::test]
     async fn resumed_run_replays_from_log_without_rewaiting() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("approval").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("approval").handler(|ctx: WorkflowCtx| async move {
             let d = ctx.approve("gate", "Approve this?").await?;
             ctx.step("consume", move |_sc: StepCtx| async move {
                 Ok(serde_json::json!({ "consumed": true }))
@@ -2044,7 +2040,7 @@ mod tests {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let received = Arc::new(Mutex::new(None::<serde_json::Value>));
         let rx = received.clone();
-        let wf = Workflow::new("named-event").handler(move |ctx: WorkflowCtx| {
+        let wf = WorkflowDefinition::new("named-event").handler(move |ctx: WorkflowCtx| {
             let rx = rx.clone();
             async move {
                 let v = ctx.wait_for_event("review", "review-approved").await?;
@@ -2097,7 +2093,7 @@ mod tests {
     #[tokio::test]
     async fn wait_for_event_resolves_from_log_on_replay() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("named-event").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("named-event").handler(|ctx: WorkflowCtx| async move {
             let v = ctx.wait_for_event("gate", "go").await?;
             let out = v.clone();
             ctx.step("consume", move |_sc| async move { Ok(v.clone()) })
@@ -2150,7 +2146,7 @@ mod tests {
     async fn sleep_until_past_parks_with_past_deadline() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let past = crate::engine::now_ms() - 5000;
-        let wf = Workflow::new("sleeper").handler(move |ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("sleeper").handler(move |ctx: WorkflowCtx| async move {
             ctx.sleep_until("cooldown", past).await?;
             ctx.step("after", move |_sc: StepCtx| async move {
                 Ok(serde_json::json!({ "done": true }))
@@ -2197,7 +2193,7 @@ mod tests {
     async fn sleep_until_schedules_timer() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let due = crate::engine::now_ms() + 300;
-        let wf = Workflow::new("sleeper").handler(move |ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("sleeper").handler(move |ctx: WorkflowCtx| async move {
             ctx.sleep_until("cooldown", due).await?;
             Ok(serde_json::Value::Null)
         });
@@ -2232,7 +2228,7 @@ mod tests {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = seen.clone();
-        let wf = Workflow::new("emitter").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("emitter").handler(|ctx: WorkflowCtx| async move {
             ctx.emit("ping", serde_json::json!({ "x": 1 }));
             ctx.step("a", move |_sc: StepCtx| async move {
                 Ok(serde_json::Value::Null)
@@ -2281,7 +2277,7 @@ mod tests {
     #[tokio::test]
     async fn now_and_uuid_deterministic_across_resume() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("det").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("det").handler(|ctx: WorkflowCtx| async move {
             // 两个调用位点各自拿到稳定值；approve 强制产生一次 replay 边界。
             let t1 = ctx.now()?;
             let u1 = ctx.uuid()?;
@@ -2361,7 +2357,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_now_calls_stay_unique() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("conc").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("conc").handler(|ctx: WorkflowCtx| async move {
             let (a, b) = {
                 let (a, b) = (ctx.clone(), ctx.clone());
                 tokio::join!(async move { a.now() }, async move { b.now() },)
@@ -2416,7 +2412,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_parked_approval_aborts() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("cancel").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("cancel").handler(|ctx: WorkflowCtx| async move {
             let _ = ctx.approve("release", "Approve?").await?;
             ctx.step("ship", move |_sc: StepCtx| async move {
                 Ok(serde_json::Value::Null)
@@ -2499,7 +2495,7 @@ mod tests {
         let gate = Arc::new(tokio::sync::Notify::new());
         let started_in = started.clone();
         let gate_in = gate.clone();
-        let wf = Workflow::new("sig").handler(move |ctx: WorkflowCtx| {
+        let wf = WorkflowDefinition::new("sig").handler(move |ctx: WorkflowCtx| {
             let started3 = started_in.clone();
             let gate3 = gate_in.clone();
             async move {
@@ -2547,7 +2543,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_sleeping_run_aborts_and_is_recoverable() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("cancel-sleep").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("cancel-sleep").handler(|ctx: WorkflowCtx| async move {
             ctx.sleep("hold", Duration::from_secs(1)).await?;
             Ok(serde_json::json!({ "done": true }))
         });
@@ -2603,7 +2599,7 @@ mod tests {
     #[tokio::test]
     async fn ctx_reports_not_cancelled_in_normal_run() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("not-cancelled").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("not-cancelled").handler(|ctx: WorkflowCtx| async move {
             assert!(!ctx.is_cancelled());
             Ok(serde_json::json!({ "ok": true }))
         });
@@ -2621,7 +2617,7 @@ mod tests {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let seen = Arc::new(Mutex::new((None::<Option<i64>>, false, false)));
         let sink = seen.clone();
-        let wf = Workflow::new("budget").handler(move |ctx: WorkflowCtx| {
+        let wf = WorkflowDefinition::new("budget").handler(move |ctx: WorkflowCtx| {
             let sink = sink.clone();
             async move {
                 let (d, tr, sy) = (ctx.deadline(), ctx.time_remaining(), ctx.should_yield());
@@ -2664,7 +2660,7 @@ mod tests {
     #[tokio::test]
     async fn yield_parks_and_replays() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("yielder").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("yielder").handler(|ctx: WorkflowCtx| async move {
             ctx.yield_().await?;
             if ctx.should_yield() {
                 ctx.yield_().await?;
@@ -2727,7 +2723,7 @@ mod tests {
     #[tokio::test]
     async fn yield_parks_until_yield_resume_at() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("yielder").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("yielder").handler(|ctx: WorkflowCtx| async move {
             ctx.yield_().await?;
             Ok(serde_json::json!({ "ok": true }))
         });
@@ -2792,7 +2788,7 @@ mod tests {
                 .await
             }
         });
-        let wf: Workflow = wf.into_workflow();
+        let wf: AnyWorkflowDefinition = wf.into();
         let out = run_workflow(
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
@@ -2838,7 +2834,7 @@ mod tests {
                 .await
             }
         });
-        let wf2: Workflow = wf2.into_workflow();
+        let wf2: WorkflowDefinition = wf2.into();
         let out2 = run_workflow(
             &RunWorkflowOptions::new(Arc::new(wf2.clone()), store2.clone())
                 .input(serde_json::json!({})),
@@ -2869,7 +2865,7 @@ mod tests {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = events.clone();
-        let wf = Workflow::new("sd")
+        let wf = WorkflowDefinition::new("sd")
             .initialize(|_| Ok(serde_json::json!({ "count": 0, "items": [] })))
             .handler(|mut ctx: WorkflowCtx| async move {
                 ctx.state["count"] = serde_json::json!(1);
@@ -2946,7 +2942,7 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&events);
 
-        let wf = Workflow::new("tail-auto")
+        let wf = WorkflowDefinition::new("tail-auto")
             .initialize(|_| Ok(serde_json::json!({ "n": 0 })))
             .handler(|mut ctx: WorkflowCtx| async move {
                 ctx.step("a", move |_sc: StepCtx| async move {
@@ -2993,7 +2989,7 @@ mod tests {
     #[tokio::test]
     async fn project_run_wait_writes_awaiting_and_both_mirrors() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("aw").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("aw").handler(|ctx: WorkflowCtx| async move {
             ctx.wait_for_event_with(
                 "hold",
                 "go",
@@ -3057,7 +3053,7 @@ mod tests {
     #[tokio::test]
     async fn approval_wait_projects_approval_awaitable() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("ap").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("ap").handler(|ctx: WorkflowCtx| async move {
             ctx.approve_with(
                 "gate",
                 "放行这笔？",
@@ -3101,7 +3097,7 @@ mod tests {
     #[tokio::test]
     async fn declared_payload_schema_rejects_bad_payload() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("sch").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("sch").handler(|ctx: WorkflowCtx| async move {
             let v = ctx
                 .wait_for_event_with(
                     "hold",
@@ -3143,7 +3139,7 @@ mod tests {
     #[tokio::test]
     async fn declared_payload_schema_accepts_good_payload() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("sch2").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("sch2").handler(|ctx: WorkflowCtx| async move {
             let v = ctx
                 .wait_for_event_with(
                     "hold",
@@ -3188,7 +3184,7 @@ mod tests {
     #[tokio::test]
     async fn plain_wait_for_event_has_empty_options() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = Workflow::new("plain").handler(|ctx: WorkflowCtx| async move {
+        let wf = WorkflowDefinition::new("plain").handler(|ctx: WorkflowCtx| async move {
             ctx.wait_for_event("hold", "go").await?;
             Ok(serde_json::json!({}))
         });

@@ -1,19 +1,18 @@
-//! Workflow 的 authoring 层：怎么**声明**一个 workflow。
+//! WorkflowDefinition 的 authoring 层：怎么**声明**一个 workflow。
 //!
 //! 对齐 TanStack `define/define-workflow.ts`：`CreateWorkflowConfig`
-//! （`createWorkflow(options)`）、`WorkflowBuilder`、`createWorkflow`，外加
-//! Rust 特有的 [`WorkflowDefinition`]（把 TInput/TOutput/TState/TCtxExt 静态带在类型上）。
+//! （`createWorkflow(options)`）、`WorkflowBuilder`、`createWorkflow`。
 //!
 //! 与 [`define`](super) 的分界：`super` 装的是 handler **运行时**能拿到的东西
 //! （`BaseCtx` / `StepCtx` / `StepOptions` / `RetryPolicy`）与 workflow 本体
-//! [`Workflow`](super::Workflow)；这里装的是把它们拼起来的声明式入口。
+//! [`WorkflowDefinition`](super::WorkflowDefinition)；这里装的是把它们拼起来的
+//! 声明式入口。`createWorkflow(...).handler(...)` 产出的就是
+//! `WorkflowDefinition<TInput, TOutput, TState, TCtxExt>`。
 
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use super::{
-    BaseCtx, InitializeFn, RetryPolicy, StateValidatorFn, Workflow, WorkflowCtx, WorkflowHandler,
-};
+use super::{AnyWorkflowDefinition, BaseCtx, InitializeFn, RetryPolicy, StateValidatorFn, WorkflowCtx, WorkflowDefinition, WorkflowHandler};
 use crate::middleware::Middleware;
 
 /// The declaration config consumed by [`create_workflow`]. Mirrors TanStack's
@@ -67,11 +66,11 @@ impl<TInput, TOutput, TState> CreateWorkflowConfig<TInput, TOutput, TState> {
 
     /// `initialize({ input })` — rebuild the per-invocation state on every
     /// start and resume (state is never persisted, see
-    /// [`Workflow::initialize`](Workflow::initialize)).
+    /// [`WorkflowDefinition::initialize`](WorkflowDefinition::initialize)).
     ///
     /// typed：闭包吃 `&TInput`、产 `TState`（对齐上游——`TState` 由
     /// `.state::<T>()` 声明、编译期钉死）。内部 serde 桥接到运行时的擦除
-    /// 表示（`Workflow` 持 `Fn(&Value) -> Result<Value>`）；input 反序列化
+    /// 表示（`WorkflowDefinition` 持 `Fn(&Value) -> Result<Value>`）；input 反序列化
     /// 失败 / state 序列化失败都算 run 错误。
     pub fn initialize(
         mut self,
@@ -215,7 +214,7 @@ pub fn create_workflow<TInput, TOutput, TState>(
 pub struct WorkflowBuilder<TInput, TOutput, TState, TCtxExt = ()> {
     config: CreateWorkflowConfig<TInput, TOutput, TState>,
     middlewares: Vec<Middleware>,
-    previous: Vec<Workflow>,
+    previous: Vec<AnyWorkflowDefinition>,
     _ext: PhantomData<TCtxExt>,
 }
 
@@ -240,8 +239,11 @@ impl<TInput, TOutput, TState, TCtxExt> WorkflowBuilder<TInput, TOutput, TState, 
 
     /// Older versions of the same workflow to route resumed runs to (see
     /// [`select_workflow_version`](crate::engine::select_workflow_version)).
-    pub fn previous_versions(mut self, v: Vec<Workflow>) -> Self {
-        self.previous = v;
+    pub fn previous_versions(
+        mut self,
+        v: impl IntoIterator<Item = impl Into<AnyWorkflowDefinition>>,
+    ) -> Self {
+        self.previous = v.into_iter().map(Into::into).collect();
         self
     }
 
@@ -332,52 +334,20 @@ impl<TInput, TOutput, TState, TCtxExt> WorkflowBuilder<TInput, TOutput, TState, 
             }
         }
         WorkflowDefinition {
-            base: Workflow {
-                id,
-                version,
-                description,
-                default_step_retry,
-                middlewares: workflow_middlewares,
-                previous_versions: self.previous,
-                handler: engine_handler,
-                initialize,
-                state_validator,
-                output_validator: validator,
-            },
+            id,
+            version,
+            description,
+            default_step_retry,
+            middlewares: workflow_middlewares,
+            previous_versions: self.previous,
+            handler: engine_handler,
+            initialize,
+            state_validator,
+            output_validator: validator,
             _input: PhantomData,
             _output: PhantomData,
             _state: PhantomData,
             _ext: PhantomData,
         }
-    }
-}
-
-/// A workflow whose `TInput`/`TOutput`/`TState`/`TCtxExt` are statically known at the
-/// declaration site. `Deref<Target = Workflow>` lets it be handed to
-/// [`crate::engine::run_workflow`] / the registry directly; explicit erasure is
-/// [`into_workflow`](Self::into_workflow).
-#[derive(Clone)]
-pub struct WorkflowDefinition<TInput, TOutput, TState = serde_json::Value, TCtxExt = ()> {
-    base: Workflow,
-    _input: PhantomData<TInput>,
-    _output: PhantomData<TOutput>,
-    _state: PhantomData<TState>,
-    _ext: PhantomData<TCtxExt>,
-}
-
-impl<TInput, TOutput, TState, TCtxExt> WorkflowDefinition<TInput, TOutput, TState, TCtxExt> {
-    /// Type-erase back to the engine's [`Workflow`] view.
-    pub fn into_workflow(self) -> Workflow {
-        self.base
-    }
-}
-
-impl<TInput, TOutput, TState, TCtxExt> std::ops::Deref
-    for WorkflowDefinition<TInput, TOutput, TState, TCtxExt>
-{
-    type Target = Workflow;
-
-    fn deref(&self) -> &Workflow {
-        &self.base
     }
 }

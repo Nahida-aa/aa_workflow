@@ -29,10 +29,7 @@
 
 use serde_json::Value;
 
-use crate::types::{
-    ScheduleId, UpsertScheduleArgs, WorkflowOverlapPolicy, WorkflowScheduleDefinition,
-    WorkflowScheduleSpec,
-};
+use crate::types::{ScheduleId, UpsertScheduleArgs, WorkflowOverlapPolicy, WorkflowScheduleDefinition, WorkflowScheduleSpec};
 use crate::{WorkflowExecutionStore, WorkflowRegistration};
 
 /// 默认 cron 回看窗口（对齐上游 `DEFAULT_CRON_LOOKBACK_MS`）：32 天。
@@ -85,7 +82,7 @@ pub fn materialize_workflow_schedules(
     let lookback = options.cron_lookback_ms.unwrap_or(DEFAULT_CRON_LOOKBACK_MS);
     if lookback < 0 {
         return Err(anyhow::anyhow!(
-            "Workflow cron lookback must be a non-negative number."
+            "WorkflowDefinition cron lookback must be a non-negative number."
         ));
     }
 
@@ -209,7 +206,7 @@ fn previous_cron_fire_at(
         && tz != "UTC"
     {
         return Err(anyhow::anyhow!(
-            "Workflow cron schedules are materialized in UTC. Received timezone \"{tz}\"."
+            "WorkflowDefinition cron schedules are materialized in UTC. Received timezone \"{tz}\"."
         ));
     }
 
@@ -256,7 +253,7 @@ fn parse_cron_expression(expression: &str) -> anyhow::Result<ParsedCronExpressio
     let fields: Vec<&str> = expression.split_whitespace().collect();
     if fields.len() != 5 {
         return Err(anyhow::anyhow!(
-            "Workflow cron schedules must use five fields. Received \"{expression}\"."
+            "WorkflowDefinition cron schedules must use five fields. Received \"{expression}\"."
         ));
     }
     Ok(ParsedCronExpression {
@@ -456,7 +453,7 @@ mod tests {
     use crate::types::ClaimDueScheduleBucketsArgs;
     use crate::{WorkflowRegistration, WorkflowScheduleDefinition};
     use std::collections::HashMap;
-    use aa_workflow_core::Workflow;
+    use aa_workflow_core::WorkflowDefinition;
 
     fn spec_interval(ms: i64) -> WorkflowScheduleSpec {
         WorkflowScheduleSpec::Interval {
@@ -622,7 +619,7 @@ mod tests {
         workflows.insert(
             "digest".to_string(),
             WorkflowRegistration {
-                load: std::sync::Arc::new(|| Workflow::new("digest")),
+                load: std::sync::Arc::new(|| WorkflowDefinition::new("digest").into()),
                 previous_versions: HashMap::new(),
                 version: Some("v1".into()),
                 schedules,

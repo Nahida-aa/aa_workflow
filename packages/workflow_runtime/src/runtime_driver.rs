@@ -21,7 +21,7 @@
 //!   `schedule-materializer.ts`，272 行）暂未移植——`next_fire_at` 由 host
 //!   计算后传入 `upsert_schedule`。
 //! - **workflow 注册表**：上游用异步 `load()` 闭包（为 JS 代码分割）；Rust
-//!   直接持有构建好的 [`Workflow`] 值。
+//!   直接持有构建好的 [`WorkflowDefinition`] 值。
 //!
 //! # 已知约束：abort 驱动任务会泄漏心跳
 //!
@@ -36,7 +36,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::{WorkflowExecutionStore, create_run_store_adapter};
-use aa_workflow_core::{RunWorkflowOptions, Workflow, WorkflowEvent, run_workflow};
+use aa_workflow_core::{
+    AnyWorkflowDefinition,RunWorkflowOptions, WorkflowDefinition, WorkflowEvent, run_workflow};
 
 use crate::types::*;
 
@@ -56,10 +57,10 @@ pub const DEFAULT_MIN_YIELD_REMAINING_MS: u64 = 1_000;
 ///
 /// 上游是**异步**闭包（JS 代码分割 + 模块形态归一化：`default`/`workflow`
 /// 包装，见 `WorkflowLoaderResult`）；Rust 无此需求，收敛为同步闭包直接返回
-/// 构建好的 [`Workflow`]——需要异步取数的场景在使用者闭包内自行预取。
+/// 构建好的 [`WorkflowDefinition`]——需要异步取数的场景在使用者闭包内自行预取。
 /// 上游 `loadWorkflow` 不 memoize（JS 模块缓存吸收成本）——这里同样不缓存：
 /// loader 应廉价；昂贵加载在使用者侧闭包内自行记忆化。
-pub type WorkflowLoader = Arc<dyn Fn() -> Workflow + Send + Sync>;
+pub type WorkflowLoader = Arc<dyn Fn() -> AnyWorkflowDefinition + Send + Sync>;
 
 /// 单个 workflow 的注册项（对齐上游 `WorkflowRegistration<TWorkflow>`，
 /// types.ts:349）。
@@ -302,7 +303,7 @@ fn create_lease_owner(prefix: &str) -> LeaseOwner {
 fn normalize_lease_ms(v: i64) -> anyhow::Result<i64> {
     if v <= 0 {
         return Err(anyhow::anyhow!(
-            "Workflow runtime leaseMs must be a positive finite number."
+            "WorkflowDefinition runtime leaseMs must be a positive finite number."
         ));
     }
     Ok(v)
@@ -352,25 +353,30 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
     /// 按 id 加载 workflow：调 loader 构建本体、合并 previous_versions 的
     /// loader 产物、应用 version 覆盖（对齐上游 `loadWorkflow`，
     /// runtime-driver.ts:856——上游每次都重新 `await load()`，这里同样不缓存）。
-    fn load_workflow(&self, workflow_id: &WorkflowId) -> anyhow::Result<Workflow> {
+    fn load_workflow(&self, workflow_id: &WorkflowId) -> anyhow::Result<AnyWorkflowDefinition> {
         let registration = self
             .config
             .workflows
             .get(workflow_id)
-            .ok_or_else(|| anyhow::anyhow!("Workflow \"{workflow_id}\" is not registered."))?;
-        let mut workflow = (registration.load)();
-        let mut prevs = workflow.previous_versions.clone();
+            .ok_or_else(|| anyhow::anyhow!("WorkflowDefinition \"{workflow_id}\" is not registered."))?;
+        let loaded = (registration.load)();
+        let mut prevs = loaded.previous_versions.clone();
         for load_previous in registration.previous_versions.values() {
             prevs.push((load_previous)());
         }
         if registration.version.is_some() || !prevs.is_empty() {
+            // 版本路由的罕见路径：拿一份可改的字段载体，把注册项声明的 version /
+            // previous_versions 覆盖上去。`AnyWorkflowDefinition` 是 Arc 包着的，
+            // 只能读，所以这里显式取底层再改。
+            let mut workflow: WorkflowDefinition = (*loaded).clone();
             workflow.version = registration
                 .version
                 .clone()
                 .or_else(|| workflow.version.clone());
             workflow.previous_versions = prevs;
+            return Ok(workflow.into());
         }
-        Ok(workflow)
+        Ok(loaded)
     }
 
     fn resolve_lease(
@@ -930,7 +936,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
 
 /// [`drive_claimed_run`] 的参数包（避免超长参数列表）。
 struct DriveArgs<'a> {
-    workflow: &'a Workflow,
+    workflow: &'a WorkflowDefinition,
     workflow_id: &'a WorkflowId,
     run_id: &'a RunId,
     /// 全新启动时的 input；resume 时为 `None`（input 已在 store 里）。
@@ -1065,9 +1071,7 @@ mod driver_tests {
     use super::*;
     use crate::WorkflowRunStoreAdapterStore;
     use crate::in_memory_store::InMemoryExecutionStore;
-    use aa_workflow_core::{
-        CreateWorkflowConfig, RunState, RunStatus, WaitForState, WorkflowCtx, create_workflow,
-    };
+    use aa_workflow_core::{CreateWorkflowConfig, RunState, RunStatus, WaitForState, WorkflowCtx, create_workflow};
 
     /// 双柄：`mem` 供测试直读内部，`store` 喂给 runtime（trait 对象）。
     struct Fixture {
@@ -1075,14 +1079,14 @@ mod driver_tests {
         mem: Arc<InMemoryExecutionStore>,
     }
 
-    fn runtime_with(workflow_id: &str, workflow: Workflow) -> Fixture {
+    fn runtime_with(workflow_id: &str, workflow: WorkflowDefinition) -> Fixture {
         let mem: Arc<InMemoryExecutionStore> = Arc::new(InMemoryExecutionStore::default());
         let store: Arc<dyn WorkflowExecutionStore> = mem.clone();
         let mut workflows = HashMap::new();
         workflows.insert(
             workflow_id.to_string(),
             WorkflowRegistration {
-                load: Arc::new(move || workflow.clone()),
+                load: Arc::new(move || workflow.clone().into()),
                 previous_versions: HashMap::new(),
                 version: None,
                 schedules: vec![],
@@ -1096,7 +1100,7 @@ mod driver_tests {
         }
     }
 
-    fn simple_workflow() -> Workflow {
+    fn simple_workflow() -> WorkflowDefinition {
         create_workflow(CreateWorkflowConfig::new("simple").input::<serde_json::Value>())
             .handler(|ctx: WorkflowCtx| async move {
                 let a = ctx
@@ -1106,10 +1110,10 @@ mod driver_tests {
                     .await?;
                 Ok(serde_json::json!({ "got": a }))
             })
-            .into_workflow()
+            .into()
     }
 
-    fn waiting_workflow() -> Workflow {
+    fn waiting_workflow() -> WorkflowDefinition {
         create_workflow(CreateWorkflowConfig::new("waiter").input::<serde_json::Value>())
             .handler(|ctx: WorkflowCtx| async move {
                 let payment = ctx.wait_for_event("payment", "payment").await?;
@@ -1120,10 +1124,10 @@ mod driver_tests {
                 .await?;
                 Ok(serde_json::json!({ "shipped": true }))
             })
-            .into_workflow()
+            .into()
     }
 
-    fn sleeping_workflow() -> Workflow {
+    fn sleeping_workflow() -> WorkflowDefinition {
         create_workflow(CreateWorkflowConfig::new("sleeper").input::<serde_json::Value>())
             .handler(|ctx: WorkflowCtx| async move {
                 // 先落一个 checkpoint，证明恢复时重放短路。
@@ -1143,11 +1147,11 @@ mod driver_tests {
                 .await?;
                 Ok(serde_json::json!({ "woke": true }))
             })
-            .into_workflow()
+            .into()
     }
 
     /// 短 sleep（80ms），用于端到端验证 sweep 认领 timer。
-    fn short_sleep_workflow() -> Workflow {
+    fn short_sleep_workflow() -> WorkflowDefinition {
         create_workflow(CreateWorkflowConfig::new("sleeper").input::<serde_json::Value>())
             .handler(|ctx: WorkflowCtx| async move {
                 ctx.sleep("hold", std::time::Duration::from_millis(80))
@@ -1161,10 +1165,10 @@ mod driver_tests {
                 .await?;
                 Ok(serde_json::json!({ "woke": true, "after": true }))
             })
-            .into_workflow()
+            .into()
     }
 
-    fn long_step_workflow() -> Workflow {        create_workflow(CreateWorkflowConfig::new("long").input::<serde_json::Value>())
+    fn long_step_workflow() -> WorkflowDefinition {        create_workflow(CreateWorkflowConfig::new("long").input::<serde_json::Value>())
             .handler(|ctx: WorkflowCtx| async move {
                 ctx.step("slow", move |_sc: aa_workflow_core::StepCtx| async move {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -1173,7 +1177,7 @@ mod driver_tests {
                 .await?;
                 Ok(serde_json::Value::Null)
             })
-            .into_workflow()
+            .into()
     }
 
     /// 轮询直到 run 进入指定状态（超时 panic）。
@@ -1295,7 +1299,7 @@ mod driver_tests {
                         .await?;
                     Ok(serde_json::json!({ "done": true }))
                 })
-                .into_workflow(),
+                .into(),
         );
 
         let started = fx

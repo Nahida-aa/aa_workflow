@@ -1,30 +1,28 @@
 //! 示例 workflow 注册表（对齐 wf-demo 的 `WORKFLOWS` map 位置）：按 id 查示例。
 
-use aa_workflow_core::Workflow;
+use aa_workflow_core::{AnyWorkflowDefinition, WorkflowDefinition};
 
-use crate::workflows::{
-    approval_order, approval_review, compliance, email_digest, event_gate, fulfillment,
-    fulfillment_saga, invoice, refund, state_demo,
-};
+use crate::workflows::{approval_order, approval_review, compliance, email_digest, event_gate, fulfillment, fulfillment_saga, invoice, refund, state_demo};
 
-/// 全部注册示例 workflow（类型擦除：进注册表的都是引擎 `Workflow`）。
-pub fn all() -> Vec<Workflow> {
+/// 全部注册示例 workflow（类型擦除：进注册表的都是运行站点用的
+/// `AnyWorkflowDefinition`）。
+pub fn all() -> Vec<AnyWorkflowDefinition> {
     vec![
-        fulfillment().into_workflow(),
-        fulfillment_saga().into_workflow(),
-        approval_review(),
-        approval_order().into_workflow(),
-        email_digest().into_workflow(),
-        invoice().into_workflow(),
-        compliance().into_workflow(),
-        refund().into_workflow(),
-        state_demo().into_workflow(),
-        event_gate().into_workflow(),
+        fulfillment().into(),
+        fulfillment_saga().into(),
+        approval_review().into(),
+        approval_order().into(),
+        email_digest().into(),
+        invoice().into(),
+        compliance().into(),
+        refund().into(),
+        state_demo().into(),
+        event_gate().into(),
     ]
 }
 
 /// 按 id 取 workflow（找不到返回 `None`）。
-pub fn get(id: &str) -> Option<Workflow> {
+pub fn get(id: &str) -> Option<AnyWorkflowDefinition> {
     all().into_iter().find(|w| w.id == id)
 }
 

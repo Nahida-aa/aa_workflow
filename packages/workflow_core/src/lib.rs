@@ -1,4 +1,4 @@
-//! Async **code-as-DAG** workflow engine, modelled after TanStack Workflow's
+//! Async **code-as-DAG** workflow engine, modelled after TanStack WorkflowDefinition's
 //! core-engine layer: headless replay plus a store/event contract. No
 //! scheduler, no host adapters, no managed control plane.
 //!
@@ -21,7 +21,7 @@
 //! `ctx.step`. The engine neither detects nor enforces this (nor does
 //! TanStack); violations surface as replay drift or checkpoint mismatches.
 //!
-//! ## TanStack Workflow 对照
+//! ## TanStack WorkflowDefinition 对照
 //!
 //! 采纳其命名与 store/event 契约（`tag="type"`、CAS append、step checkpoint），
 //! 但 authoring 面对齐它的 handler 形态（`Promise.all` ↔ `tokio::try_join!`，
@@ -49,20 +49,11 @@ pub mod registry;
 pub mod resource;
 pub mod run_store;
 
-pub use define::{
-    ApproveOptions, Backoff, BaseCtx, CreateWorkflowConfig, PayloadSchema, PayloadValidator,
-    RetryPolicy, StepCtx, StepOptions, WaitForEventOptions, Workflow, WorkflowBuilder, WorkflowCtx,
-    WorkflowDefinition, create_workflow,
-};
+pub use define::{AnyWorkflowDefinition, ApproveOptions, Backoff, BaseCtx, CreateWorkflowConfig, PayloadSchema, PayloadValidator, RetryPolicy, StepCtx, StepOptions, WaitForEventOptions, WorkflowBuilder, WorkflowCtx, WorkflowDefinition, create_workflow};
 pub use engine::{Operation, diff_state, snapshot_state};
-pub use engine::{
-    RunOutcome, RunWorkflowOptions, cancel_run, run_workflow, run_workflow_sync,
-    select_workflow_version, signal_event, signal_run,
-};
+pub use engine::{RunOutcome, RunWorkflowOptions, cancel_run, run_workflow, run_workflow_sync, select_workflow_version, signal_event, signal_run};
 pub use error::{RunError, RunErrorCode, StoreError, WorkflowError};
 pub use event::{RunStatus, StepAttempt, StepState, StepStatus, WorkflowEvent, fold_step_states};
 pub use middleware::{CtxProducer, CtxWrapper, Middleware};
 pub use resource::{Gate, GateGuard, ResourceKey};
-pub use run_store::{
-    DeleteReason, InMemoryStore, PendingApproval, RunAwaitable, RunState, RunStore, WaitForState,
-};
+pub use run_store::{DeleteReason, InMemoryStore, PendingApproval, RunAwaitable, RunState, RunStore, WaitForState};

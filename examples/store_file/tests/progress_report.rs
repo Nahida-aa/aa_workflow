@@ -41,7 +41,7 @@ async fn drive(
     let seen = Arc::new(Mutex::new(Vec::new()));
     let sink = seen.clone();
     let out = run_workflow(
-        &RunWorkflowOptions::new(Arc::new(progress_report().into_workflow()), create_run_store_adapter(store.clone()))
+        &RunWorkflowOptions::new(progress_report(), create_run_store_adapter(store.clone()))
             .input(serde_json::json!({ "rounds": ROUNDS, "tickMs": 5 }))
             .run_id(run_id)
             .publisher(Some(Arc::new(move |e: WorkflowEvent| {
@@ -167,7 +167,7 @@ async fn resume_does_not_continue_the_progress_counter() {
     ));
     std::fs::create_dir_all(&dir).expect("建临时目录");
     let store: Arc<dyn WorkflowExecutionStore> = Arc::new(FileExecutionStore::new(&dir));
-    let wf = Arc::new(progress_report().into_workflow());
+    let wf = progress_report();
     let input = serde_json::json!({ "rounds": ROUNDS, "tickMs": 5 });
 
     let first = run_workflow(
