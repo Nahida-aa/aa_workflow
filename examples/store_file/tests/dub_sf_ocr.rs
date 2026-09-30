@@ -22,7 +22,7 @@ use std::sync::Arc;
 use aa_workflow_core::{RunStatus, RunWorkflowOptions, WorkflowEvent, run_workflow};
 use aa_workflow_runtime::run_store_adapter::{WorkflowExecutionStore, WorkflowRunStoreAdapterStore, create_run_store_adapter};
 use aa_workflow_runtime::types::{ReadEventsArgs, StoredWorkflowEvent, WorkflowExecutionStatus};
-use aa_workflow_runtime::{RunResult, RunResultKind, WorkflowRegistration, WorkflowRuntimeConfig, WorkflowRuntimeDefinition, WorkflowRuntimeStartRunArgs, define_workflow_runtime};
+use aa_workflow_runtime::{WorkflowRuntimeRunResult, WorkflowRuntimeRunResultKind, WorkflowRegistration, WorkflowRuntimeConfig, WorkflowRuntimeDefinition, WorkflowRuntimeStartRunArgs, define_workflow_runtime};
 use example_store_file::dub_sf_ocr::{dub_probe, dub_sf_ocr};
 use example_store_file::FileExecutionStore;
 
@@ -100,7 +100,7 @@ const DUB_ALL_STEPS: [&str; 10] = [
 ];
 
 /// 用示例的 runtime 驱动一次 dub_sf_ocr（run_id 调用方定——确定性、可重放）。
-async fn drive(rt: &WorkflowRuntimeDefinition, run_id: &str, input: serde_json::Value) -> RunResult {
+async fn drive(rt: &WorkflowRuntimeDefinition, run_id: &str, input: serde_json::Value) -> WorkflowRuntimeRunResult {
     rt.start_run(WorkflowRuntimeStartRunArgs {
         workflow_id: "dub_sf_ocr".to_string(),
         run_id: run_id.to_string(),
@@ -159,7 +159,7 @@ async fn dub_sf_ocr_runs_all_ten_steps_once() {
     let base = temp_base("all_steps");
     let rt = get_workflow_runtime(&base);
     let out = drive(&rt, "dub-1", dub_input()).await;
-    assert_eq!(out.kind, RunResultKind::Completed);
+    assert_eq!(out.kind, WorkflowRuntimeRunResultKind::Completed);
 
     let events = events_of(&rt, "dub-1");
     for step in DUB_ALL_STEPS {
@@ -189,7 +189,7 @@ async fn dub_sf_ocr_branches_run_concurrently() {
     let base = temp_base("concurrent");
     let rt = get_workflow_runtime(&base);
     let out = drive(&rt, "dub-1", dub_input()).await;
-    assert_eq!(out.kind, RunResultKind::Completed);
+    assert_eq!(out.kind, WorkflowRuntimeRunResultKind::Completed);
 
     let peak = dub_probe::peak();
     assert!(
@@ -202,7 +202,7 @@ async fn dub_sf_ocr_branches_run_concurrently() {
 }
 
 /// 同 run_id 重复 `start_run`：runtime 层的幂等边界——已存在的 run 不在
-/// Queued 状态时**拒绝再驱动**（`RunResultKind::NotClaimable`），事件日志
+/// Queued 状态时**拒绝再驱动**（`WorkflowRuntimeRunResultKind::NotClaimable`），事件日志
 /// 一条不增。
 ///
 /// 注意与 core 层的重放短路的分工：`run_workflow` 同 run_id 重跑是
@@ -223,7 +223,7 @@ async fn dub_sf_ocr_replay_short_circuits() {
     assert!(Arc::ptr_eq(&rt, &rt_again), "同 base 再 get 应复用同一实例");
 
     let again = drive(&rt, "dub-1", dub_input()).await;
-    assert_eq!(again.kind, RunResultKind::NotClaimable, "终态 run 拒绝再驱动");
+    assert_eq!(again.kind, WorkflowRuntimeRunResultKind::NotClaimable, "终态 run 拒绝再驱动");
     assert_eq!(
         again.run.expect("NotClaimable 应带 run").status,
         WorkflowExecutionStatus::Finished
@@ -263,7 +263,7 @@ async fn dub_sf_ocr_each_step_has_its_own_shape() {
         })
         .await
         .unwrap();
-    assert_eq!(out.kind, RunResultKind::Completed);
+    assert_eq!(out.kind, WorkflowRuntimeRunResultKind::Completed);
 
     // 10 个 step → 10 份互不相同的产物。`sf_ocr_pre` 的 frames 往下传到
     // `sf_ocr`，`tts` 的 wavs 决定 `mix_audio` 的时长——所以这张表同时也是
@@ -397,7 +397,7 @@ async fn dub_sf_ocr_state_defaults_target_lang() {
     let base = temp_base("default_lang");
     let rt = get_workflow_runtime(&base);
     let out = drive(&rt, "dub-1", serde_json::json!({ "videoDir": "/w/2" })).await;
-    assert_eq!(out.kind, RunResultKind::Completed);
+    assert_eq!(out.kind, WorkflowRuntimeRunResultKind::Completed);
 
     let events = events_of(&rt, "dub-1");
     let tr = step_output(&events, "translate");

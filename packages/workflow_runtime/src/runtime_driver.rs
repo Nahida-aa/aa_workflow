@@ -135,7 +135,7 @@ impl<TWorkflows> WorkflowRuntimeConfig<TWorkflows> {
 
 /// 单次驱动的结果类别（对齐上游 `WorkflowRuntimeRunResult['kind']`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum RunResultKind {
+pub enum WorkflowRuntimeRunResultKind {
     /// 跑完了。
     Completed,
     /// 停在挂起点。
@@ -156,8 +156,8 @@ pub enum RunResultKind {
 
 /// 单次驱动 / 投递的结果（对齐上游 `WorkflowRuntimeRunResult`）。
 #[derive(Debug, Clone)]
-pub struct RunResult {
-    pub kind: RunResultKind,
+pub struct WorkflowRuntimeRunResult {
+    pub kind: WorkflowRuntimeRunResultKind,
     pub run_id: RunId,
     pub workflow_id: Option<WorkflowId>,
     pub run: Option<WorkflowExecution>,
@@ -240,23 +240,23 @@ pub struct WorkflowRuntimeSweepArgs {
 }
 
 /// sweep 摘要里的分类计数。
-pub type KindCounts = BTreeMap<RunResultKind, usize>;
+pub type WorkflowRuntimeRunKindCounts = BTreeMap<WorkflowRuntimeRunResultKind, usize>;
 
 #[derive(Debug, Clone, Default)]
-pub struct SweepSummary {
-    pub recovered: KindCounts,
-    pub scheduled: KindCounts,
-    pub timers: KindCounts,
+pub struct WorkflowRuntimeSweepSummary {
+    pub recovered: WorkflowRuntimeRunKindCounts,
+    pub scheduled: WorkflowRuntimeRunKindCounts,
+    pub timers: WorkflowRuntimeRunKindCounts,
     pub event_count: usize,
     pub returned_event_count: usize,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct WorkflowRuntimeSweepResult {
-    pub recovered: Vec<RunResult>,
-    pub scheduled: Vec<RunResult>,
-    pub timers: Vec<RunResult>,
-    pub summary: SweepSummary,
+    pub recovered: Vec<WorkflowRuntimeRunResult>,
+    pub scheduled: Vec<WorkflowRuntimeRunResult>,
+    pub timers: Vec<WorkflowRuntimeRunResult>,
+    pub summary: WorkflowRuntimeSweepSummary,
     /// true = 因 deadline / 上限而提前停止。
     pub deadline_reached: bool,
     /// true = 可能还有活没干完，值得再 sweep 一次。
@@ -353,7 +353,7 @@ fn should_stop_for_deadline(deadline: Option<i64>, min_yield_remaining_ms: u64) 
         .unwrap_or(false)
 }
 
-fn count_kinds(results: &[RunResult]) -> KindCounts {
+fn count_kinds(results: &[WorkflowRuntimeRunResult]) -> WorkflowRuntimeRunKindCounts {
     let mut map = BTreeMap::new();
     for r in results {
         *map.entry(r.kind).or_default() += 1;
@@ -392,7 +392,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
     }
 
     /// 启动一个 run：幂等创建 → 认领 → 驱动到下一个 pause / 终态。
-    pub async fn start_run(&self, args: WorkflowRuntimeStartRunArgs) -> anyhow::Result<RunResult> {
+    pub async fn start_run(&self, args: WorkflowRuntimeStartRunArgs) -> anyhow::Result<WorkflowRuntimeRunResult> {
         let started_at = now_ms();
         let now = args.now.unwrap_or_else(now_ms);
         let deadline = resolve_runtime_deadline(args.deadline, args.max_duration_ms, started_at)?;
@@ -412,8 +412,8 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         if let CreateRunResult::Existing { run } = &created
             && run.status != WorkflowExecutionStatus::Queued
         {
-            return Ok(RunResult {
-                kind: RunResultKind::NotClaimable,
+            return Ok(WorkflowRuntimeRunResult {
+                kind: WorkflowRuntimeRunResultKind::NotClaimable,
                 run_id: args.run_id,
                 workflow_id: Some(args.workflow_id),
                 run: Some(run.clone()),
@@ -444,7 +444,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
     pub async fn deliver_signal(
         &self,
         args: WorkflowRuntimeDeliverSignalArgs,
-    ) -> anyhow::Result<RunResult> {
+    ) -> anyhow::Result<WorkflowRuntimeRunResult> {
         let started_at = now_ms();
         let now = args.now.unwrap_or_else(now_ms);
         let deadline = resolve_runtime_deadline(args.deadline, args.max_duration_ms, started_at)?;
@@ -495,8 +495,8 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                     .await;
             }
             DeliverSignalResult::NotFound => {
-                return Ok(RunResult {
-                    kind: RunResultKind::NotFound,
+                return Ok(WorkflowRuntimeRunResult {
+                    kind: WorkflowRuntimeRunResultKind::NotFound,
                     run_id: args.run_id,
                     workflow_id: None,
                     run: None,
@@ -507,10 +507,10 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
             }
             DeliverSignalResult::Duplicate { run } | DeliverSignalResult::NotWaiting { run } => {
                 let kind = match delivered {
-                    DeliverSignalResult::Duplicate { .. } => RunResultKind::Duplicate,
-                    _ => RunResultKind::NotWaiting,
+                    DeliverSignalResult::Duplicate { .. } => WorkflowRuntimeRunResultKind::Duplicate,
+                    _ => WorkflowRuntimeRunResultKind::NotWaiting,
                 };
-                return Ok(RunResult {
+                return Ok(WorkflowRuntimeRunResult {
                     kind,
                     run_id: args.run_id,
                     workflow_id: Some(run.workflow_id.clone()),
@@ -528,7 +528,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
     pub async fn deliver_approval(
         &self,
         args: WorkflowRuntimeDeliverApprovalArgs,
-    ) -> anyhow::Result<RunResult> {
+    ) -> anyhow::Result<WorkflowRuntimeRunResult> {
         let started_at = now_ms();
         let now = args.now.unwrap_or_else(now_ms);
         let deadline = resolve_runtime_deadline(args.deadline, args.max_duration_ms, started_at)?;
@@ -543,8 +543,8 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         let workflow_id = match &delivered {
             DeliverApprovalResult::Delivered { run } => run.workflow_id.clone(),
             DeliverApprovalResult::NotFound => {
-                return Ok(RunResult {
-                    kind: RunResultKind::NotFound,
+                return Ok(WorkflowRuntimeRunResult {
+                    kind: WorkflowRuntimeRunResultKind::NotFound,
                     run_id: args.run_id,
                     workflow_id: None,
                     run: None,
@@ -556,10 +556,10 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
             DeliverApprovalResult::Duplicate { run }
             | DeliverApprovalResult::NotWaiting { run } => {
                 let kind = match delivered {
-                    DeliverApprovalResult::Duplicate { .. } => RunResultKind::Duplicate,
-                    _ => RunResultKind::NotWaiting,
+                    DeliverApprovalResult::Duplicate { .. } => WorkflowRuntimeRunResultKind::Duplicate,
+                    _ => WorkflowRuntimeRunResultKind::NotWaiting,
                 };
-                return Ok(RunResult {
+                return Ok(WorkflowRuntimeRunResult {
                     kind,
                     run_id: args.run_id,
                     workflow_id: Some(run.workflow_id.clone()),
@@ -712,7 +712,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                 .await?;
             if !matches!(
                 result.kind,
-                RunResultKind::NotClaimable | RunResultKind::NotFound
+                WorkflowRuntimeRunResultKind::NotClaimable | WorkflowRuntimeRunResultKind::NotFound
             ) {
                 self.config
                     .store
@@ -761,7 +761,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
             timers.push(result);
         }
 
-        let summary = SweepSummary {
+        let summary = WorkflowRuntimeSweepSummary {
             recovered: count_kinds(&recovered),
             scheduled: count_kinds(&scheduled),
             timers: count_kinds(&timers),
@@ -798,7 +798,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
     /// 驱动用 core 的 [`run_workflow`](aa_workflow_core::run_workflow)（经
     /// [`create_run_store_adapter`] 降格），心跳任务每 `lease_ms / 3` 续租一次。
     #[allow(clippy::too_many_arguments)]
-    async fn drive_claimed_run(&self, args: DriveArgs<'_>) -> anyhow::Result<RunResult> {
+    async fn drive_claimed_run(&self, args: DriveArgs<'_>) -> anyhow::Result<WorkflowRuntimeRunResult> {
         // 租约在**这里**解析，不在各个入口（上游 `runtime-driver.ts:679-681`：
         // `args.leaseOwner ?? createLeaseOwner(\`runtime:${runId}\`)` + `resolveLeaseMs`）。
         // 之前我们让每个入口自己解析，凭空多出 `signal:` / `approval:` 两个上游
@@ -816,8 +816,8 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         })?;
         match claim {
             ClaimRunResult::NotFound => {
-                return Ok(RunResult {
-                    kind: RunResultKind::NotFound,
+                return Ok(WorkflowRuntimeRunResult {
+                    kind: WorkflowRuntimeRunResultKind::NotFound,
                     run_id: args.run_id.to_string(),
                     workflow_id: Some(args.workflow_id.to_string()),
                     run: None,
@@ -827,8 +827,8 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                 });
             }
             ClaimRunResult::NotClaimable { run } => {
-                return Ok(RunResult {
-                    kind: RunResultKind::NotClaimable,
+                return Ok(WorkflowRuntimeRunResult {
+                    kind: WorkflowRuntimeRunResultKind::NotClaimable,
                     run_id: args.run_id.to_string(),
                     workflow_id: Some(args.workflow_id.to_string()),
                     run: Some(run),
@@ -913,8 +913,8 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         // drive 出错（step 终局失败等）→ Errored 结果。run_workflow 的错误
         // 详情已经落在事件日志（StepFailed / RunErrored）里，快照里也有。
         if drive_result.is_err() {
-            return Ok(RunResult {
-                kind: RunResultKind::Errored,
+            return Ok(WorkflowRuntimeRunResult {
+                kind: WorkflowRuntimeRunResultKind::Errored,
                 run_id: args.run_id.to_string(),
                 workflow_id: Some(args.workflow_id.to_string()),
                 run: None,
@@ -928,7 +928,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         let event_count = total.load(Ordering::Relaxed);
         let snapshot = self.config.store.load_run(&args.run_id.to_string())?;
         let kind = classify_run(snapshot.as_ref(), event_count);
-        Ok(RunResult {
+        Ok(WorkflowRuntimeRunResult {
             kind,
             run_id: args.run_id.to_string(),
             workflow_id: Some(args.workflow_id.to_string()),
@@ -1071,18 +1071,18 @@ impl HeartbeatHandle {
     }
 }
 
-fn classify_run(run: Option<&WorkflowExecution>, event_count: usize) -> RunResultKind {
+fn classify_run(run: Option<&WorkflowExecution>, event_count: usize) -> WorkflowRuntimeRunResultKind {
     match run.map(|r| r.status) {
-        Some(WorkflowExecutionStatus::Finished) => RunResultKind::Completed,
-        Some(WorkflowExecutionStatus::Paused) => RunResultKind::Paused,
+        Some(WorkflowExecutionStatus::Finished) => WorkflowRuntimeRunResultKind::Completed,
+        Some(WorkflowExecutionStatus::Paused) => WorkflowRuntimeRunResultKind::Paused,
         Some(WorkflowExecutionStatus::Errored) | Some(WorkflowExecutionStatus::Aborted) => {
-            RunResultKind::Errored
+            WorkflowRuntimeRunResultKind::Errored
         }
         Some(WorkflowExecutionStatus::Running) | Some(WorkflowExecutionStatus::Queued) => {
-            RunResultKind::Running
+            WorkflowRuntimeRunResultKind::Running
         }
-        None if event_count > 0 => RunResultKind::Running,
-        None => RunResultKind::NotFound,
+        None if event_count > 0 => WorkflowRuntimeRunResultKind::Running,
+        None => WorkflowRuntimeRunResultKind::NotFound,
     }
 }
 
@@ -1232,7 +1232,7 @@ mod driver_tests {
             .await
             .unwrap();
 
-        assert_eq!(out.kind, RunResultKind::Completed);
+        assert_eq!(out.kind, WorkflowRuntimeRunResultKind::Completed);
         assert_eq!(
             out.run.as_ref().unwrap().status,
             WorkflowExecutionStatus::Finished
@@ -1253,7 +1253,7 @@ mod driver_tests {
         };
         fx.rt.start_run(args.clone()).await.unwrap();
         let second = fx.rt.start_run(args).await.unwrap();
-        assert_eq!(second.kind, RunResultKind::NotClaimable);
+        assert_eq!(second.kind, WorkflowRuntimeRunResultKind::NotClaimable);
     }
 
     /// 信号投递：`deliver_signal` 自己认领 + 驱动到完成。
@@ -1275,7 +1275,7 @@ mod driver_tests {
             })
             .await
             .unwrap();
-        assert_eq!(started.kind, RunResultKind::Paused);
+        assert_eq!(started.kind, WorkflowRuntimeRunResultKind::Paused);
         let run = fx.mem.load_run("r1").unwrap().unwrap();
         assert_eq!(run.status, WorkflowExecutionStatus::Paused);
         assert_eq!(
@@ -1295,7 +1295,7 @@ mod driver_tests {
             })
             .await
             .unwrap();
-        assert_eq!(result.kind, RunResultKind::Completed);
+        assert_eq!(result.kind, WorkflowRuntimeRunResultKind::Completed);
 
         let finished = wait_for_status(&fx.mem, "r1", WorkflowExecutionStatus::Finished).await;
         assert_eq!(
@@ -1333,7 +1333,7 @@ mod driver_tests {
             })
             .await
             .unwrap();
-        assert_eq!(started.kind, RunResultKind::Paused);
+        assert_eq!(started.kind, WorkflowRuntimeRunResultKind::Paused);
 
         // 反复 sleep 到点 + sweep，最多 4 轮。
         let mut finished = false;
@@ -1415,7 +1415,7 @@ mod driver_tests {
             .unwrap();
         assert_eq!(
             delivered.kind,
-            RunResultKind::NotWaiting,
+            WorkflowRuntimeRunResultKind::NotWaiting,
             "投的不是它在等的信号"
         );
 
@@ -1619,7 +1619,7 @@ mod driver_tests {
             .await
             .unwrap();
         assert_eq!(sweep.recovered.len(), 1);
-        assert_eq!(sweep.recovered[0].kind, RunResultKind::Completed);
+        assert_eq!(sweep.recovered[0].kind, WorkflowRuntimeRunResultKind::Completed);
         assert!(!sweep.deadline_reached);
         assert!(!sweep.remaining_may_exist);
     }
@@ -1644,7 +1644,7 @@ mod driver_tests {
             })
             .await
             .unwrap();
-        assert_eq!(started.kind, RunResultKind::Paused);
+        assert_eq!(started.kind, WorkflowRuntimeRunResultKind::Paused);
 
         let run = fx.mem.load_run("sleep:e2e").unwrap().unwrap();
         assert_eq!(run.status, WorkflowExecutionStatus::Paused);
@@ -1829,7 +1829,7 @@ mod driver_tests {
         );
 
         let out = drive.await.unwrap().unwrap();
-        assert_eq!(out.kind, RunResultKind::Completed);
+        assert_eq!(out.kind, WorkflowRuntimeRunResultKind::Completed);
     }
 
     /// 没活干的 sweep：全空 + remaining_may_exist = false。

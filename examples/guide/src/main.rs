@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use aa_workflow_core::{CreateWorkflowConfig, WorkflowDefinition, create_workflow};
-use aa_workflow_runtime::{InMemoryExecutionStore, RunResultKind, WorkflowExecutionStatus, WorkflowExecutionStore, WorkflowRegistration, WorkflowRuntimeConfig, WorkflowRuntimeDefinition, WorkflowRuntimeDeliverSignalArgs, WorkflowRuntimeStartRunArgs, define_workflow_runtime};
+use aa_workflow_runtime::{InMemoryExecutionStore, WorkflowRuntimeRunResultKind, WorkflowExecutionStatus, WorkflowExecutionStore, WorkflowRegistration, WorkflowRuntimeConfig, WorkflowRuntimeDefinition, WorkflowRuntimeDeliverSignalArgs, WorkflowRuntimeStartRunArgs, define_workflow_runtime};
 
 // ============================================================
 // §1 Define a workflow
@@ -173,7 +173,7 @@ pub async fn step_start_and_pause(fx: &Fixture, run_id: &str, delay_ms: i64) -> 
 }
 
 pub struct StartOutcome {
-    pub kind: RunResultKind,
+    pub kind: WorkflowRuntimeRunResultKind,
     pub status: WorkflowExecutionStatus,
     pub waiting_signal: Option<String>,
     pub wake_at: Option<i64>,
@@ -228,9 +228,9 @@ pub async fn drive_to_payment_wait(
         let run = fx.mem.load_run(run_id).unwrap().unwrap();
         outcome = StartOutcome {
             kind: if run.status == WorkflowExecutionStatus::Paused {
-                RunResultKind::Paused
+                WorkflowRuntimeRunResultKind::Paused
             } else {
-                RunResultKind::Completed
+                WorkflowRuntimeRunResultKind::Completed
             },
             status: run.status,
             waiting_signal: run.waiting_for.map(|w| w.signal_name),
@@ -245,7 +245,7 @@ pub async fn drive_to_payment_wait(
 pub async fn step_deliver_payment(
     fx: &Fixture,
     run_id: &str,
-) -> aa_workflow_runtime::RunResult {
+) -> aa_workflow_runtime::WorkflowRuntimeRunResult {
     fx.rt
         .deliver_signal(WorkflowRuntimeDeliverSignalArgs {
             run_id: run_id.into(),
@@ -324,7 +324,7 @@ mod guide_tests {
         let started = step_start_and_pause(&fx, run_id, 100).await;
         assert_eq!(
             started.kind,
-            RunResultKind::Paused,
+            WorkflowRuntimeRunResultKind::Paused,
             "start_run 应停在第一个挂起点"
         );
         assert_eq!(started.status, WorkflowExecutionStatus::Paused);
@@ -347,7 +347,7 @@ mod guide_tests {
         let delivered = step_deliver_payment(&fx, run_id).await;
         assert_eq!(
             delivered.kind,
-            RunResultKind::Completed,
+            WorkflowRuntimeRunResultKind::Completed,
             "挂起时 lease 已释放，deliver 应自己认领并跑完"
         );
         assert_eq!(
@@ -373,13 +373,13 @@ mod guide_tests {
 
         drive_to_payment_wait(&fx, run_id, 10).await;
         let first = step_deliver_payment(&fx, run_id).await;
-        assert_eq!(first.kind, RunResultKind::Completed);
+        assert_eq!(first.kind, WorkflowRuntimeRunResultKind::Completed);
 
         // 同 signalId 再投一次。
         let again = step_deliver_payment(&fx, run_id).await;
         assert_eq!(
             again.kind,
-            RunResultKind::Duplicate,
+            WorkflowRuntimeRunResultKind::Duplicate,
             "同 signalId 重投应识别为重复（webhook 重试是常态）"
         );
         // ship-order 只跑过一次。
