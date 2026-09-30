@@ -109,7 +109,7 @@ pub struct WorkflowRuntimeConfig<TWorkflows = HashMap<WorkflowId, WorkflowRegist
     /// lease 默认时长；单次调用可用 `lease_ms` 覆盖。
     pub default_lease_ms: Option<i64>,
     /// 全局事件 fan-out（best-effort，不参与耐久执行）。
-    pub publish: Option<Arc<dyn Fn(&RunId, &WorkflowEvent) + Send + Sync>>,
+    pub publish: Option<Arc<dyn Fn(&str, &WorkflowEvent) + Send + Sync>>,
 }
 
 impl<TWorkflows> WorkflowRuntimeConfig<TWorkflows> {
@@ -837,20 +837,20 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         let total: Arc<AtomicUsize> = Default::default();
         let include_events = args.include_events.unwrap_or(true);
         let max_events = args.max_events;
-        let run_id = args.run_id.to_string();
+        // core 现在直接把 run_id 交给 publish（对齐上游 `(runId, event)`），
+        // 所以这里不必再自己 capture 一份——闭包首参就是它。
         let runtime_publish = self.config.publish.clone();
-        let publisher: Arc<dyn Fn(WorkflowEvent) + Send + Sync> = {
+        let publish: Arc<dyn Fn(&str, WorkflowEvent) + Send + Sync> = {
             let collected = collected.clone();
             let total = total.clone();
-            let run_id = run_id.clone();
-            Arc::new(move |event: WorkflowEvent| {
+            Arc::new(move |run_id: &str, event: WorkflowEvent| {
                 let count = total.fetch_add(1, Ordering::Relaxed);
                 let keep = include_events && max_events.map(|m| count < m).unwrap_or(true);
                 if keep {
                     collected.lock().unwrap().push(event.clone());
                 }
                 if let Some(publish) = &runtime_publish {
-                    publish(&run_id, &event);
+                    publish(run_id, &event);
                 }
             })
         };
@@ -881,7 +881,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         if let Some(at) = args.yield_resume_at {
             opts = opts.yield_resume_at(at);
         }
-        opts = opts.publisher(Some(publisher));
+        opts = opts.publish(Some(publish));
         let drive_result = run_workflow(&opts).await;
 
         // 心跳停止 + 释放 lease（无论 drive 成败）。

@@ -53,5 +53,5 @@ pub mod workflows;
 
 pub use file_run_store::FileRunStore;
 pub use registry::{all as all_workflows, get as get_workflow};
-pub use runtime::{drive, tracing_publisher};
+pub use runtime::{drive, tracing_publish};
 pub use workflows::{approval_order, approval_review, compliance, email_digest, fulfillment, fulfillment_saga, invoice, payment_gateway, refund};

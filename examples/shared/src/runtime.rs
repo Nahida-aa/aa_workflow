@@ -8,12 +8,13 @@ use std::sync::Arc;
 
 use aa_workflow_core::{RunOutcome, RunStore, RunWorkflowOptions, WorkflowDefinition, WorkflowEvent, run_workflow};
 
-/// 可选的事件订阅者（每个 `ctx.step` 落盘事件都会回调）。
-pub type EventSubscriber = Arc<dyn Fn(WorkflowEvent) + Send + Sync>;
+/// 可选的事件订阅者（每个 `ctx.step` 落盘事件都会回调）。首参 `run_id` 由
+/// core 直接给出（同 [`aa_workflow_core::RunWorkflowOptions::publish`]）。
+pub type EventSubscriberFn = Arc<dyn Fn(&str, WorkflowEvent) + Send + Sync>;
 
 /// 把事件打到 tracing 的默认订阅者（`examples.runtime` target）。
-pub fn tracing_publisher() -> EventSubscriber {
-    Arc::new(|ev| tracing::info!(target: "examples.runtime", "{ev:?}"))
+pub fn tracing_publish() -> EventSubscriberFn {
+    Arc::new(|run_id, ev| tracing::info!(target: "examples.runtime", "[{run_id}] {ev:?}"))
 }
 
 /// 一次驱动调用（跑新 run 或续跑某个 run_id 都走这里）。
@@ -26,7 +27,7 @@ pub struct DriveOpts<'a> {
     /// 命中即停（对齐 run_pipeline 的 targetStep）。
     pub target_step: Option<&'a str>,
     /// 事件订阅者；`None` 则不订阅。
-    pub publisher: Option<EventSubscriber>,
+    pub publish: Option<EventSubscriberFn>,
 }
 
 impl DriveOpts<'_> {
@@ -48,7 +49,7 @@ impl DriveOpts<'_> {
         if let Some(ts) = self.target_step {
             ro = ro.target_step(ts);
         }
-        ro.publisher(self.publisher.clone())
+        ro.publish(self.publish.clone())
     }
 }
 
@@ -95,7 +96,7 @@ mod tests {
             input.clone(),
             DriveOpts {
                 run_id: Some("digest:r"),
-                publisher: Some(tracing_publisher()),
+                publish: Some(tracing_publish()),
                 ..DriveOpts::default()
             },
         )

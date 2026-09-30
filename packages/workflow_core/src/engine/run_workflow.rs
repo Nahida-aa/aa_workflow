@@ -21,7 +21,7 @@ use crate::run_store::{RunState, RunStore};
 ///
 /// # 为什么把 `workflow` / `run_store` 也收进来
 ///
-/// 之前是 4 个位置参数 `run_workflow(&wf, store, &opts, publisher)`——容易传错位。
+/// 之前是 4 个位置参数 `run_workflow(&wf, store, &opts, publish)`——容易传错位。
 /// 上游把**全部**入参放在一个结构体里，`workflow` / `runStore` 是**必填字段**。
 /// 这里照做：必填项由 [`RunWorkflowOptions::new`] 强制（构造完就一定齐了），
 /// 可选项走 builder 链。
@@ -32,7 +32,7 @@ use crate::run_store::{RunState, RunStore};
 /// | --- | --- | --- |
 /// | `workflow` / `runStore` | ✅ `workflow` / `run_store` | 必填 |
 /// | `input` / `runId` / `deadline` / `minYieldRemainingMs` / `yieldResumeAt` | ✅ | 同名同义 |
-/// | `publish` | ✅ `publisher` | 位置从参数移进结构体 |
+/// | `publish` | ✅ `publish` | 位置从参数移进结构体 |
 /// | `signalDelivery` / `approval` | — | 我们走 `signal_run` / `signal_event` 先落盘再 drive（D3 的形态差异） |
 /// | `recover` / `attach` / `signal` / `threadId` / `outputSink` / `telemetry` | — | **暂无**；未做，不是不做 |
 /// | — | ➕ `continue_from` / `target_step` | **本地扩展**（上游连这两个概念都没有） |
@@ -49,21 +49,29 @@ use crate::run_store::{RunState, RunStore};
 /// newtype 内部持 `Arc<WorkflowDefinition>`：`previous_versions` 是 `Vec`、另有
 /// 若干 `Arc`，按值持有会让每次 run 都 deep-copy 一遍；`Arc` 让 clone 变引用计数自增，
 /// 也避免给结构体引入生命周期参数（那会让 builder 链很难写）。
-/// 事件回调的**已擦除**类型：返回 future 而非直接调用，所以宿主可以给异步实现
-/// （对齐上游 `publish?: (runId, event) => void | Promise<void>`）。
+/// 事件回调的**已擦除**类型：返回 future 而非直接调用，所以宿主可以给异步实现。
+/// 参数与上游 `publish?: (runId, event) => void | Promise<void>`
+/// （`run-workflow.ts:41`）**逐个对应**，顺序也一致。
 ///
-/// **按值收 `WorkflowEvent`**，不是 `&WorkflowEvent`。这不是口味问题：
+/// **`run_id` 是补上的那个参数。** 之前回调只收事件，宿主想按 run 归集就得从
+/// `event.run_id()` 里反解——而 `WorkflowEvent::Custom` 不带 run_id（自定义事件
+/// 是宿主的，引擎无从填），那条路径上宿主根本拿不到 run 身份。上游把 runId 当
+/// 独立参数传就是这个原因。
+///
+/// **事件按值传 `WorkflowEvent`**，不是 `&WorkflowEvent`。这不是口味问题：
 /// `publish()` 走队列时本来就要克隆一份（调用点只有 `&self`），drain task 已经
 /// 持有一份完整副本。传引用就得让返回的 future 借用它，于是被迫用
 /// `BoxFuture<'static, _>` + HRTB 兜（`for<'a> Fn(&'a E) -> BoxFuture<'a, ()>`
 /// 在 `dyn` 上是噩梦），代价是 async block **不能借用事件**。
-/// 按值传则一次克隆都不浪费、生命周期问题直接消失：
+/// 按值传则一次克隆都不浪费、生命周期问题直接消失。
+/// `run_id` 相反**按引用**：它 `&'static`（spawn 时克隆的那份），且真要在 async
+/// block 里长期持有，按值只会多一次 clone。
 ///
 /// ```ignore
-/// .async_publisher(|ev| async move { sink.send(ev).await })   // 借用不了，但也不需要
+/// .async_publish(|run_id, ev| async move { sink.send(run_id, ev).await })
 /// ```
-pub type Publisher =
-    Arc<dyn Fn(WorkflowEvent) -> crate::define::BoxFuture<'static, ()> + Send + Sync>;
+pub type PublisherFn =
+    Arc<dyn Fn(&str, WorkflowEvent) -> crate::define::BoxFuture<'static, ()> + Send + Sync>;
 
 pub struct RunWorkflowOptions {
     /// 要驱动的 workflow。**必填**（由 [`Self::new`] 保证）。
@@ -106,32 +114,32 @@ pub struct RunWorkflowOptions {
     /// 不需要，产品 UI 可能需要。所以要留就自己在这里写：
     ///
     /// ```ignore
-    /// .publisher(Some(Arc::new(move |e: WorkflowEvent| {
+    /// .publish(Some(Arc::new(move |run_id: &str, e: WorkflowEvent| {
     ///     if let WorkflowEvent::StepProgress { step_id, value, .. } = e {
     ///         my_db.insert_progress(run_id, step_id, *value);
     ///     }
     /// })))
     /// ```
     ///
-    /// ## publisher 不拖慢引擎（对齐上游的 async generator）
+    /// ## publish 不拖慢引擎（对齐上游的 async generator）
     ///
     /// 投递是「同步调用点 + 独立 drain task」两段：调用点只做一次
-    /// `UnboundedSender::send`（非阻塞），真正 await publisher 的是 drain task。
+    /// `UnboundedSender::send`（非阻塞），真正 await publish 的是 drain task。
     ///
     /// 上游是同一个形状：`runWorkflow` 是个 `async function*`，它在
     /// `queue.shift()` 之后 `await publish` 再 `yield`，而**执行在另一个 task**
-    /// 里继续往那个 queue 推（`run-workflow.ts:85-134`）。所以「publisher 慢」
+    /// 里继续往那个 queue 推（`run-workflow.ts:85-134`）。所以「publish 慢」
     /// 在两边都只拖慢**消费端吞吐**，不拖慢**引擎进度**。
     ///
-    /// 队列是**无界**的（上游就是个裸数组），所以慢 publisher 涨内存而不是卡住
-    /// run；要背压就在宿主自己的 publisher 里做。
+    /// 队列是**无界**的（上游就是个裸数组），所以慢 publish 涨内存而不是卡住
+    /// run；要背压就在宿主自己的 publish 里做。
     ///
     /// **「返回前终态已投递」是守住的旧语义**：收尾发 shutdown 并 join drain，
     /// 所以 `RUN_FINISHED` / `RUN_ERRORED` / `STEP_PAUSED` 一定在
-    /// `run_workflow` 返回前送达（Paused 早退路径也排空）。代价是慢 publisher 会
+    /// `run_workflow` 返回前送达（Paused 早退路径也排空）。代价是慢 publish 会
     /// 延迟**返回**，但执行早已结束。
     ///
-    /// 死锁风险与改造前相同：publisher 若 `await` 依赖本次 run 完成的东西，仍会
+    /// 死锁风险与改造前相同：publish 若 `await` 依赖本次 run 完成的东西，仍会
     /// 挂——旧语义下内联调用时也会挂。不是回归。
     ///
     /// ## 坑 1：进程内回调 = 有丢失窗口
@@ -140,19 +148,19 @@ pub struct RunWorkflowOptions {
     /// 耐久，不是「全部」耐久。拿它当审计日志会得到一份有洞的审计日志——
     /// 审计要耐久就别走这里，该让引擎 append。
     ///
-    /// ## 坑 2：publisher panic 会被吞掉（与上游一致，刻意如此）
+    /// ## 坑 2：publish panic 会被吞掉（与上游一致，刻意如此）
     ///
-    /// 宿主 publisher 里的 panic **不会**掀掉你的 run —— `publish()` 用
-    /// `catch_unwind` 兜住。上游同形（*"A misbehaving publisher must not break
+    /// 宿主 publish 里的 panic **不会**掀掉你的 run —— `publish()` 用
+    /// `catch_unwind` 兜住。上游同形（*"A misbehaving publish must not break
     /// the run — swallow and continue."*，`run-workflow.ts:128-134`）：宿主代码
     /// 不该有能力损毁已经 append 了 checkpoint 的耐久状态。
     ///
-    /// 代价是**静默** —— 本 crate 没有日志依赖，所以拿不到「publisher 炸了」这
-    /// 条信息。要诊断就在**你自己的 publisher 内部** catch + 记日志，日志策略和
+    /// 代价是**静默** —— 本 crate 没有日志依赖，所以拿不到「publish 炸了」这
+    /// 条信息。要诊断就在**你自己的 publish 内部** catch + 记日志，日志策略和
     /// 依赖都留在宿主那侧。
-    /// 可选的事件回调（上游 `publish`）。多数宿主用同步的 [`Self::publisher`]；
-    /// 需要 `await` 落盘/发网络的用 [`Self::async_publisher`]。
-    pub publisher: Option<Publisher>,
+    /// 可选的事件回调（上游 `publish`）。多数宿主用同步的 [`Self::publish`]；
+    /// 需要 `await` 落盘/发网络的用 [`Self::async_publish`]。
+    pub publish: Option<PublisherFn>,
 }
 
 impl RunWorkflowOptions {
@@ -174,7 +182,7 @@ impl RunWorkflowOptions {
             deadline: None,
             min_yield_remaining_ms: None,
             yield_resume_at: None,
-            publisher: None,
+            publish: None,
         }
     }
 
@@ -223,50 +231,50 @@ impl RunWorkflowOptions {
     /// 事件回调（上游 `publish`）。收 `Option`，便于直接对接旧的四参数签名。
     ///
     /// 同步版：内部包装成一个**立即完成**的 future，实际投递发生在 drain task
-    /// 上（见字段文档「publisher 不拖慢引擎」）。要真正 `await` 请用
-    /// [`Self::async_publisher`]。
+    /// 上（见字段文档「publish 不拖慢引擎」）。要真正 `await` 请用
+    /// [`Self::async_publish`]。
     ///
-    /// 事件**按值**传入，与 `async_publisher` 同一套所有权语义（只有投递时机
+    /// 事件**按值**传入，与 `async_publish` 同一套所有权语义（只有投递时机
     /// 不同），这样两条路径的心智模型是一致的：`ev` 归你，随便 move 进
     /// `async move`、随便丢给线程、随便 `join()`。
-    pub fn publisher(mut self, v: Option<Arc<dyn Fn(WorkflowEvent) + Send + Sync>>) -> Self {
-        self.publisher = v.map(|f| {
-            Arc::new(move |ev: WorkflowEvent| -> crate::define::BoxFuture<'static, ()> {
-                let out = f(ev);
+    pub fn publish(mut self, v: Option<Arc<dyn Fn(&str, WorkflowEvent) + Send + Sync>>) -> Self {
+        self.publish = v.map(|f| {
+            Arc::new(move |run_id: &str, ev: WorkflowEvent| -> crate::define::BoxFuture<'static, ()> {
+                let out = f(run_id, ev);
                 Box::pin(async move { out })
-            }) as Publisher
+            }) as PublisherFn
         });
         self
     }
 
     /// 异步事件回调（上游 `publish` 的 `Promise<void>` 那一支）。
     ///
-    /// 与 [`Self::publisher`] 的差别只是**允许 `await`**：投递在 drain task 上
+    /// 与 [`Self::publish`] 的差别只是**允许 `await`**：投递在 drain task 上
     /// 串行进行，但引擎执行不受它阻塞。要落盘/发网络而不想卡住引擎，就用这个。
     ///
     /// 事件**按值**传入，所以 async block 可以直接 `async move` 整个事件 ——
     /// 不需要「先取值再进 async」那套：
     ///
     /// ```ignore
-    /// .async_publisher(|ev| async move { sink.send(ev).await })
+    /// .async_publish(|run_id, ev| async move { sink.send(run_id, ev).await })
     /// ```
     ///
     /// 想留一份自己用就克隆（事件不大，且 `publish()` 已经为了入队克隆过一次，
     /// 这里不会再多一次引擎侧克隆）。
-    pub fn async_publisher<F, Fut>(mut self, f: F) -> Self
+    pub fn async_publish<F, Fut>(mut self, f: F) -> Self
     where
-        F: Fn(WorkflowEvent) -> Fut + Send + Sync + 'static,
+        F: Fn(&str, WorkflowEvent) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
-        self.publisher = Some(Arc::new(move |ev: WorkflowEvent| {
-            Box::pin(f(ev)) as crate::define::BoxFuture<'static, ()>
+        self.publish = Some(Arc::new(move |run_id: &str, ev: WorkflowEvent| {
+            Box::pin(f(run_id, ev)) as crate::define::BoxFuture<'static, ()>
         }));
         self
     }
 
     /// 清掉事件回调。
-    pub fn no_publisher(mut self) -> Self {
-        self.publisher = None;
+    pub fn no_publish(mut self) -> Self {
+        self.publish = None;
         self
     }
 }
@@ -308,7 +316,7 @@ pub async fn run_workflow(
 ) -> Result<RunOutcome, WorkflowError> {
     let workflow: &WorkflowDefinition = &opts.workflow;
     let store = Arc::clone(&opts.run_store);
-    let publisher = opts.publisher.clone();
+    let publish = opts.publish.clone();
 
     let run_id = opts
         .run_id
@@ -395,12 +403,12 @@ pub async fn run_workflow(
     // shares that source for consistency.
     let state = match (active.initialize)(&opts.input) {
         Ok(s) => s,
-        Err(e) => return init_failed(&store, run_state, &run_id, &e, publisher.as_ref()).await,
+        Err(e) => return init_failed(&store, run_state, &run_id, &e, publish.as_ref()).await,
     };
     if let Some(validate) = &active.state_validator
         && let Err(e) = validate(&state)
     {
-        return init_failed(&store, run_state, &run_id, &e, publisher.as_ref()).await;
+        return init_failed(&store, run_state, &run_id, &e, publish.as_ref()).await;
     }
 
     let events = store.get_events(&run_id)?;
@@ -417,14 +425,17 @@ pub async fn run_workflow(
 
     let state_mirror: Arc<Mutex<serde_json::Value>> = Arc::new(Mutex::new(state.clone()));
 
-    // 事件扇出：同步调用点只 `send`（非阻塞），drain task 独立 await publisher。
+    // 事件扇出：同步调用点只 `send`（非阻塞），drain task 独立 await publish。
     // 上游等价物是 `runWorkflow` 这个 async generator：它在 `queue.shift()` 之后
-    // `await publish`，而执行在**另一个** task 里往 queue 推 —— 所以慢 publisher
+    // `await publish`，而执行在**另一个** task 里往 queue 推 —— 所以慢 publish
     // 拖慢的是消费端吞吐，不是引擎进度（`run-workflow.ts:85-134`）。
-    let (publish_tx, drain) = match opts.publisher.clone() {
+    let (publish_tx, drain) = match opts.publish.clone() {
         None => (None, None),
-        Some(publisher) => {
+        Some(publish) => {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Fanout>();
+            // run_id 在 drain task 生命周期内恒定，clone 一份进去即可
+            // (`&'static` 借用需要独占所有权)。
+            let drain_run_id = run_id.clone();
             let drain = tokio::spawn(async move {
                 // 串行 await，保证投递顺序 = 产生顺序（无界队列不会重排）。
                 while let Some(msg) = rx.recv().await {
@@ -436,10 +447,10 @@ pub async fn run_workflow(
                     };
                     // 逐个兜住：宿主 panic 不得掀掉 run（上游同形，见 publish 文档）。
                     // future 在构造时才 panic，所以只能连 future 一起 catch。
-                    // 按值移交：drain task 独占这份事件，publisher 也独占它，
+                    // 按值移交：drain task 独占这份事件，publish 也独占它，
                     // 所以全程只有 publish() 那一次克隆。
                     let fut = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        publisher(ev)
+                        publish(&drain_run_id, ev)
                     }));
                     if let Ok(fut) = fut {
                         // `await` 期间的 panic 由 task 级隔离兜住（见收尾 join）。
@@ -560,11 +571,11 @@ pub async fn run_workflow(
 /// 的 `?` 传播）——否则最后一条事件（`RUN_FINISHED` / `RUN_ERRORED`）可能还
 /// 在队列里，`run_workflow` 就返回了，宿主会漏掉终态。
 ///
-/// 注意这会让「慢 publisher」延迟 **run_workflow 的返回**，但不会延迟引擎执行
-/// （执行早已结束）。这和改造前一致：原先 publisher 是内联同步调用，返回前必然
+/// 注意这会让「慢 publish」延迟 **run_workflow 的返回**，但不会延迟引擎执行
+/// （执行早已结束）。这和改造前一致：原先 publish 是内联同步调用，返回前必然
 /// 已投递完毕——语义是守住的，没有静默削弱成 fire-and-forget。
 ///
-/// 死锁风险与改造前相同：publisher 若 `await` 依赖本次 run 完成的东西，仍会挂。
+/// 死锁风险与改造前相同：publish 若 `await` 依赖本次 run 完成的东西，仍会挂。
 /// 那在旧语义下也会挂（内联调用时挂），所以不是回归。
 async fn finish_fanout(
     tx: Option<&tokio::sync::mpsc::UnboundedSender<Fanout>>,
@@ -592,14 +603,14 @@ async fn init_failed(
     mut run_state: RunState,
     run_id: &str,
     err: &anyhow::Error,
-    publisher: Option<&Publisher>,
+    publish: Option<&PublisherFn>,
 ) -> Result<RunOutcome, WorkflowError> {
     let run_err = RunError::from_anyhow(err);
     run_state.status = RunStatus::Errored;
     run_state.error = Some(run_err.clone());
     run_state.updated_at = now_ms();
     store.set_run_state(run_id, &run_state)?;
-    if let Some(publish) = publisher {
+    if let Some(publish) = publish {
         // 这条路径在 drain task 建立**之前**返回（handler 都没跑起来），所以直接
         // await 即可——没有引擎执行会被拖慢。panic 仍然吞掉，与 publish 同策略。
         let ev = WorkflowEvent::RunErrored {
@@ -609,7 +620,7 @@ async fn init_failed(
             code: RunErrorCode::Validation,
         };
         if let Ok(fut) =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| publish(ev)))
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| publish(run_id, ev)))
         {
             let _ = fut.await;
         }
@@ -798,15 +809,57 @@ mod tests {
         assert_eq!(err.name, "Aborted");
     }
 
+    /// `publish` 收到的 `run_id` 就是 run 身份本身（上游把 runId 单列成一个参数，
+    /// `run-workflow.ts:41`）。这里特意用 `Custom` 事件验：`Custom` 的
+    /// `event.run_id()` 字段是宿主自己填的，引擎无从保证它对——所以 run 身份
+    /// 必须能从**回调参数**拿到，而不是从事件里反解。
+    #[tokio::test]
+    async fn publish_receives_run_id_including_custom_events() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let publish: Arc<dyn Fn(&str, WorkflowEvent) + Send + Sync> = {
+            let seen = seen.clone();
+            Arc::new(move |run_id: &str, ev: WorkflowEvent| {
+                seen.lock()
+                    .unwrap()
+                    .push((run_id.to_string(), ev.type_name().to_string()))
+            })
+        };
+        let wf = WorkflowDefinition::new("rid")
+            .handler(|ctx: WorkflowCtx| async move {
+                ctx.emit("ping", serde_json::json!({ "v": 1 }));
+                Ok(serde_json::json!({}))
+            });
+        run_workflow(
+            &RunWorkflowOptions::new(wf, store)
+                .input(serde_json::json!({}))
+                .run_id("rid:1")
+                .publish(Some(publish)),
+        )
+        .await
+        .unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert!(!seen.is_empty(), "publish 一次都没被调用？");
+        assert!(
+            seen.iter().all(|(rid, _)| rid == "rid:1"),
+            "每条事件的 run_id 都该是 'rid:1'，实际：{seen:?}"
+        );
+        assert!(
+            seen.iter().any(|(_, ty)| ty == "CUSTOM"),
+            "Custom 事件也该带上 run_id：{seen:?}"
+        );
+    }
+
     /// `initialize` 失败：publish `validation_error`，但**不进事件日志**（对齐
     /// TanStack 的 `emit` 而非 `emitAndAppend`）。
     #[tokio::test]
     async fn init_failure_publishes_validation_code_without_appending() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let seen: Arc<Mutex<Vec<WorkflowEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let publisher: Arc<dyn Fn(WorkflowEvent) + Send + Sync> = {
+        let publish: Arc<dyn Fn(&str, WorkflowEvent) + Send + Sync> = {
             let seen = seen.clone();
-            Arc::new(move |ev| seen.lock().unwrap().push(ev))
+            Arc::new(move |_run_id: &str, ev| seen.lock().unwrap().push(ev))
         };
         let wf = WorkflowDefinition::new("bad-init")
             .initialize(|_| Err(anyhow::anyhow!("nope")))
@@ -815,7 +868,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(json!({}))
             .run_id("code:validation")
-            .publisher(Some(publisher)),
+            .publish(Some(publish)),
         )
         .await
         .unwrap();

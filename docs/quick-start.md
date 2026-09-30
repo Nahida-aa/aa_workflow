@@ -279,7 +279,7 @@ store 是可插拔的，workflow 代码不动。本仓三个实现跑**同一份
   另：workflow **出口**（`RunOutcome.output` / handler 返回值）仍是 `Value`，
   因为 store 是 `dyn`。
 - `run_workflow` **不是** async generator——返回 `RunOutcome`，事件回调走
-  `.publisher(Some(..))`（对应上游 `publish`）。
+  `.publish(Some(..))`（对应上游 `publish`，回调签名同为 `(run_id, event)`）。
 - 多了 `continue_from` / `target_step`；少了 `recover` / `attach` / `signal` /
   `threadId` / `outputSink` / `telemetry`（对照表见 `docs/tanstack-alignment.md`）。
 - 挂起即返回：所有 pause 类原语写完 checkpoint 就结束本次 drive。

@@ -86,7 +86,7 @@ async fn slow_publisher_does_not_stall_the_engine() {
         &RunWorkflowOptions::new(wf, create_run_store_adapter(store))
             .input(serde_json::json!({}))
             .run_id("r")
-            .async_publisher(move |_e| {
+            .async_publish(move |_run_id, e| {
                 let slot = sink_slot.clone();
                 async move {
                     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -131,7 +131,7 @@ async fn async_publisher_can_await_without_blocking_the_runtime() {
         &RunWorkflowOptions::new(three_steps(), create_run_store_adapter(store))
             .input(serde_json::json!({}))
             .run_id("r")
-            .async_publisher(move |e| {
+            .async_publish(move |_run_id, e| {
                 let sink = sink.clone();
                 async move {
                     // 真 await：让出执行权。事件按值进来，整条 move 进 async。
@@ -159,7 +159,7 @@ async fn delivery_order_matches_production_order() {
         &RunWorkflowOptions::new(three_steps(), create_run_store_adapter(store))
             .input(serde_json::json!({}))
             .run_id("r")
-            .async_publisher(move |e| {
+            .async_publish(move |_run_id, e| {
                 // 按值传入 ⇒ 可以直接 `async move` 整个事件，不需要先取值。
                 let sink = sink.clone();
                 async move {
@@ -192,7 +192,7 @@ async fn terminal_event_is_delivered_before_run_workflow_returns() {
         &RunWorkflowOptions::new(three_steps(), create_run_store_adapter(store))
             .input(serde_json::json!({}))
             .run_id("r")
-            .async_publisher(move |e| {
+            .async_publish(move |_run_id, e| {
                 let sink = sink.clone();
                 async move {
                     // 每个事件都睡一会儿，让「还没排空就返回」变得容易暴露
@@ -238,7 +238,7 @@ async fn paused_path_also_drains_the_queue() {
         &RunWorkflowOptions::new(wf, create_run_store_adapter(store))
             .input(serde_json::json!({}))
             .run_id("r")
-            .async_publisher(move |e| {
+            .async_publish(move |_run_id, e| {
                 let sink = sink.clone();
                 async move {
                     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -273,7 +273,7 @@ async fn event_moves_into_the_future_with_no_extra_clone() {
         &RunWorkflowOptions::new(three_steps(), create_run_store_adapter(store))
             .input(serde_json::json!({}))
             .run_id("r")
-            .async_publisher(move |ev| {
+            .async_publish(move |_run_id, ev| {
                 let sink = sink.clone();
                 async move {
                     // 整条 move 进独立 task：只有按值传才做得到

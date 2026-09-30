@@ -18,7 +18,9 @@ use crate::run_store::RunStore;
 
 mod run_workflow;
 pub mod state_diff;
-pub use run_workflow::{RunOutcome, RunWorkflowOptions, run_workflow, run_workflow_sync, select_workflow_version};
+pub use run_workflow::{
+    PublisherFn, RunOutcome, RunWorkflowOptions, run_workflow, run_workflow_sync, select_workflow_version,
+};
 pub use state_diff::{Operation, diff_state, snapshot_state};
 
 pub(crate) fn now_ms() -> i64 {
@@ -1608,7 +1610,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
             .run_id("prog_run")
-            .publisher(Some(Arc::new(move |e: WorkflowEvent| {
+            .publish(Some(Arc::new(move |_run_id: &str, e: WorkflowEvent| {
                 sink.lock().unwrap().push(e.clone())
             }))),
         )
@@ -2240,7 +2242,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
             .run_id("em1")
-            .publisher(Some(Arc::new(move |e: WorkflowEvent| {
+            .publish(Some(Arc::new(move |_run_id: &str, e: WorkflowEvent| {
                 sink.lock().unwrap().push(e.clone())
             }))),
         )
@@ -2641,7 +2643,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
             .deadline(crate::engine::now_ms() + 300)
-            .publisher(// 500ms 内到期 → headroom < 1000
+            .publish(// 500ms 内到期 → headroom < 1000
             None),
         )
         .await
@@ -2884,7 +2886,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
             .run_id("sd")
-            .publisher(Some(Arc::new(move |e: WorkflowEvent| {
+            .publish(Some(Arc::new(move |_run_id: &str, e: WorkflowEvent| {
                 sink.lock().unwrap().push(e.clone())
             }))),
         )
@@ -2956,7 +2958,7 @@ mod tests {
             &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
             .run_id("tail:1")
-            .publisher(Some(Arc::new(move |e: WorkflowEvent| {
+            .publish(Some(Arc::new(move |_run_id: &str, e: WorkflowEvent| {
                 sink.lock().unwrap().push(e.clone())
             }))),
         )

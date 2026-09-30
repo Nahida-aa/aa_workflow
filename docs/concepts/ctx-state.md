@@ -176,7 +176,7 @@ step 闭包**不是**严格意义上的纯函数 —— 上游自己的例子就
 
 **「即时 + 耐久」这个格子是空的，而且是故意空的。** 事件定义上写死了
 `/// Observability only (not persisted)`（`event.rs:121`），`publish()` 只调
-publisher 回调、从不 `append`。
+`publish` 回调、从不 `append`。
 
 为什么不耐久、为什么这是对的：假设 step 报了 50% 然后崩了。resume 时闭包**整个
 被跳过**（上游 `replay-and-resume.md:31`），那 50% 从没进过日志，恢复后是 0%。
@@ -220,7 +220,7 @@ publisher 回调、从不 `append`。
 「上次崩在哪」不能只靠事件日志。
 
 可执行验证：`examples/store_file/src/progress_report.rs` 及其测试
-（`tests/progress_report.rs`，4 个测试钉住「publisher 收到 / 日志里没有」这条对比）。
+（`tests/progress_report.rs`，4 个测试钉住「publish 回调收到 / 日志里没有」这条对比）。
 
 本文引用分两类，路径前缀区分：
 

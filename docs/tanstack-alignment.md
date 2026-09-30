@@ -285,17 +285,17 @@ ctx.sleep("a", 100ms) 与 ctx.sleep("b", 600s) 并发，park 用 ? 传播
 RunWorkflowOptions::new(workflow, run_store)   // 必填两项由 new() 强制
     .input(..).run_id(..).continue_from(..).target_step(..)
     .deadline(..).min_yield_remaining(..).yield_resume_at(..)
-    .publisher(Some(..))
+    .publish(Some(..))
 ```
 
-逐字段对照（截至 2026-09-18）：
+逐字段对照（截至 2026-09-30）：
 
 | 上游 `RunWorkflowOptions` | 本仓 | 说明 |
 | --- | --- | --- |
 | `workflow` / `runStore` | ✅ `workflow` / `run_store` | 必填，`new()` 强制 |
 | `input` / `runId` | ✅ 同名 | |
 | `deadline` / `minYieldRemainingMs` / `yieldResumeAt` | ✅ 同名 | |
-| `publish` | ✅ `publisher` | 位置从参数移进结构体 |
+| `publish` | ✅ `publish` | 位置从参数移进结构体；回调签名 `(run_id, event)` 与上游逐参一致 |
 | `signalDelivery` / `approval` | — | 形态差异：上游「带投递再跑一次」是一个调用；本仓先 `signal_run` / `signal_event` 落盘（`STEP_RESUME`），再单独 drive（D3） |
 | `recover` | ❌ 暂无 | 「认领过期 lease 后重放中断的 run」。本仓有 `claim_stale_runs`（认领）但没有对应的恢复入口——**真缺口**，补它要连着 runtime 闭环 |
 | `attach` | ❌ 暂无 | 只读订阅已有 run（不驱动）。本仓 `subscribe` 只能 tail 事件，拿不到 RunState 快照 |
