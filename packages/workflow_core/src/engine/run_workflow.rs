@@ -1745,6 +1745,82 @@ mod tests {
         assert_eq!(outcome.status, RunStatus::Errored);
     }
 
+    /// `continue_from` **就是** `truncate_log_at_step` + 普通 resume 的糖：
+    /// 引擎里 `continue_from` 只出现在一处（调 `truncate_log_at_step`），没有任何
+    /// 别的行为挂在它上面。调用方自己先截断、再普通 resume，结果完全一致——
+    /// 这条测试就把这个等价关系钉住，免得哪天有人给 `continue_from` 加上只有它
+    /// 才有的隐藏行为。
+    ///
+    /// 注意**能力边界**：能这么做的前提是 store 实现了 `truncate_log_at_step`。
+    /// 上游对齐的 `WorkflowExecutionStore` 契约里**没有**这个方法（上游的
+    /// `createRunStoreAdapter` 同样没实现 `truncateRuns`），所以 postgres store
+    /// 没有它，降格适配器如实返回 `Err(unsupported)`——
+    /// `continue_from` 和手动调用**一样**在真实 store 上不可用。
+    #[tokio::test]
+    async fn manual_truncate_plus_plain_resume_equals_continue_from() {
+        let store = Arc::new(InMemoryStore::new());
+        let log = Arc::new(Mutex::new(TestLog::default()));
+        let fail = Arc::new(AtomicBool::new(true));
+        let wf = || {
+            WorkflowDefinition::new("w").handler({
+                let log = log.clone();
+                let fail = fail.clone();
+                move |ctx: WorkflowCtx| {
+                    let log = log.clone();
+                    let fail = fail.clone();
+                    async move {
+                        for id in ["a", "b"] {
+                            let (log, fail) = (log.clone(), fail.clone());
+                            let id = id.to_string();
+                            let id_c = id.clone();
+                            ctx.step(&id, move |_sc: StepCtx| {
+                                let (log, fail, id) = (log.clone(), fail.clone(), id_c.clone());
+                                async move {
+                                    log.lock().unwrap().note_start(&id);
+                                    let res = if id == "b" && fail.swap(false, Ordering::SeqCst) {
+                                        Err(anyhow::anyhow!("boom"))
+                                    } else {
+                                        Ok(serde_json::Value::Null)
+                                    };
+                                    log.lock().unwrap().note_finish(&id);
+                                    res
+                                }
+                            })
+                            .await?;
+                        }
+                        Ok(serde_json::Value::Null)
+                    }
+                }
+            })
+        };
+        let wf = wf();
+
+        // first run: b 失败
+        let out = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({})),
+        )
+        .outcome().await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Errored);
+        let run_id = out.run_id.clone();
+
+        // 关键：不传 continue_from，调用方自己先截断
+        store.truncate_log_at_step(&run_id, "b").unwrap();
+        let resumed = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id(run_id.clone()),
+        )
+        .outcome().await
+        .unwrap();
+
+        assert_eq!(resumed.status, RunStatus::Finished, "截断后应能跑完");
+        let l = log.lock().unwrap();
+        assert_eq!(l.runs["a"], 1, "a 的 checkpoint 前缀未受影响");
+        assert_eq!(l.runs["b"], 2, "b 应被重跑");
+    }
+
     #[tokio::test]
     async fn failed_is_terminal_until_continue_from() {
         let store = Arc::new(InMemoryStore::new());
