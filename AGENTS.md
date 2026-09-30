@@ -2,6 +2,43 @@
 - api 未稳定, 可以修改测试
 - 另外文件可以放项目下的 tmp/ 目录
 
+## `docs/reference/` 是生成物：改签名后要重生成，手改会被冲掉
+
+`docs/reference/` 由 `scripts/generate-docs.py` 从 rustdoc JSON 生成，**入库**（64 个
+文件，和上游一样）。三条规则：
+
+1. **不要手改 `docs/reference/` 下的文件。** 生成器是整目录重写的，手改的内容
+   下次生成就没了。这个坑踩过：`RunWorkflowOptions.md` 里那节「为什么把
+   `workflow` / `run_store` 也收进来」是生成之后手工加的，一直"好好的"，
+   直到有一天跑生成器才发现它早就不在了。
+2. **要写说明就写进 rustdoc 源注释**（struct / fn 上的 `///`）。生成器会把 item
+   的 doc 注释带进对应页面，`run_workflow_sync` 的排干说明就是这么进的。
+3. **改了 `packages/workflow_core` 的公开面就重跑**：
+
+   ```bash
+   python3 scripts/generate-docs.py     # 需要 nightly（内部跑 rustup run nightly cargo rustdoc）
+   ```
+
+   触发条件：签名改了（`run_workflow` / `run_workflow_sync` 刚按值收过 opts）、
+   新增/改名/删除公开 item（`Workflow` → `WorkflowDefinition` 那轮）、或者**只是
+   动了 core 源码导致行号位移**——生成页内嵌 `Defined in: ...#L123`，行号一变
+   就是 35 个文件的 diff。这属于必交的伴随改动，不要只提代码不提生成物。
+
+反过来说，**看到 `docs/reference/` 与源码不一致就是漂移了**（比如 type 改名后忘了
+重生成），以源码为准并补一次生成。
+
+## 验证命令
+
+```bash
+cargo check --workspace --all-targets
+cargo test --workspace --exclude aa_workflow_store_sqlx_postgres --no-fail-fast
+cargo test -p aa_workflow_store_sqlx_postgres --test contract   # 单独跑
+```
+
+`aa_workflow_store_sqlx_postgres` 的 **E2E** 会挂住（要真 Postgres），所以 workspace
+测试排除该包、它的共享契约测试单独跑。**不跑 rustfmt**——基线本身就不是 rustfmt 过的，
+跑一次就是几百行无关 diff。
+
 ## Store adapter 实现哪个契约：`WorkflowExecutionStore`（不是 `RunStore`）
 
 上游 `docs/api/store-adapters.md` 开篇就是这条规定：
