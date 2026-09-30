@@ -893,6 +893,7 @@ fn paused_state(run_id: &str, workflow_id: &str) -> RunState {
         error: None,
         waiting_for: None,
         pending_approval: None,
+        awaiting: vec![],
         created_at: 0,
         updated_at: 0,
     }
@@ -909,6 +910,7 @@ impl WithWait for RunState {
             step_id: Some("wait-step".into()),
             signal_name: name.into(),
             deadline: None,
+            meta: None,
         });
         self
     }
@@ -919,6 +921,7 @@ impl WithWait for RunState {
             approval_id: id.into(),
             title: "Approve?".into(),
             description: None,
+            meta: None,
         });
         self
     }

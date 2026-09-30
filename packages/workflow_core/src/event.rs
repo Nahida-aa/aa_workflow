@@ -107,6 +107,8 @@ pub enum WorkflowEvent {
         signal_name: String,
         due_at: Option<i64>,
         reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<serde_json::Value>,
     },
     /// Checkpoint (persisted): a signal was delivered for a paused run
     /// (see [`signal_run`](crate::engine::signal_run)). Resolves the pending

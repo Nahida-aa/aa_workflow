@@ -753,6 +753,7 @@ mod in_memory_tests {
             step_id: None,
             signal_name: signal.into(),
             deadline: None,
+            meta: None,
         })
     }
 
@@ -1036,6 +1037,7 @@ mod in_memory_tests {
                 approval_id: "a-1".into(),
                 title: "Approve?".into(),
                 description: None,
+                meta: None,
             }),
             wake_at: None,
             now: 0,

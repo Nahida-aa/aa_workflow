@@ -609,7 +609,47 @@ pub async fn exec_pause(
     reason: &str,
     deadline: Option<i64>,
 ) -> anyhow::Result<serde_json::Value> {
+    exec_pause_with(
+        inner,
+        step_id,
+        signal_name,
+        reason,
+        deadline,
+        None,
+        None,
+    )
+    .await
+}
+
+/// [`exec_pause`] 的完整形态：额外带 `meta`（落进 `StepPaused` checkpoint 与
+/// `RunState` 的三处投影）和 `validator`（恢复时校验 payload 形状）。
+///
+/// `meta` 落进 checkpoint 是有意的：观察者只读 `RunState` 就能渲染，不必回放
+/// 日志（对齐 `DurableOperationOptions.meta`「copied into the operation's log
+/// event」，`types.ts:29-31`）。
+///
+/// `validator` **不落盘** —— 它是代码而非数据，replay 时同一个
+/// `wait_for_event_with(..)` 调用点会重新装上同一个校验器。
+pub async fn exec_pause_with(
+    inner: &Arc<EngineRuntime>,
+    step_id: &str,
+    signal_name: &str,
+    reason: &str,
+    deadline: Option<i64>,
+    meta: Option<serde_json::Value>,
+    validator: Option<crate::define::PayloadValidator>,
+) -> anyhow::Result<serde_json::Value> {
     if let Some(payload) = find_resume(&inner.store, &inner.run_id, step_id) {
+        // 恢复路径：投递进来的 payload 先过声明的 schema 再交给 workflow。
+        // 校验失败 = run 报错（不是 park），因为数据已经在这了、run 不会
+        // 重新等待。
+        if let Some(v) = &validator {
+            v(&payload).map_err(|e| {
+                crate::error::WorkflowError::Validation(format!(
+                    "payload for `{signal_name}` (step `{step_id}`) failed its declared schema: {e}"
+                ))
+            })?;
+        }
         return Ok(payload);
     }
     // 被取消的 run 不该再挂起——直接以 Aborted 展开（原来由轮询循环里的检查
@@ -632,6 +672,7 @@ pub async fn exec_pause(
             signal_name: signal_name.to_string(),
             due_at: deadline,
             reason: reason.to_string(),
+            meta: meta.clone(),
         };
         inner.append(&ev)?;
         inner.publish(&ev);
@@ -646,12 +687,14 @@ pub async fn exec_pause(
                 approval_id: step_id.to_string(),
                 title: reason.to_string(),
                 description: None,
+                meta,
             }
         } else {
             WaitKind::Signal {
                 step_id: step_id.to_string(),
                 signal_name: signal_name.to_string(),
                 deadline,
+                meta,
             }
         },
     );
@@ -679,24 +722,65 @@ fn find_resume(
 }
 
 /// 挂起时的 RunState 投影种类。
+#[derive(Debug, Clone)]
 enum WaitKind {
     Signal {
         step_id: String,
         signal_name: String,
         deadline: Option<i64>,
+        meta: Option<serde_json::Value>,
     },
     Approval {
         step_id: String,
         approval_id: String,
         title: String,
         description: Option<String>,
+        meta: Option<serde_json::Value>,
     },
 }
 
-/// 挂起时把 RunState 投影成 `Paused` + `waiting_for` / `pending_approval`
-/// （对齐 TanStack `RunState`）。fresh 与崩溃后 replay 都会调用，保证
-/// observer 不需要扫事件日志就知道 run 在等什么。best-effort：失败忽略，
-/// 事件日志仍为准。
+impl WaitKind {
+    /// 规范形（`RunState.awaiting` 的元素）。与两个镜像同源，避免三处漂移。
+    fn to_awaitable(&self) -> crate::run_store::RunAwaitable {
+        use crate::run_store::RunAwaitable;
+        match self {
+            WaitKind::Signal {
+                step_id,
+                signal_name,
+                deadline,
+                meta,
+            } => RunAwaitable::Signal {
+                step_id: Some(step_id.clone()),
+                signal_name: signal_name.clone(),
+                deadline: *deadline,
+                meta: meta.clone(),
+            },
+            WaitKind::Approval {
+                step_id,
+                approval_id,
+                title,
+                description,
+                meta,
+            } => RunAwaitable::Approval {
+                step_id: Some(step_id.clone()),
+                approval_id: approval_id.clone(),
+                title: title.clone(),
+                description: description.clone(),
+                meta: meta.clone(),
+            },
+        }
+    }
+}
+
+/// 挂起时把 RunState 投影成 `Paused` + `awaiting` / `waiting_for` /
+/// `pending_approval`（对齐 TanStack `RunState`）。fresh 与崩溃后 replay 都会
+/// 调用，保证 observer 不需要扫事件日志就知道 run 在等什么。best-effort：失败
+/// 忽略，事件日志仍为准。
+///
+/// **一次写三处**：`awaiting`（规范形）由 [`WaitKind::to_awaitable`] 从同一份
+/// 数据派生，两个镜像分别填对应的一个、清另一个。上游
+/// `run-workflow.ts:950`/`:1059` 也是三处同写。四处赋值（规范形 + 两镜像 ×2
+/// 互清）都在这里，**别在别处再单独改镜像** —— 漂移了就对不上了。
 fn project_run_wait(store: &Arc<dyn RunStore>, run_id: &str, kind: WaitKind) {
     if let Ok(Some(mut st)) = store.get_run_state(run_id) {
         // 已终局（含被 cancel_run 置为 Aborted）——不覆盖成 Paused。
@@ -708,16 +792,20 @@ fn project_run_wait(store: &Arc<dyn RunStore>, run_id: &str, kind: WaitKind) {
         }
         st.status = RunStatus::Paused;
         st.updated_at = now_ms();
-        match kind {
+        // 规范形先落，再填镜像。
+        st.awaiting = vec![kind.to_awaitable()];
+        match &kind {
             WaitKind::Signal {
                 step_id,
                 signal_name,
                 deadline,
+                meta,
             } => {
                 st.waiting_for = Some(crate::run_store::WaitForState {
-                    step_id: Some(step_id),
-                    signal_name,
-                    deadline,
+                    step_id: Some(step_id.clone()),
+                    signal_name: signal_name.clone(),
+                    deadline: *deadline,
+                    meta: meta.clone(),
                 });
                 st.pending_approval = None;
             }
@@ -726,12 +814,14 @@ fn project_run_wait(store: &Arc<dyn RunStore>, run_id: &str, kind: WaitKind) {
                 approval_id,
                 title,
                 description,
+                meta,
             } => {
                 st.pending_approval = Some(crate::run_store::PendingApproval {
-                    step_id: Some(step_id),
-                    approval_id,
-                    title,
-                    description,
+                    step_id: Some(step_id.clone()),
+                    approval_id: approval_id.clone(),
+                    title: title.clone(),
+                    description: description.clone(),
+                    meta: meta.clone(),
                 });
                 st.waiting_for = None;
             }
@@ -2894,5 +2984,225 @@ mod tests {
             ),
             _ => unreachable!(),
         }
+    }
+
+    // ── await 信封：awaiting 规范形 + meta + payload schema ────────────
+
+    /// 挂起时 `awaiting`（规范形）与两个镜像**由同一份数据派生**，三处不许漂移。
+    /// 这是对齐上游 `run-workflow.ts:950`/`:1059` 的三处同写。
+    #[tokio::test]
+    async fn project_run_wait_writes_awaiting_and_both_mirrors() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("aw").handler(|ctx: WorkflowCtx| async move {
+            ctx.wait_for_event_with(
+                "hold",
+                "go",
+                crate::define::WaitForEventOptions {
+                    deadline: Some(1_800_000_000_000),
+                    meta: Some(serde_json::json!({ "ui": "warn" })),
+                    schema: None,
+                },
+            )
+            .await?;
+            Ok(serde_json::json!({}))
+        });
+        let out = run_workflow(
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("aw1"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Paused);
+
+        let st = store.get_run_state("aw1").unwrap().unwrap();
+        // 规范形：一个元素，带 type 判别式
+        assert_eq!(st.awaiting.len(), 1, "awaiting 应恰好一个元素");
+        let crate::run_store::RunAwaitable::Signal {
+            step_id,
+            signal_name,
+            deadline,
+            meta,
+        } = &st.awaiting[0]
+        else {
+            panic!("awaiting[0] 应是 Signal，实际 {:?}", st.awaiting[0]);
+        };
+        assert_eq!(step_id.as_deref(), Some("hold"));
+        assert_eq!(signal_name, "go");
+        assert_eq!(*deadline, Some(1_800_000_000_000));
+        assert_eq!(meta.as_ref().unwrap()["ui"], "warn");
+
+        // 镜像与规范形一致 —— 同一份信息两种看法
+        let w = st.waiting_for.as_ref().expect("waiting_for 镜像");
+        assert_eq!(w.step_id.as_deref(), Some("hold"));
+        assert_eq!(w.signal_name, "go");
+        assert_eq!(w.deadline, Some(1_800_000_000_000));
+        assert_eq!(w.meta.as_ref().unwrap()["ui"], "warn");
+        assert!(st.pending_approval.is_none(), "signal 等待不该有 approval 镜像");
+
+        // meta 同时落进 StepPaused checkpoint（观察者只读日志也能拿到）
+        let evs = store.get_events("aw1").unwrap();
+        let paused = evs
+            .iter()
+            .find_map(|e| match e {
+                WorkflowEvent::StepPaused { meta, .. } => Some(meta.clone()),
+                _ => None,
+            })
+            .expect("应有 StepPaused");
+        assert_eq!(paused.as_ref().unwrap()["ui"], "warn");
+    }
+
+    /// approval 走另一条分支：`awaiting[0]` 应是 Approval 判别式，
+    /// `pending_approval` 镜像填上、`waiting_for` 清空。
+    #[tokio::test]
+    async fn approval_wait_projects_approval_awaitable() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("ap").handler(|ctx: WorkflowCtx| async move {
+            ctx.approve_with(
+                "gate",
+                "放行这笔？",
+                crate::define::ApproveOptions {
+                    deadline: None,
+                    meta: Some(serde_json::json!({ "amount": 9000 })),
+                    schema: None,
+                },
+            )
+            .await?;
+            Ok(serde_json::json!({}))
+        });
+        let out = run_workflow(
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("ap1"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Paused);
+
+        let st = store.get_run_state("ap1").unwrap().unwrap();
+        assert!(matches!(
+            st.awaiting[0],
+            crate::run_store::RunAwaitable::Approval { .. }
+        ));
+        assert!(st.waiting_for.is_none(), "approval 不该有 signal 镜像");
+        let a = st.pending_approval.as_ref().expect("approval 镜像");
+        assert_eq!(a.approval_id, "gate");
+        assert_eq!(a.title, "放行这笔？");
+        assert_eq!(a.meta.as_ref().unwrap()["amount"], 9000);
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Decision {
+        approved: bool,
+    }
+
+    /// 声明了 schema 的等待：投递**形状不对**的 payload → run 报错，
+    /// 而不是把脏数据交给 workflow。
+    #[tokio::test]
+    async fn declared_payload_schema_rejects_bad_payload() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("sch").handler(|ctx: WorkflowCtx| async move {
+            let v = ctx
+                .wait_for_event_with(
+                    "hold",
+                    "go",
+                    crate::define::WaitForEventOptions {
+                        deadline: None,
+                        meta: None,
+                        schema: Some(crate::define::PayloadSchema::of::<Decision>()),
+                    },
+                )
+                .await?;
+            // 校验过了，这行才安全。
+            let d: Decision = serde_json::from_value(v)?;
+            Ok(serde_json::json!({ "approved": d.approved }))
+        });
+        // 先挂起
+        let out = run_workflow(
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("sc1"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Paused);
+
+        // 投递一个缺 `approved` 字段的 payload
+        signal_run(store.as_ref(), "sc1", "hold", serde_json::json!({ "ok": 1 })).unwrap();
+        let out2 = run_workflow(
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("sc1"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out2.status, RunStatus::Errored, "坏 payload 应让 run 报错");
+    }
+
+    /// 同一机制的正向：形状对就正常恢复。
+    #[tokio::test]
+    async fn declared_payload_schema_accepts_good_payload() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("sch2").handler(|ctx: WorkflowCtx| async move {
+            let v = ctx
+                .wait_for_event_with(
+                    "hold",
+                    "go",
+                    crate::define::WaitForEventOptions {
+                        deadline: None,
+                        meta: None,
+                        schema: Some(crate::define::PayloadSchema::of::<Decision>()),
+                    },
+                )
+                .await?;
+            let d: Decision = serde_json::from_value(v)?;
+            Ok(serde_json::json!({ "approved": d.approved }))
+        });
+        run_workflow(
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("sc2"),
+        )
+        .await
+        .unwrap();
+        signal_run(
+            store.as_ref(),
+            "sc2",
+            "hold",
+            serde_json::json!({ "approved": true }),
+        )
+        .unwrap();
+        let out = run_workflow(
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("sc2"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        assert_eq!(out.output.unwrap()["approved"], true);
+    }
+
+    /// 旧的两参数 `wait_for_event` / `approve` 仍是无选项版本 —— 投影里
+    /// `deadline`/`meta` 为 None，`awaiting` 照样有（保证规范形非空）。
+    #[tokio::test]
+    async fn plain_wait_for_event_has_empty_options() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let wf = Workflow::new("plain").handler(|ctx: WorkflowCtx| async move {
+            ctx.wait_for_event("hold", "go").await?;
+            Ok(serde_json::json!({}))
+        });
+        run_workflow(
+            &RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("pl1"),
+        )
+        .await
+        .unwrap();
+        let st = store.get_run_state("pl1").unwrap().unwrap();
+        let w = st.waiting_for.as_ref().unwrap();
+        assert_eq!(w.deadline, None, "无选项时不该有 deadline");
+        assert_eq!(w.meta, None, "无选项时不该有 meta");
+        assert_eq!(st.awaiting.len(), 1, "规范形照样要写");
     }
 }

@@ -242,6 +242,7 @@ fn run_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<WorkflowExecution
 fn run_state_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<RunState> {
     let status: String = row.try_get("status")?;
     let error: Option<serde_json::Value> = row.try_get("error")?;
+    let awaiting: Option<serde_json::Value> = row.try_get("awaiting")?;
     let waiting_for: Option<serde_json::Value> = row.try_get("waiting_for")?;
     let pending_approval: Option<serde_json::Value> = row.try_get("pending_approval")?;
     Ok(RunState {
@@ -252,6 +253,9 @@ fn run_state_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<RunState> {
         input: decode_json(row.try_get("input")?),
         output: decode_opt_json_nullable(row.try_get("output")?),
         error: error.and_then(|v| serde_json::from_value(v).ok()),
+        awaiting: awaiting
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default(),
         waiting_for: waiting_for.and_then(|v| serde_json::from_value(v).ok()),
         pending_approval: pending_approval.and_then(|v| serde_json::from_value(v).ok()),
         created_at: row.try_get("created_at")?,
@@ -368,7 +372,7 @@ impl WorkflowRunStoreAdapterStore for SqlxPostgresStore {
         self.block(async move {
         let row = sqlx::query(
             "select run_id, workflow_id, workflow_version, status, input, output, error, \
-                    waiting_for, pending_approval, created_at, updated_at \
+                    awaiting, waiting_for, pending_approval, created_at, updated_at \
              from workflow_run_states where run_id = $1",
         )
         .bind(run_id)
@@ -384,6 +388,7 @@ impl WorkflowRunStoreAdapterStore for SqlxPostgresStore {
         let input = serde_json::to_value(&state.input)?;
         let output = serde_json::to_value(state.output.as_ref())?;
         let error = serde_json::to_value(state.error.as_ref())?;
+        let awaiting = serde_json::to_value(&state.awaiting)?;
         let waiting_for = serde_json::to_value(state.waiting_for.as_ref())?;
         let pending_approval = serde_json::to_value(state.pending_approval.as_ref())?;
 
@@ -416,8 +421,9 @@ impl WorkflowRunStoreAdapterStore for SqlxPostgresStore {
 
         sqlx::query(
             "insert into workflow_run_states (run_id, workflow_id, workflow_version, status, \
-                input, output, error, waiting_for, pending_approval, created_at, updated_at) \
-             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) \
+                input, output, error, awaiting, waiting_for, pending_approval, created_at, \
+                updated_at) \
+             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) \
              on conflict (run_id) do update set \
                 workflow_id = excluded.workflow_id, \
                 workflow_version = excluded.workflow_version, \
@@ -425,6 +431,7 @@ impl WorkflowRunStoreAdapterStore for SqlxPostgresStore {
                 input = excluded.input, \
                 output = excluded.output, \
                 error = excluded.error, \
+                awaiting = excluded.awaiting, \
                 waiting_for = excluded.waiting_for, \
                 pending_approval = excluded.pending_approval, \
                 created_at = excluded.created_at, \
@@ -437,6 +444,7 @@ impl WorkflowRunStoreAdapterStore for SqlxPostgresStore {
         .bind(input)
         .bind(output)
         .bind(error)
+        .bind(awaiting)
         .bind(waiting_for)
         .bind(pending_approval)
         .bind(state.created_at)

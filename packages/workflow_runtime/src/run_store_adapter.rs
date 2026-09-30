@@ -492,6 +492,7 @@ mod adapter_tests {
             input: serde_json::Value::Null,
             output: None,
             error: None,
+            awaiting: vec![],
             waiting_for: None,
             pending_approval: None,
             created_at: 0,

@@ -1551,10 +1551,12 @@ mod driver_tests {
                     input: serde_json::json!({}),
                     output: None,
                     error: None,
+                    awaiting: vec![],
                     waiting_for: Some(WaitForState {
                         step_id: Some("hold".into()),
                         signal_name: "__timer".into(),
                         deadline: Some(now + 30),
+                        meta: None,
                     }),
                     pending_approval: None,
                     created_at: now,
@@ -1585,6 +1587,7 @@ mod driver_tests {
                         signal_name: "__timer".into(),
                         due_at: Some(now + 30),
                         reason: "sleep".into(),
+                        meta: None,
                     },
                 ],
             })

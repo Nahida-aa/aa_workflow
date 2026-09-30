@@ -183,23 +183,14 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
   成功、实际全部短路）
 - **`RunState`**：本仓 `waiting_for` / `pending_approval` 是两个具名槽；上游用
   `awaiting: RunAwaitable[]`（数组 + `type` 判别式）作**规范形**，两个具名字段是
-  **镜像**。详见下一节——这是**真缺口**
+  **镜像**。**2026-09-30 已补齐**（见下一节）
 - **错误**：本仓 `StoreError` 枚举；上游只有 `LogConflictError` 一个 class
 - **`RetryPolicy`**：本仓具名 struct；上游内联 union（`'exponential' | 'fixed' | fn`）
 
-## 真缺口：`RunState` 的 await 信封缺 `awaiting` / `meta`
+## await 信封：`awaiting` / `meta` / `deadline` / `schema`（2026-09-30 补齐）
 
-上游 `RunState`（`types.ts:540-576`）挂 **3** 个 await 相关字段，本仓只有 2 个：
-
-| 上游 | 本仓 | 状态 |
-| --- | --- | --- |
-| `awaiting?: RunAwaitable[]` | — | ❌ **完全没有** |
-| `waitingFor?: { stepId?, signalName, deadline?, meta? }` | `waiting_for: Option<WaitForState>` | ⚠️ 有，但**无 `meta`** |
-| `pendingApproval?: { stepId?, approvalId, title, description?, meta? }` | `pending_approval: Option<PendingApproval>` | ⚠️ 有，但**无 `meta`** |
-
-### 1. 缺 `awaiting`（规范形）
-
-上游 `run-workflow.ts:950` / `:1059` 在挂起时**同时**写三样：
+上游 `RunState`（`types.ts:540-576`）挂 **3** 个 await 相关字段。上游
+`run-workflow.ts:950` / `:1059` 挂起时**同时**写三样：
 
 ```ts
 awaiting: [{ type: 'signal', stepId, signalName, deadline, meta }],  // 规范形
@@ -216,23 +207,38 @@ pendingApproval: undefined,                                          // 清另�
 > awaitable at a time**, but the persisted shape can represent future
 > fan-out/race primitives **without replacing the run schema**.
 
-**「每次 drive 恒定一个 awaitable」对本仓同样成立**（已实测，见下），所以缺
-`awaiting` **今天不丢任何功能**。差别在形状：将来上 fan-out / race 原语时，上游
-只往数组里加元素，本仓得改 `RunState` 的 schema + 写迁移。
+本仓已按此补齐：
 
-### 2. 缺 `meta`（功能缺口，不只是形状）
-
-上游 `WaitForEventOptions`（`types.ts:268-279`）有三个选项，本仓
-`wait_for_event(key, event_name)`（`define/mod.rs:274`）**一个都没有**：
-
-| 上游选项 | 本仓 | 后果 |
+| 上游 | 本仓 | 说明 |
 | --- | --- | --- |
-| `deadline?` | ❌ 硬编码 `None`（`exec_pause(..., None)`） | 非 sleep 的等待**无法设唤醒期限**，host 建不了时间索引的 worker job |
-| `meta?` | ❌ | 等待点**挂不上给 UI 渲染的自由元数据**（`StepPaused` 事件也没有 `meta`） |
-| `schema?` | ❌ | 恢复前**无法校验 payload 形状** |
+| `awaiting?: RunAwaitable[]` | `RunState.awaiting: Vec<RunAwaitable>` | 规范形；`RunAwaitable` 带 `type` 判别式（`signal` / `approval`） |
+| `waitingFor?` | `WaitForState` | 镜像，**加了 `meta`** |
+| `pendingApproval?` | `PendingApproval` | 镜像，**加了 `meta`** |
+| `WaitForEventOptions.{deadline,meta,schema}` | `WaitForEventOptions` + `wait_for_event_with` | 三个选项齐全 |
+| `ApproveOptions` | `ApproveOptions` + `approve_with` | `deadline` / `meta` / `schema` |
+| `schema?: StandardSchemaV1` | `PayloadSchema::of::<T>()` | 上游用 zod/valibot 通用接口；Rust 无运行时 schema 生态，沿用本仓 `state_schema::<T>()` 的同一约定：**`T: Deserialize` 就是 schema** |
 
-`DurableOperationOptions`（`types.ts:24-32`）另有 `id?` / `meta?`；本仓对应位置
-只有 `StepOptions::meta`，durable op 上没有。
+三处投影由 `project_run_wait` **一次写入**（`WaitKind::to_awaitable` 从同一份数据
+派生规范形，镜像分别填对应的一个、清另一个），避免漂移。
+
+⚠️ **字段名保持本仓一贯的 snake_case 落盘**（`RunState` 全家都是），`RunAwaitable`
+只为 `type` 加了判别式，没有逐字段 `rename` 成 camelCase。跨语言逐字段一致不是本
+项目需求（见本文「为什么『落盘 JSON 与 TS 逐字段一致』不是需求」）。
+
+### 向后兼容
+
+三个新字段全是 `#[serde(default)]` / `Option`，**历史数据不用迁移**：
+
+- 老 `RunState` JSON 没有 `awaiting` 键 → 读成空数组（`run_store/mod.rs` 的
+  `legacy_run_state_without_awaiting_still_deserializes` 钉住）
+- 老 `StepPaused` checkpoint 没有 `meta` → 读成 `None`（事件日志是 append-only，
+  **加字段不能让历史日志无法重放**，同文件 `legacy_step_paused_without_meta_still_deserializes`）
+- 空 `awaiting` 用 `skip_serializing_if` 省略 —— 绝大多数 run 从不挂起，不该给它们
+  凭空加个 `awaiting: []`
+
+`workflow_run_states.awaiting` / `workflow_runs.awaiting` 两列**在加这个字段之前就
+存在于 `migrations/0000_workflow_store.sql:26,53`**，只是 SQL 从不读也从不写；本次
+把 `load_run_state` / `save_run_state` 接上，**无需新迁移**。
 
 ## 实测：为什么「每次 drive 一个 awaitable」成立
 

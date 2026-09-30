@@ -219,13 +219,28 @@ impl<TInput, TState, TCtxExt> BaseCtx<TInput, TState, TCtxExt> {
     where
         TState: serde::Serialize,
     {
+        self.approve_with(key, reason, ApproveOptions::default()).await
+    }
+
+    /// [`Self::approve`] + [`ApproveOptions`]（`meta` / payload `schema`）。
+    pub async fn approve_with(
+        &self,
+        key: impl Into<String>,
+        reason: impl AsRef<str>,
+        opts: ApproveOptions,
+    ) -> anyhow::Result<serde_json::Value>
+    where
+        TState: serde::Serialize,
+    {
         self.flush_state()?;
-        crate::engine::exec_pause(
+        crate::engine::exec_pause_with(
             &self.engine,
             &key.into(),
             "__approval",
             reason.as_ref(),
-            None,
+            opts.deadline,
+            opts.meta,
+            opts.schema.map(|v| v.validator),
         )
         .await
     }
@@ -279,9 +294,33 @@ impl<TInput, TState, TCtxExt> BaseCtx<TInput, TState, TCtxExt> {
     where
         TState: serde::Serialize,
     {
+        self.wait_for_event_with(key, event_name, WaitForEventOptions::default())
+            .await
+    }
+
+    /// [`Self::wait_for_event`] + [`WaitForEventOptions`]（`deadline` / `meta` /
+    /// payload `schema`）。对齐 TanStack `WaitForEventOptions`（`types.ts:268-279`）。
+    pub async fn wait_for_event_with(
+        &self,
+        key: impl Into<String>,
+        event_name: impl AsRef<str>,
+        opts: WaitForEventOptions,
+    ) -> anyhow::Result<serde_json::Value>
+    where
+        TState: serde::Serialize,
+    {
         let name = event_name.as_ref();
         self.flush_state()?;
-        crate::engine::exec_pause(&self.engine, &key.into(), name, "event", None).await
+        crate::engine::exec_pause_with(
+            &self.engine,
+            &key.into(),
+            name,
+            "event",
+            opts.deadline,
+            opts.meta,
+            opts.schema.map(|v| v.validator),
+        )
+        .await
     }
 
     /// Emit an observability event to the publisher. Never appended to the
@@ -478,6 +517,64 @@ type InitializeFn =
 
 /// Shape-check for the initial state (installed by `Workflow::state_schema::<T>()`).
 type StateValidatorFn = Arc<dyn Fn(&serde_json::Value) -> anyhow::Result<()> + Send + Sync>;
+
+/// 恢复 payload 的形状校验器（对齐 TanStack `WaitForEventOptions.schema`，
+/// `types.ts:276-277`）。**代码而非数据**：不落进 `StepPaused` checkpoint，
+/// replay 时同一个 `wait_for_event_with(..)` 调用点重新装上同一个校验器。
+pub type PayloadValidator = Arc<dyn Fn(&serde_json::Value) -> anyhow::Result<()> + Send + Sync>;
+
+/// 一个具名的 payload 形状声明。由 [`PayloadSchema::of::<T>`] 构造。
+///
+/// 上游用 `StandardSchemaV1`（zod/valibot 通用接口）；Rust 侧没有那种运行时
+/// schema 生态，最接近的既有物是 `serde` 的 `Deserialize`（和
+/// `Workflow::state_schema::<T>()` 同一个约定：`T` 就是 schema）。
+#[derive(Clone)]
+pub struct PayloadSchema {
+    validator: PayloadValidator,
+}
+
+impl PayloadSchema {
+    /// 用 `T` 作 schema：`T: Deserialize` 决定接受的 payload 形状。
+    pub fn of<T: serde::de::DeserializeOwned + Send + Sync + 'static>() -> Self {
+        Self {
+            validator: Arc::new(|v| {
+                serde_json::from_value::<T>(v.clone())?;
+                Ok(())
+            }),
+        }
+    }
+}
+
+impl std::fmt::Debug for PayloadSchema {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PayloadSchema(<opaque>)")
+    }
+}
+
+/// [`BaseCtx::wait_for_event_with`] 的选项（对齐 TanStack
+/// `WaitForEventOptions`，`types.ts:268-279`）。
+#[derive(Default, Clone, Debug)]
+pub struct WaitForEventOptions {
+    /// 绝对 UTC ms 唤醒期限。落进 `StepPaused.due_at` 和
+    /// `RunState.waiting_for.deadline`，供 host 建时间索引的 worker job。
+    pub deadline: Option<i64>,
+    /// 自由元数据，落进 `StepPaused.meta` 与 `RunState` 的三处 await 投影。
+    pub meta: Option<serde_json::Value>,
+    /// 恢复时对投递 payload 的形状校验（`schema`）。校验失败 → run 报错。
+    pub schema: Option<PayloadSchema>,
+}
+
+/// [`BaseCtx::approve_with`] 的选项（对齐 TanStack `ApproveOptions` +
+/// `RunAwaitable` 的 approval 变体，`types.ts:307-312` / `:521-528`）。
+#[derive(Default, Clone, Debug)]
+pub struct ApproveOptions {
+    /// 绝对 UTC ms 期限；`None` = 等人，无时间上限。
+    pub deadline: Option<i64>,
+    /// 自由元数据（如审批单链接、金额、影响面），落进 checkpoint + 投影。
+    pub meta: Option<serde_json::Value>,
+    /// 恢复时对审批决定 payload 的形状校验。
+    pub schema: Option<PayloadSchema>,
+}
 
 /// A declared workflow: id, optional version, the async handler, plus the
 /// builder-derived extras (`description`, `default_step_retry`, `middlewares`,

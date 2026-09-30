@@ -232,6 +232,7 @@ mod tests {
             input: serde_json::json!({"x": 1}),
             output: None,
             error: None,
+            awaiting: vec![],
             waiting_for: None,
             pending_approval: None,
             created_at: 1,

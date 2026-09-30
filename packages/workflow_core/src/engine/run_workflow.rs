@@ -350,6 +350,7 @@ pub async fn run_workflow(
             error: None,
             waiting_for: None,
             pending_approval: None,
+            awaiting: vec![],
             created_at: ts,
             updated_at: ts,
         },

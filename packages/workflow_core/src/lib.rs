@@ -50,8 +50,9 @@ pub mod resource;
 pub mod run_store;
 
 pub use define::{
-    Backoff, BaseCtx, CreateWorkflowConfig, RetryPolicy, StepCtx, StepOptions, Workflow,
-    WorkflowBuilder, WorkflowCtx, WorkflowDefinition, create_workflow,
+    ApproveOptions, Backoff, BaseCtx, CreateWorkflowConfig, PayloadSchema, PayloadValidator,
+    RetryPolicy, StepCtx, StepOptions, WaitForEventOptions, Workflow, WorkflowBuilder, WorkflowCtx,
+    WorkflowDefinition, create_workflow,
 };
 pub use engine::{Operation, diff_state, snapshot_state};
 pub use engine::{
@@ -63,5 +64,5 @@ pub use event::{RunStatus, StepAttempt, StepState, StepStatus, WorkflowEvent, fo
 pub use middleware::{CtxProducer, CtxWrapper, Middleware};
 pub use resource::{Gate, GateGuard, ResourceKey};
 pub use run_store::{
-    DeleteReason, InMemoryStore, PendingApproval, RunState, RunStore, WaitForState,
+    DeleteReason, InMemoryStore, PendingApproval, RunAwaitable, RunState, RunStore, WaitForState,
 };

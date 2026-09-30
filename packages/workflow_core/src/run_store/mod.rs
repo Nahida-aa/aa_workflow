@@ -24,6 +24,10 @@ pub struct WaitForState {
     pub step_id: Option<String>,
     pub signal_name: String,
     pub deadline: Option<i64>,
+    /// 自由元数据（对齐 TanStack `RunState.waitingFor.meta`，
+    /// `types.ts:558`），host / UI 拿去渲染，不参与引擎判定。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
 }
 
 /// 挂起中的审批（对齐 TanStack `RunState.pendingApproval`）。我们的
@@ -35,6 +39,48 @@ pub struct PendingApproval {
     pub approval_id: String,
     pub title: String,
     pub description: Option<String>,
+    /// 自由元数据（对齐 TanStack `RunState.pendingApproval.meta`，
+    /// `types.ts:562`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
+}
+
+/// 一个挂起中的等待（对齐 TanStack `RunAwaitable`，`types.ts:517-529`）。
+///
+/// 这是 `RunState.awaiting` 的元素类型，也是**规范形**（canonical）：数组 +
+/// `type` 判别式。上游 `run-workflow.ts:950` / `:1059` 挂起时**同时**写
+/// `awaiting` 和两个镜像字段 `waitingFor` / `pendingApproval`；后者是给「只关心
+/// 当前这一个等待」的观察者看的便利视图，本类型才是完整表达。
+///
+/// 为什么是数组而当前只有一个元素：上游 `types.ts:548-551` 明说
+/// “Current engine versions only create one awaitable at a time, but the
+/// persisted shape can represent future fan-out/race primitives **without
+/// replacing the run schema**”。本仓同样一次 drive 恒定一个 awaitable
+/// （`exec_pause` 直接 `Err(WorkflowParked)`，第一个 park 就短路，见
+/// `docs/tanstack-alignment.md`「实测：为什么『每次 drive 一个 awaitable』成立」），
+/// 但把形状对齐成数组，将来上 fan-out / race 原语时只加元素、不改 schema。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum RunAwaitable {
+    Signal {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        step_id: Option<String>,
+        signal_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deadline: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<serde_json::Value>,
+    },
+    Approval {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        step_id: Option<String>,
+        approval_id: String,
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<serde_json::Value>,
+    },
 }
 
 /// Minimal, durable metadata for a run. The heavy state lives in the event
@@ -91,6 +137,11 @@ pub struct RunState<TInput = serde_json::Value, TOutput = serde_json::Value> {
     pub input: TInput,
     pub output: Option<TOutput>,
     pub error: Option<RunError>,
+    /// 挂起等待中的**全部** awaitable（对齐 TanStack `RunState.awaiting`，
+    /// `types.ts:552`）。这是**规范形**；下面两个字段是它的**镜像**，同一份
+    /// 信息的两种看法。当前恒定 ≤1 个元素（见 [`RunAwaitable`] 的说明）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub awaiting: Vec<RunAwaitable>,
     /// 挂起等待外部 signal / sleep 到期（sleep 有 deadline）。
     #[serde(default)]
     pub waiting_for: Option<WaitForState>,
@@ -124,6 +175,7 @@ impl RunState<serde_json::Value, serde_json::Value> {
             error: self.error,
             waiting_for: self.waiting_for,
             pending_approval: self.pending_approval,
+            awaiting: self.awaiting,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -280,6 +332,7 @@ mod tests {
             input: serde_json::json!({ "orderId": "A-1" }),
             output,
             error: None,
+            awaiting: vec![],
             waiting_for: None,
             pending_approval: None,
             created_at: 1,
@@ -363,6 +416,7 @@ mod tests {
             step_id: None,
             signal_name: "payment".into(),
             deadline: None,
+            meta: None,
         };
         let v = serde_json::to_value(&w).unwrap();
         assert!(v.get("step_id").is_none());
@@ -380,5 +434,105 @@ mod tests {
             .expect("写入 RunState");
         store.delete_run("r", DeleteReason::Finished).unwrap();
         assert!(store.get_run_state("r").unwrap().is_none());
+    }
+
+    // ── awaiting 规范形（对齐 TanStack RunState.awaiting）────────────────
+
+    /// `awaiting` 空时**不该**出现在序列化的 RunState 里（`skip_serializing_if`）
+    /// ——绝大多数 run 从不挂起，不该给它们凭空加个 `awaiting: []`。
+    #[test]
+    fn empty_awaiting_is_omitted_from_json() {
+        let v = serde_json::to_value(erased(None)).unwrap();
+        assert!(v.get("awaiting").is_none(), "空 awaiting 不该落进 JSON");
+    }
+
+    /// 规范形的 `type` 判别式，对齐上游 `RunAwaitable`（`types.ts:517-529`）。
+    ///
+    /// 字段名保持本 crate 一贯的 snake_case 落盘（`RunState` 全家都是），不为了
+    /// 逐字段对齐 TS 而破例——跨语言逐字段一致不是本项目需求（见
+    /// `docs/tanstack-alignment.md`「为什么『落盘 JSON 与 TS 逐字段一致』不是需求」）。
+    #[test]
+    fn run_awaitable_serializes_with_type_tag() {
+        let sig = RunAwaitable::Signal {
+            step_id: Some("wait-step".into()),
+            signal_name: "payment".into(),
+            deadline: Some(1_700_000_000_000),
+            meta: Some(serde_json::json!({ "ui": { "tone": "warn" } })),
+        };
+        let v = serde_json::to_value(&sig).unwrap();
+        assert_eq!(v["type"], "signal");
+        assert_eq!(v["signal_name"], "payment");
+        assert_eq!(v["step_id"], "wait-step");
+        assert_eq!(v["deadline"], 1_700_000_000_000i64);
+        assert_eq!(v["meta"]["ui"]["tone"], "warn");
+        assert_eq!(serde_json::from_value::<RunAwaitable>(v).unwrap(), sig);
+
+        let app = RunAwaitable::Approval {
+            step_id: Some("gate".into()),
+            approval_id: "gate".into(),
+            title: "放行？".into(),
+            description: Some("金额超限".into()),
+            meta: None,
+        };
+        let v = serde_json::to_value(&app).unwrap();
+        assert_eq!(v["type"], "approval");
+        assert_eq!(v["approval_id"], "gate");
+        assert_eq!(v["title"], "放行？");
+        assert!(v.get("meta").is_none(), "meta=None 不该出现");
+    }
+
+    /// **向后兼容**：本字段加入前落盘的 RunState JSON 没有 `awaiting` 键，
+    /// 必须读得动（`#[serde(default)]`）。同理两个镜像的 `meta`。
+    ///
+    /// 这条是硬要求：store 里躺着的历史 run 不能因为我们加了个字段就全变砖。
+    #[test]
+    fn legacy_run_state_without_awaiting_still_deserializes() {
+        // snake_case：本 crate 的 serde 属性是逐字段 `rename` 的（没有全局
+        // rename_all），所以历史落盘 JSON 长这样。
+        let legacy = serde_json::json!({
+            "run_id": "r-old",
+            "workflow_id": "order",
+            "workflow_version": "v1",
+            "status": "paused",
+            "input": { "orderId": "A-1" },
+            "output": null,
+            "error": null,
+            "waiting_for": { "step_id": "wait-step", "signal_name": "payment", "deadline": null },
+            "pending_approval": null,
+            "created_at": 1,
+            "updated_at": 2
+        });
+        let st: RunState = serde_json::from_value(legacy).unwrap();
+        assert_eq!(st.run_id, "r-old");
+        assert!(st.awaiting.is_empty(), "缺失的 awaiting 应默认为空");
+        // 镜像里的 meta 缺失也应为 None。
+        assert_eq!(
+            st.waiting_for.as_ref().unwrap().meta,
+            None,
+            "缺失的 meta 应默认为 None"
+        );
+        // 镜像本身照旧读得动 —— 向后兼容的重点在这。
+        assert_eq!(st.waiting_for.as_ref().unwrap().signal_name, "payment");
+    }
+
+    /// 旧 `StepPaused` checkpoint（无 `meta`）也要读得动 —— 事件日志是 append-only，
+    /// 加字段不能让历史日志无法重放。
+    #[test]
+    fn legacy_step_paused_without_meta_still_deserializes() {
+        let legacy = serde_json::json!({
+            "type": "STEP_PAUSED",
+            "ts": 1,
+            "run_id": "r",
+            "step_id": "gate",
+            "signal_name": "__approval",
+            "due_at": null,
+            "reason": "放行？"
+        });
+        let ev: crate::event::WorkflowEvent = serde_json::from_value(legacy).unwrap();
+        let crate::event::WorkflowEvent::StepPaused { step_id, meta, .. } = &ev else {
+            panic!("应解析为 StepPaused，实际 {ev:?}");
+        };
+        assert_eq!(step_id, "gate");
+        assert_eq!(*meta, None);
     }
 }
