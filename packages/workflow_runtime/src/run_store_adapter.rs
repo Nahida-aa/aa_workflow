@@ -445,10 +445,6 @@ impl RunStore for RunStoreAdapter {
             .map_err(to_store_error)
     }
 
-    // 注意这里**没有** `truncate_log_at_step`：那是 core `RunStore` 上的可选
-    // 能力（默认体返回 `Err`），基础层 `WorkflowRunStoreAdapterStore` 没有对应
-    // 物，适配器也就没有可转发的目标，故不实现、直接继承默认体。
-    // 于是经适配器暴露给 core 的 store 一样不支持 `continue_from`。
     fn subscribe(&self, run_id: &str) -> Option<Receiver<WorkflowEvent>> {
         // 底层 `subscribe_events` 是回调式（`Box<dyn Fn>`）+ 返回退订句柄，core
         // 要的是 `mpsc::Receiver`。用一条转发链弥合：
@@ -614,14 +610,6 @@ mod adapter_tests {
             matches!(err, StoreError::Conflict { .. }),
             "应保留 Conflict，实际为 {err:?}"
         );
-    }
-
-    /// 适配器**不实现**截断这个可选能力（基础层没有可转发的目标），故继承
-    /// `RunStore` 的默认体——如实报错，而非静默 no-op。
-    #[test]
-    fn truncate_log_at_step_reports_unsupported() {
-        let (store, _mem) = adapted();
-        assert!(store.truncate_log_at_step("r1", "a").is_err());
     }
 
     /// 桥接后：订阅者只收到**订阅之后**新增的事件，**不补发**存量——与 core 的

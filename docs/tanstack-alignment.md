@@ -8,8 +8,8 @@
 
 第一轮（`118fcbe`）：命名对齐，执行模型保留显式 `needs` DAG + 调度器。
 第二轮（`2beb027`，最终）：**执行模型也换成 TanStack 的 handler 代码重放**
-（代码即 DAG），`needs` 图和调度器删除。continue_from / target_step 继续保留为
-本地一等公民，以 store 层截断 / `StepHalt` 哨兵承载。
+（代码即 DAG），`needs` 图和调度器删除。`target_step` 保留为本地一等公民，
+以 `StepHalt` 哨兵承载。
 
 第三轮（2026-09-30）：**驱动入口的返回类型也换成事件流**——`run_workflow`
 返回 `RunEventStream`（上游 `AsyncIterable<WorkflowEvent>`，单路），run 状态改从
@@ -57,8 +57,8 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
 了一个需求。它错在**前提**：core 根本没有「落盘格式」这个东西。
 
 - 存成什么文件名、什么布局、什么序列化格式，全是 **store 实现者**的事。
-  `events.jsonl` / `run.json` 是示例层 `FileRunStore`（`publish = false`）的
-  内部选择，core 里没有一行代码知道它们存在。换 Postgres、S3、或自己写的
+  `events.jsonl` / `run.json` 是示例层 `FileExecutionStore` 的内部选择，
+  core 里没有一行代码知道它们存在。换 Postgres、S3、或自己写的
   store，事件长什么样由那个 store 决定。
 - 所以「跨语言读日志」要面对的是**某个 store 实现**的格式，不是本库的契约。
   就算真有跨语言需求，对齐也是那个 store 作者的事，不是这里的 API 设计。
@@ -101,10 +101,11 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
 
 第一轮拒绝的三条理由逐条重估：
 
-1. **"handler 模型要复现 continue_from，得自己写 truncate（TanStack 不给）"**
-   ——结论本身没错：continue_from 确实活在 store/log 层（截断后缀 + 重放），
-   handler 引擎和显式图引擎都能承载它。但换 handler 后"自己写 truncate"并没有更贵：
-   引擎只多一个 `truncate_log_at_step` 的 store 方法，换来的是调度器整段删除。
+1. **"handler 模型要复现日志截断重跑，得自己写 truncate（TanStack 不给）"**
+   ——当时判断"自己写 truncate 并没有更贵"。事后看这个判断错了：多出来的
+   `truncate_log_at_step` 不是廉价方法，而是**一个要被所有 store 实现者回答的契约
+   问题**（截断的原子性、CAS 怎么算、订阅端怎么补偿），且它本身不是上游能力。
+   该方法与 `continue_from` 已删除（见「保留了分歧」）。
 2. **"二者能力等价，只是代码表达形态区别"** ——等价对，但形态即 API 面。
    `try_join!` 内联并行比 `needs` 图更贴 TanStack 生态，且确定性不变
    （重放短路依赖的一直是事件日志，与表达形态无关）。
@@ -116,14 +117,15 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
 - 删掉 scheduler（执显式 DAG 拓扑 + `max_concurrency`），`DrvInner` 只剩
   `log_len` 单调 CAS + `lives`（重放短路缓存）；
 - 重放短路自带 **resume**：同 run_id 重跑自动跳过已成功 step；
-- continue_from 变成纯 store 语义，图/非图无关。
+- （当时算作收益的）日志截断重跑不需要调度器，图/非图无关。
 
 ## 保留了分歧（本地扩展 / 一等公民）
 
-1. **`continue_from`**：TanStack 官方没有（重放短路无条件，无 reset/force 语义）。
-   我们把它做成 `truncate_log_at_step(run_id, step_id)`：事件日志裁到该 step 最新的
-   终态 checkpoint（含），重放时前缀短路、后缀从零重跑。LocalDub 的
-   `continue_pipeline` / engine 都由此承载。
+1. ~~**`continue_from`**~~：**已删除**。它曾做成
+   `truncate_log_at_step(run_id, step_id)`（日志裁到该 step 最新的终态 checkpoint 含，
+   前缀短路、后缀从零重跑）。删除理由见「为什么第二轮…」第 1 条：它是纯本地扩展，
+   却给每个 store 实现者留下一个含糊的原子性/CAS 契约问题。TanStack 官方的重放短路
+   是**无条件**的，没有 reset/force 语义——重试请新开 run。
 2. **`target_step`**：TanStack 用 handler 内 early `return`；我们用引擎参数 +
    `StepHalt` 哨兵，命中即停、handler 展开（`?` 传播）后 run `Finished`。
 3. **资源门**：`resource` key 用容量-1 的 async `Semaphore`，同 key 串行
@@ -166,7 +168,7 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
 | `resource` 模块：`Gate` / `GateGuard` / `ResourceKey` | `rg -c resource` = **0 文件** | 并发门原语（见上节 3） |
 | `up_to_date`（`StepOptions`） | `upToDate` = **0** | make 式 freshness（见上节 4） |
 | `target_step` | 仅 `run-workflow.ts:1412` 一个**同名局部变量**，非选项 | 见上节 2 |
-| `continue_from` + `RunStore::truncate_log_at_step` | `continueFrom` = **0**；上游 `RunStore` 只有 6 个方法 | 见上节 1 |
+| ~~`continue_from`~~ + ~~`truncate_log_at_step`~~ | `continueFrom` = **0**；上游 `RunStore` 只有 6 个方法 | **已删除**，见上节 1 |
 | `cancel_run` | `cancelRun` = **0** | 取消一个 run（写 `Aborted` 终局）；上游只有 `AbortSignal` |
 | `signal_run` / `signal_event` | `signalEvent` = **0**；上游 `RunStore` 接口**无投递方法** | 上游只有 ctx 侧 `waitForEvent`，**投递侧无公开入口** |
 | `select_workflow_version` + `previous_versions` + `WorkflowVersionMismatch` | = **0** | **正确性保护**，非便利功能（见下） |
@@ -191,10 +193,9 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
 
 ### C. 同一概念，形状不同
 
-- **`RunStore`**：本仓多一个 `truncate_log_at_step`（**可选能力**，带默认体，
-  实现者不必写——否则等于给每个 store 强加一个假桩；默认体报
-  `StoreError::Io` 而非静默 no-op，否则 `continue_from` 会看起来成功、
-  实际全部短路）
+- **`RunStore`**：曾多一个 `truncate_log_at_step`（**可选能力**，带默认体）。
+  该方法已随 `continue_from` 删除，现在**精确等于上游的 6 个方法**。
+  （教训：「可选能力 + 默认体报错」避免不了契约含糊，只把它推给了实现者。）
 - **`RunState`**：本仓 `waiting_for` / `pending_approval` 是两个具名槽；上游用
   `awaiting: RunAwaitable[]`（数组 + `type` 判别式）作**规范形**，两个具名字段是
   **镜像**。**2026-09-30 已补齐**（见下一节）
@@ -289,7 +290,7 @@ ctx.sleep("a", 100ms) 与 ctx.sleep("b", 600s) 并发，park 用 ? 传播
 
 ```rust
 RunWorkflowOptions::new(workflow, run_store)   // 必填两项由 new() 强制
-    .input(..).run_id(..).continue_from(..).target_step(..)
+    .input(..).run_id(..).target_step(..)
     .deadline(..).min_yield_remaining(..).yield_resume_at(..)
     .publish(Some(..))
 ```
@@ -307,7 +308,7 @@ RunWorkflowOptions::new(workflow, run_store)   // 必填两项由 new() 强制
 | `attach` | ❌ 暂无 | 只读订阅已有 run（不驱动）。本仓 `subscribe` 只能 tail 事件，拿不到 RunState 快照 |
 | `signal`（AbortSignal） | ❌ 暂无 | 本仓有 `cancel_run`（写 Aborted 终局），不是 drive 参数 |
 | `threadId` / `outputSink` / `telemetry` | ❌ 暂无 | 无 thread 概念 / 无 OTel 集成 |
-| — | ➕ `continue_from` / `target_step` | **本地扩展**（见上节 1、2） |
+| — | ➕ `target_step` | **本地扩展**（见上节 2；`continue_from` 曾是本地扩展，已删除） |
 
 名字差异：旧版本仓叫 `RunOptions`，2026-09-18 起对齐为 `RunWorkflowOptions`。
 另注：上游把这个接口定义在 `engine/run-workflow.ts` 而非 `types.ts`（与 `RunStore`
@@ -408,7 +409,7 @@ impl RunEventStream { async fn outcome(self) -> Result<RunOutcome, WorkflowError
    `drive` 又算一个。`opts.run_id` 为 `None` 时两处各自
    `format!("run_{}", now_ms())`，跨一个 ms 边界就是两个 id。现在只算一次并写回
    `opts`。
-2. **失败路径不落盘**。版本失配、`continue_from` 截断失败这些路径只
+2. **失败路径不落盘**。版本失配这些路径只
    `emit(RUN_ERRORED)`、不写 `RunState`，`outcome()` 于是读回上一次 drive 留下的
    状态——「失败了但看起来是 `Finished`」。上游在 `drive` 的 catch 里统一
    `status='errored'` + `setRunState` 再 emit（`run-workflow.ts:555-570`），我们
@@ -437,11 +438,11 @@ yield 哪条了。
 
 - append-only 日志 + 单写者 CAS（`DrvInner.log_len` 单调推进，冲突重基）：
   崩溃恢复、多节点一致的根基，不随执行模型动摇。
-- 失败即终局：`STEP_FAILED` rethrow；重试靠 `continue_from` / 新 run。
+- 失败即终局：`STEP_FAILED` rethrow；重试靠新开 run。
   这正好是 TanStack 的语义，也是 Temporal 档位的惯例——dur 面向无人值守长跑，
   "就地重跑失败段"罕有。
-- `continue_from` 的截断是"删"而非"追加遮盖"，呼应"新 run 惯例"，但本地
-  pipeline（产物在磁盘）接受就地重跑作为一等 UX。
+- （曾有 `continue_from` 提供"就地重跑失败段"的 UX，代价是 store 层截断契约含糊，
+  已删除。现在只有"新 run"一条路。）
 
 ## 上游的演化史：为什么 runtime 层是后来才有的
 

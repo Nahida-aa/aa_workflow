@@ -27,8 +27,8 @@
 //! 但 authoring 面对齐它的 handler 形态（`Promise.all` ↔ `tokio::try_join!`，
 //! `awaiting[]` ↔ 事件推导的 step 状态），不做显式 DAG。重放由
 //! [`engine::run_workflow`] 驱动 handler 完成：`ctx.step` 在 recheck 存在时
-//! 短路到缓存结果、失败 checkpoint 直接 rethrow（失败即终局，重试靠
-//! `continue_from` / 新 run）。完整论证见 `docs/tanstack-alignment.md`。
+//! 短路到缓存结果、失败 checkpoint 直接 rethrow（失败即终局，重试靠新 run）。
+//! 完整论证见 `docs/tanstack-alignment.md`。
 //!
 //! ## Persistence model
 //!
@@ -36,9 +36,9 @@
 //! [`run_store::RunStore`] trait (CAS append + optional subscribe for
 //! fan-out). Per-step status is *derived* by replaying the log
 //! ([`event::fold_step_states`]); resume short-circuits succeeded steps so
-//! code is re-executed only for what still needs to run. `continue_from`
-//! truncates the log at a step's latest terminal checkpoint (store layer)
-//! before re-driving the handler.
+//! code is re-executed only for what still needs to run. Retrying a failed
+//! step means starting a new run; this crate deliberately has no log
+//! truncation API (upstream has neither).
 
 pub mod define;
 pub mod engine;

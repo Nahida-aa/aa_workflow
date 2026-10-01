@@ -2,7 +2,7 @@
 //!
 //! 语义逐方法对齐 `workflow-runtime` 的 `InMemoryExecutionStore`
 //! （`in_memory_store.rs`），落盘手法（CAS 追加 / 原子写）照 `examples/shared` 的
-//! `FileRunStore`。
+//! 新契约（`WorkflowExecutionStore`）。
 //!
 //! 并发边界见 crate 文档：**单进程正确**（进程内 `Mutex` 串行化读-改-写），
 //! 多 worker 请用 `workflow-store-sqlx-postgres`。

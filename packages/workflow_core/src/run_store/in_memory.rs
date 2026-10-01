@@ -103,25 +103,6 @@ impl RunStore for InMemoryStore {
             .unwrap_or_default())
     }
 
-    fn truncate_log_at_step(&self, run_id: &str, step_id: &str) -> Result<(), StoreError> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| StoreError::Io(e.to_string()))?;
-        let Some(log) = inner.logs.get_mut(run_id) else {
-            return Ok(());
-        };
-        // Latest terminal checkpoint for step_id (success or failure).
-        let cut = log.iter().rposition(|ev| match ev {
-            WorkflowEvent::StepFinished { step_id: id, .. }
-            | WorkflowEvent::StepFailed { step_id: id, .. } => id == step_id,
-            _ => false,
-        });
-        if let Some(i) = cut {
-            log.truncate(i); // drop event i and everything after it
-        }
-        Ok(())
-    }
 
     fn subscribe(&self, run_id: &str) -> Option<Receiver<WorkflowEvent>> {
         let (tx, rx) = mpsc::channel();

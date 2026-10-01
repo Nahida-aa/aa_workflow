@@ -12,15 +12,12 @@
 //!    run 拒绝再驱动」的幂等边界（见 replay 测试）；
 //! 3. 两分支并行形状在引擎上跑通，且并发真的发生。
 //!
-//! 例外：`continue_from` 的边界测试留在 adapter 直驱形态（`dub_sf_ocr_
-//! continue_from_is_unsupported_on_new_contract`）——runtime 的 `start_run`
-//! 没有 continue_from 入口（对齐上游），它测的是 core 层边界。
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use aa_workflow_core::{RunStatus, RunWorkflowOptions, WorkflowEvent, run_workflow};
-use aa_workflow_runtime::run_store_adapter::{WorkflowExecutionStore, WorkflowRunStoreAdapterStore, create_run_store_adapter};
+use aa_workflow_core::WorkflowEvent;
+use aa_workflow_runtime::run_store_adapter::WorkflowExecutionStore;
 use aa_workflow_runtime::types::{ReadEventsArgs, StoredWorkflowEvent, WorkflowExecutionStatus};
 use aa_workflow_runtime::{WorkflowRuntimeRunResult, WorkflowRuntimeRunResultKind, WorkflowRegistration, WorkflowRuntimeConfig, WorkflowRuntimeDefinition, WorkflowRuntimeStartRunArgs, define_workflow_runtime};
 use example_store_file::dub_sf_ocr::{dub_probe, dub_sf_ocr};
@@ -75,11 +72,6 @@ fn temp_base(tag: &str) -> std::path::PathBuf {
     dir
 }
 
-/// 落盘 store 直驱（不经 runtime）——仅 continue_from 边界测试用。
-fn temp_store(tag: &str) -> (Arc<FileExecutionStore>, std::path::PathBuf) {
-    let dir = temp_base(tag);
-    (Arc::new(FileExecutionStore::new(&dir)), dir)
-}
 
 fn dub_input() -> serde_json::Value {
     serde_json::json!({ "videoDir": "/w/1" })
@@ -407,79 +399,3 @@ async fn dub_sf_ocr_state_defaults_target_lang() {
     let _ = std::fs::remove_dir_all(base);
 }
 
-/// `continue_from` 在**新契约**下**走不通**——这条把边界固化下来。
-///
-/// 搬迁时从 `InMemoryStore`（core 的旧契约 `RunStore`）换到
-/// `FileExecutionStore`（`WorkflowExecutionStore`）后，这条测试**第一次红了**，
-/// 暴露出一个既成事实：
-///
-/// | 层 | 有 `truncate_log_at_step` 吗 |
-/// | --- | --- |
-/// | core 的 `RunStore`（旧） | ✅ 有 —— `continue_from` 靠它 |
-/// | `WorkflowExecutionStore`（新） | ❌ **没有** |
-/// | 上游 TS 的 `createRunStoreAdapter` | ❌ 也没有（已核实：上游 runtime 无 `truncateRuns`） |
-///
-/// 适配器如实报错而不静默 no-op（`run_store_adapter.rs:451`），所以走新契约的
-/// store 用不了 `continue_from`。**这是上游的既定边界，不是本 crate 的缺陷**。
-///
-/// 这条特意留在 **adapter 直驱形态**（不经 runtime）：runtime 的 `start_run`
-/// 没有 continue_from 入口（对齐上游），该边界属于 core 层。保留断言而不是删掉
-/// 测试：哪天新契约补上截断能力，它会红，提醒我们改回来。
-#[tokio::test]
-async fn dub_sf_ocr_continue_from_is_unsupported_on_new_contract() {
-    let _guard = DUB_PROBE_LOCK.lock().await;
-    dub_probe::reset();
-
-    let (store, dir) = temp_store("continue_from");
-    let wf = dub_sf_ocr();
-    let core_store =
-        create_run_store_adapter(store.clone() as Arc<dyn WorkflowExecutionStore>);
-    let out = run_workflow(
-        RunWorkflowOptions::new(Arc::new(wf.clone()), core_store.clone()).input(dub_input()),
-    )
-    .outcome().await
-    .unwrap();
-    let run_id = out.run_id.clone();
-
-    let resumed = run_workflow(
-        RunWorkflowOptions::new(Arc::new(wf.clone()), core_store)
-            .input(dub_input())
-            .run_id(run_id.clone())
-            .continue_from("tts"),
-    )
-    .outcome().await
-    .unwrap();
-
-    // 失败是**事件**（`RUN_ERRORED`）而不是 `Err`——run_workflow 的流没有 Err
-    // 变体，对齐上游 `drive().catch()` 统一 emit `RUN_ERRORED`。
-    // 状态也从 store 读，所以这条 drive 的落盘状态必须是 `Errored`，不能还留着
-    // 上一次的 `Finished`。
-    assert_eq!(
-        resumed.status,
-        RunStatus::Errored,
-        "截断失败应把 run 标成 Errored，而不是留下上次的 Finished"
-    );
-    let msg = resumed.error.as_ref().expect("Errored 必须带 error").to_string();
-    assert!(
-        msg.contains("truncate_log_at_step"),
-        "应明确指向缺失的 truncate_log_at_step，实际：{msg}"
-    );
-    let run_id = resumed.run_id.clone();
-
-    // 报错之后，原有的事件日志应**完好无损**（适配器报错而非静默改坏日志）。
-    let events = store
-        .read_events(ReadEventsArgs {
-            run_id: run_id.clone(),
-            from_index: None,
-        })
-        .unwrap();
-    for step in DUB_ALL_STEPS {
-        assert_eq!(
-            finished_count(&events, step),
-            1,
-            "{step} 的终态不该被失败的 continue_from 破坏"
-        );
-    }
-
-    let _ = std::fs::remove_dir_all(dir);
-}

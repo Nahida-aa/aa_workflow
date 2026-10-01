@@ -70,7 +70,7 @@ pub type PublisherFn =
 /// | `signalDelivery` / `approval` | — | 我们走 `signal_run` / `signal_event` 先落盘再 drive（D3 的形态差异） |
 /// | `attach` | ✅ `attach` | 只读回放，见 [`RunWorkflowOptions::attach`] |
 /// | `recover` / `signal` / `threadId` / `outputSink` / `telemetry` | — | **暂无**；未做，不是不做 |
-/// | — | ➕ `continue_from` / `target_step` | **本地扩展**（上游连这两个概念都没有） |
+/// | — | ➕ `target_step` | **本地扩展**（上游连这个概念都没有） |
 ///
 /// # 为什么字段类型是 `AnyWorkflowDefinition`（newtype）而不是裸 `WorkflowDefinition`
 ///
@@ -102,8 +102,6 @@ pub struct RunWorkflowOptions {
     pub input: serde_json::Value,
     /// 命中即停（本地扩展；上游用 handler 内 early `return`）。
     pub target_step: Option<String>,
-    /// 从该 step 的最新终态 checkpoint 处截断后重跑后缀（**本地扩展**）。
-    pub continue_from: Option<String>,
     /// 只读回放一个已存在的 run（上游 `attach`，`run-workflow.ts:48` / `:371`）。
     ///
     /// 不碰 handler、不写日志、不改 `RunState`——把日志里已有的事件原样重放
@@ -207,7 +205,6 @@ impl RunWorkflowOptions {
             run_id: None,
             input: serde_json::Value::Null,
             target_step: None,
-            continue_from: None,
             attach: false,
             deadline: None,
             min_yield_remaining_ms: None,
@@ -238,12 +235,6 @@ impl RunWorkflowOptions {
     /// 命中即停。
     pub fn target_step(mut self, v: impl Into<String>) -> Self {
         self.target_step = Some(v.into());
-        self
-    }
-
-    /// 从该 step 截断后重跑后缀。
-    pub fn continue_from(mut self, v: impl Into<String>) -> Self {
-        self.continue_from = Some(v.into());
         self
     }
 
@@ -385,9 +376,6 @@ pub use crate::registry::select_workflow_version;
 /// Runs (or resumes) a workflow by driving its async handler.
 ///
 /// Inputs:
-/// - `continue_from`: the store truncates everything at `step_id`'s latest
-///   terminal checkpoint (inclusive) before re-running the handler, so the
-///   prefix short-circuits and the suffix re-executes from scratch.
 /// - `target_step`: once that step succeeds the engine raises [`StepHalt`],
 ///   the handler unwinds (users should propagate with `?`), and the run ends
 ///   `Finished` with no output.
@@ -668,30 +656,6 @@ async fn drive(
         Ok(st) => st,
         Err(e) => return Err(err_event(&run_id, e, RunErrorCode::Error)),
     };
-    // continue_from lives at the store layer: cut the log at the step's latest
-    // terminal checkpoint so the replayed handler re-runs that suffix.
-    //
-    // 放在读 `persisted` **之后**：截断失败时得有个 `RunState` 可写，否则
-    // `outcome()` 会把上一次 drive 留下的状态（比如 `Finished`）当成这次的结果
-    // ——一个「失败了但看起来成功」的 run。仍然在 `get_events` 与
-    // `set_run_state(Running)` 之前，所以截断语义不变。
-    if let Some(cf) = &opts.continue_from
-        && let Err(e) = store.truncate_log_at_step(&run_id, cf)
-    {
-        // run 从没存在过（没有 `persisted`）就没什么可写——事件照样报出去。
-        let Some(mut st) = persisted else {
-            return Err(err_event(&run_id, e, RunErrorCode::Error));
-        };
-        st.status = RunStatus::Errored;
-        st.error = Some(RunError {
-            name: "StoreError".to_string(),
-            message: e.to_string(),
-        });
-        st.updated_at = now_ms();
-        let _ = store.set_run_state(&run_id, &st);
-        return Err(err_event(&run_id, e, RunErrorCode::Error));
-    }
-
     if let Some(st) = &persisted
         && st.status == RunStatus::Aborted
     {
@@ -934,7 +898,7 @@ async fn drive(
 ///
 /// 所以差异是自觉的：上游「重复 start 自动降级为 attach」，我们要求调用方显式
 /// `.attach()`。重复 start 的防护留给调用点判断，而不是悄悄改掉 `run_id` 的含义。
-/// 真要重跑一个已完成的 run，仍然照旧直接重驱动（或用 `continue_from` 显式截断）。
+/// 真要重跑一个已完成的 run，仍然照旧直接重驱动。
 fn attach_decision(
     opts: &RunWorkflowOptions,
     store: &Arc<dyn RunStore>,
@@ -1743,208 +1707,6 @@ mod tests {
         let state = store.get_run_state("ver:mismatch").unwrap().unwrap();
         let outcome = RunOutcome::from_run_state(state);
         assert_eq!(outcome.status, RunStatus::Errored);
-    }
-
-    /// `continue_from` **就是** `truncate_log_at_step` + 普通 resume 的糖：
-    /// 引擎里 `continue_from` 只出现在一处（调 `truncate_log_at_step`），没有任何
-    /// 别的行为挂在它上面。调用方自己先截断、再普通 resume，结果完全一致——
-    /// 这条测试就把这个等价关系钉住，免得哪天有人给 `continue_from` 加上只有它
-    /// 才有的隐藏行为。
-    ///
-    /// 注意**能力边界**：能这么做的前提是 store 实现了 `truncate_log_at_step`。
-    /// 上游对齐的 `WorkflowExecutionStore` 契约里**没有**这个方法（上游的
-    /// `createRunStoreAdapter` 同样没实现 `truncateRuns`），所以 postgres store
-    /// 没有它，降格适配器如实返回 `Err(unsupported)`——
-    /// `continue_from` 和手动调用**一样**在真实 store 上不可用。
-    #[tokio::test]
-    async fn manual_truncate_plus_plain_resume_equals_continue_from() {
-        let store = Arc::new(InMemoryStore::new());
-        let log = Arc::new(Mutex::new(TestLog::default()));
-        let fail = Arc::new(AtomicBool::new(true));
-        let wf = || {
-            WorkflowDefinition::new("w").handler({
-                let log = log.clone();
-                let fail = fail.clone();
-                move |ctx: WorkflowCtx| {
-                    let log = log.clone();
-                    let fail = fail.clone();
-                    async move {
-                        for id in ["a", "b"] {
-                            let (log, fail) = (log.clone(), fail.clone());
-                            let id = id.to_string();
-                            let id_c = id.clone();
-                            ctx.step(&id, move |_sc: StepCtx| {
-                                let (log, fail, id) = (log.clone(), fail.clone(), id_c.clone());
-                                async move {
-                                    log.lock().unwrap().note_start(&id);
-                                    let res = if id == "b" && fail.swap(false, Ordering::SeqCst) {
-                                        Err(anyhow::anyhow!("boom"))
-                                    } else {
-                                        Ok(serde_json::Value::Null)
-                                    };
-                                    log.lock().unwrap().note_finish(&id);
-                                    res
-                                }
-                            })
-                            .await?;
-                        }
-                        Ok(serde_json::Value::Null)
-                    }
-                }
-            })
-        };
-        let wf = wf();
-
-        // first run: b 失败
-        let out = run_workflow(
-            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
-                .input(serde_json::json!({})),
-        )
-        .outcome().await
-        .unwrap();
-        assert_eq!(out.status, RunStatus::Errored);
-        let run_id = out.run_id.clone();
-
-        // 关键：不传 continue_from，调用方自己先截断
-        store.truncate_log_at_step(&run_id, "b").unwrap();
-        let resumed = run_workflow(
-            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
-                .input(serde_json::json!({}))
-                .run_id(run_id.clone()),
-        )
-        .outcome().await
-        .unwrap();
-
-        assert_eq!(resumed.status, RunStatus::Finished, "截断后应能跑完");
-        let l = log.lock().unwrap();
-        assert_eq!(l.runs["a"], 1, "a 的 checkpoint 前缀未受影响");
-        assert_eq!(l.runs["b"], 2, "b 应被重跑");
-    }
-
-    #[tokio::test]
-    async fn failed_is_terminal_until_continue_from() {
-        let store = Arc::new(InMemoryStore::new());
-        let log = Arc::new(Mutex::new(TestLog::default()));
-        let fail = Arc::new(AtomicBool::new(true));
-        let wf = WorkflowDefinition::new("w").handler({
-            let log = log.clone();
-            let fail = fail.clone();
-            move |ctx: WorkflowCtx| {
-                let log = log.clone();
-                let fail = fail.clone();
-                async move {
-                    for id in ["a", "b"] {
-                        let (log, fail) = (log.clone(), fail.clone());
-                        let id = id.to_string();
-                        let id_c = id.clone();
-                        ctx.step(&id, move |_sc: StepCtx| {
-                            let (log, fail, id) = (log.clone(), fail.clone(), id_c.clone());
-                            async move {
-                                log.lock().unwrap().note_start(&id);
-                                let res = if id == "b" && fail.swap(false, Ordering::SeqCst) {
-                                    Err(anyhow::anyhow!("boom"))
-                                } else {
-                                    Ok(serde_json::Value::Null)
-                                };
-                                log.lock().unwrap().note_finish(&id);
-                                res
-                            }
-                        })
-                        .await?;
-                    }
-                    Ok(serde_json::Value::Null)
-                }
-            }
-        });
-
-        // first run: b fails, run errors
-        let out = run_workflow(
-            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
-                .input(serde_json::json!({})),
-        )
-        .outcome().await
-        .unwrap();
-        assert_eq!(out.status, RunStatus::Errored);
-        assert!(out.error.unwrap().message.contains("boom"));
-        assert_eq!(log.lock().unwrap().runs["b"], 1);
-        let run_id = out.run_id.clone();
-
-        // plain resume: failed checkpoint rethrows → still errored, no rerun
-        let again = run_workflow(
-            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
-                .input(serde_json::json!({}))
-            .run_id(run_id.clone()),
-        )
-        .outcome().await
-        .unwrap();
-        assert_eq!(again.status, RunStatus::Errored);
-        assert_eq!(
-            log.lock().unwrap().runs["b"],
-            1,
-            "no re-execution on plain resume"
-        );
-
-        // continue_from "b": truncate b's checkpoint + suffix, replay reruns b
-        let resumed = run_workflow(
-            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
-                .input(serde_json::json!({}))
-            .run_id(run_id)
-            .continue_from("b"),
-        )
-        .outcome().await
-        .unwrap();
-        assert_eq!(resumed.status, RunStatus::Finished);
-        let l = log.lock().unwrap();
-        assert_eq!(l.runs["a"], 1, "prefix before continue_from untouched");
-        assert_eq!(l.runs["b"], 2, "suffix reran via continue_from");
-    }
-
-    #[tokio::test]
-    async fn continue_from_resets_downstream() {
-        let store = Arc::new(InMemoryStore::new());
-        let log = Arc::new(Mutex::new(TestLog::default()));
-        let wf = WorkflowDefinition::new("w").handler({
-            let log = log.clone();
-            move |ctx: WorkflowCtx| {
-                let log = log.clone();
-                async move {
-                    for id in ["a", "b", "c"] {
-                        let log = log.clone();
-                        let id = id.to_string();
-                        let id_c = id.clone();
-                        ctx.step(&id, move |_sc: StepCtx| {
-                            let (log, id) = (log.clone(), id_c.clone());
-                            async move {
-                                log.lock().unwrap().note_start(&id);
-                                log.lock().unwrap().note_finish(&id);
-                                Ok(serde_json::Value::Null)
-                            }
-                        })
-                        .await?;
-                    }
-                    Ok(serde_json::Value::Null)
-                }
-            }
-        });
-        let out = run_workflow(
-            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
-                .input(serde_json::json!({})),
-        )
-        .outcome().await
-        .unwrap();
-        let second = run_workflow(
-            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
-                .input(serde_json::json!({}))
-            .run_id(out.run_id)
-            .continue_from("b"),
-        )
-        .outcome().await
-        .unwrap();
-        assert_eq!(second.status, RunStatus::Finished);
-        let l = log.lock().unwrap();
-        assert_eq!(l.runs["a"], 1);
-        assert_eq!(l.runs["b"], 2);
-        assert_eq!(l.runs["c"], 2);
     }
 
     #[tokio::test]

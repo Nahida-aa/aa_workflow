@@ -65,87 +65,21 @@ WorkflowRunStoreAdapterStore       本仓 runtime 的存储基础：元数据信
 `RunStore` 是**旧的那一层**：core 还在用它，但对外发布 / 新增的 adapter 不再是它。
 判断依据是上游自己也在迁移——`createRunStoreAdapter` 的存在就是为了把新形状降格成旧的。
 
-### ⚠️ 新契约**没有** `truncate_log_at_step`，所以 `continue_from` 用不了
+### `continue_from` / `truncate_log_at_step` 已删除
 
-先说清来源：**这个方法上游 TanStack 没有**。上游 `RunStore`
-（`types.ts:600-627`）只有 6 个方法，**既没有它，也没有 `continueFrom`**——
-两者都是本仓的本地扩展（见 `docs/tanstack-alignment.md` 的「保留了分歧」）。
-上游整个 monorepo 里跟 "truncate" 有关的只有 `tanstack.workflow.events_truncated`
-这个**遥测属性名**，不是能力。
+原 `RunWorkflowOptions::continue_from(step_id)` 与 `RunStore::truncate_log_at_step`
+**已从 core 删除**，`examples/shared/src/file_run_store.rs`（旧 `FileRunStore`）一并删除。
+删除理由：它**不是上游能力**——上游 `RunStore` 只有 6 个方法，既没有 `truncate_log_at_step`
+也没有 `continueFrom`（上游全仓与 truncate 相关的只有 `tanstack.workflow.events_truncated`
+这个**遥测属性名**）。详见 `docs/tanstack-alignment.md`。
 
-两个契约**不是包含关系，是各有各的**：
+曾经它是「本地扩展」：`continue_from` = 先把日志裁到该 step 最后一个终态 checkpoint
+（`StepFinished` / `StepFailed`）的**前一条**，再从头重放 handler；剪掉的 step 因为
+「没有日志」而重跑，其余 step 靠 replay 短路跳过。所以它本质是**日志后缀删除**，
+不是回滚——`ctx.state` 由 replay 重建，`RunState` 信封下次 drive 时重新投影。
 
-| 能力                                   | core 的 `RunStore`（旧）      | `WorkflowExecutionStore`（新）      |
-| -------------------------------------- | ----------------------------- | ----------------------------------- |
-| `truncate_log_at_step`（**本地扩展**） | ✅ 有 —— `continue_from` 靠它 | ❌ **没有**（它对齐上游，上游没有） |
-| lease / timer / schedule / 查询        | ❌ 没有                       | ✅ 有                               |
+现在**重试只有一条路：新开一个 run**。别再加截断类 API，需要时先对齐上游。
 
-所以**走新契约的 store，`continue_from` 一定失败**。适配器如实报错而非静默 no-op
-（`run_store_adapter.rs:451`），失败信息指向 `truncate_log_at_step`。实测见
-`examples/store_file/tests/dub_sf_ocr.rs` 的
-`dub_sf_ocr_continue_from_is_unsupported_on_new_contract`。
-
-**要 `continue_from` 就得**：继续用 core 的 `RunStore`（但拿不到 lease/timer），
-或者在 store 上**加非契约方法**并自行截断（这等于扩大契约，需明确决定，别默认做）。
-
-## `continue_from` 的机制：日志是「短路索引」
-
-理解这一点，才知道上面那个缺口为什么是结构性的。
-
-`continue_from` 做两件事（`engine/run_workflow.rs:135-139`）：
-
-1. **跑 handler 之前**，调 `store.truncate_log_at_step(run_id, step_id)`；
-2. 然后照常**从头重放 handler**。
-
-`truncate_log_at_step` 本身极简（`run_store/in_memory.rs:106-124`）：
-
-```rust
-// 找该 step 的**最后一个**终态 checkpoint（StepFinished 或 StepFailed）
-let cut = log.iter().rposition(|ev| match ev {
-    StepFinished { step_id: id, .. } | StepFailed { step_id: id, .. } => id == step_id,
-    _ => false,
-});
-if let Some(i) = cut {
-    log.truncate(i);   // 丢掉 i 及之后的一切
-}
-```
-
-### 为什么剪日志就等于「让那些 step 重跑」
-
-因为**引擎没有「step 是否执行过」这种独立状态**——它只认日志里有没有该 step 的终态
-事件。`ctx.step(id)` 在重放时的行为完全由日志决定：
-
-| 日志里                               | `ctx.step(id)` 的行为                       |
-| ------------------------------------ | ------------------------------------------- |
-| **有** `StepFinished/StepFailed(id)` | **短路** —— 返回缓存结果，闭包**不执行**    |
-| **没有**                             | 真正执行闭包，跑完 append 一条新 checkpoint |
-
-所以：
-
-> **日志 = 「哪些 step 可以短路」的索引。截断 = 把索引从某处切断，
-> 使那段重放时不再短路。**
-
-这也解释了 `continue_from` 为什么放在 **store 层**而不是引擎里
-（`run_workflow.rs:135` 原注释：_"continue_from lives at the store layer"_）——
-它是**日志操作**，不是引擎操作。
-
-### 三个常被忽略的推论
-
-1. **剪的是「该 step 及其之后」，不只是那一个 step**。因为下游 checkpoint 是在上游
-   结果之上产生的，上游要重跑，下游的旧结果就不能信。见测试
-   `continue_from_resets_downstream`。
-2. **副作用会真的再发生一次**（闭包被重新调用）。所以 `continue_from` 的语义是
-   **重跑**，不是"续命"。有真实副作用的 step 必须用 `stepCtx.id` 做外部系统的幂等键。
-3. **对没有终态 checkpoint 的 step，它是 no-op 且不报错**
-   （`run_store/mod.rs:214-218`：_"there is nothing to cut — resume would re-run it
-   anyway"_）。逻辑自洽：没 checkpoint 的本来就会重跑。
-
-### 没有任何东西被「回滚」
-
-容易误解成"回滚状态"。实际上全程只有一个动作：**删日志事件**。
-
-- `ctx.state` 靠 replay 重建，不需要回滚（见上面「`RunState` ≠ `ctx.state`」一节）
-- `RunState` 信封（status/output/error）在下次 drive 时被重新投影
 
 ## Adapter 实现清单（上游 `docs/api/store-adapters.md`）
 

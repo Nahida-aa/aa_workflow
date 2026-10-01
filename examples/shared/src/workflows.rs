@@ -15,7 +15,7 @@
 //! - [`approval_review`] — 人工审批：`ctx.approve` 持久化一个等待点，
 //!   外部用 [`aa_workflow_core::signal_run`] 交付决定后继续（signals 语义载体）。
 //! - [`approval_order`]（id `approval-order`）— 对齐 wf-demo：金额阈值决定是否人工
-//!   审批，拒绝分支；`email_digest` 是 resume / `continue_from` 的行为载体。
+//!   审批，拒绝分支；`email_digest` 是 resume 的行为载体。
 //! - [`invoice`]（id `invoice`）— 对齐 wf-demo：连续两个 `sleep`（双定时器，引擎自动唤醒）。
 //! - [`compliance`]（id `compliance`）— 对齐 wf-demo：连续两次事件等待后归档。
 //! - [`refund`]（id `refund`）— 对齐 wf-demo 混合链：事件 → 定时闸门 → 审批 → 步骤。
@@ -113,7 +113,7 @@ fn default_t2() -> u64 {
 
 /// 模拟"外部扣款"的模块级服务（对齐官方 pocs：workflow 不注入依赖，
 /// 副作用就写成模块作用域里的服务函数）。用可配置的全局状态模拟支付网关
-/// 的瞬时故障，好让 retry / `continue_from` 测试可控。
+/// 的瞬时故障，好让 retry 测试可控。
 pub mod payment_gateway {
     use std::sync::{LazyLock, Mutex};
 
@@ -222,7 +222,7 @@ pub fn fulfillment_saga() -> WorkflowDefinition<FulfillmentSagaInput, serde_json
 }
 
 /// 邮件 digest：`scan-events` → `render` → `send` 三步链。
-/// 本身无并行/分支，专门用来演示 resume 与 `continue_from` 的检查点行为。
+/// 本身无并行/分支，专门用来演示 resume 的检查点行为。
 pub fn email_digest() -> WorkflowDefinition<EmailDigestInput, serde_json::Value> {
     create_workflow(CreateWorkflowConfig::new("email-digest").input::<EmailDigestInput>()).handler(
         move |ctx: BaseCtx<EmailDigestInput>| async move {
@@ -812,131 +812,6 @@ mod tests {
         assert_eq!(finished_count(&events, "gen-pdf"), 1);
         assert_eq!(finished_count(&events, "charge"), 1);
         assert_eq!(finished_count(&events, "notify"), 1);
-    }
-
-    #[tokio::test]
-    async fn fulfillment_failure_terminal_until_continue_from() {
-        let _guard = GATEWAY_TEST_LOCK.lock().await;
-        payment_gateway::reset();
-        payment_gateway::set_fail_always(true);
-
-        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = fulfillment_saga();
-
-        // run 1: charge 在 3 次重试后仍失败 → run Errored
-        let out = run_workflow(
-            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
-                .input(serde_json::json!({ "orderId": "o-1" })),
-        )
-        .outcome().await
-        .unwrap();
-        assert_eq!(out.status, RunStatus::Errored);
-        assert!(out.error.unwrap().message.contains("payment gateway down"));
-        assert_eq!(payment_gateway::attempts(), 3);
-        let run_id = out.run_id.clone();
-        let events_1 = store.get_events(&run_id).unwrap();
-        let pdf_ts_1 = sf_ts(&events_1, "gen-pdf");
-
-        // 普通 resume: 失败 checkpoint rethrow, 不再执行 charge
-        let again = run_workflow(
-            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
-                .input(serde_json::json!({ "orderId": "o-1" }))
-                .run_id(run_id.clone()),
-        )
-        .outcome().await
-        .unwrap();
-        assert_eq!(again.status, RunStatus::Errored);
-        assert_eq!(
-            payment_gateway::attempts(),
-            3,
-            "plain resume 不重试已失败 step"
-        );
-
-        // continue_from charge: 截断 charge 的 StepFailed + 后缀, 前缀短路、后缀重跑
-        payment_gateway::set_fail_always(false);
-        let resumed = run_workflow(
-            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
-                .input(serde_json::json!({ "orderId": "o-1" }))
-                .run_id(run_id)
-                .continue_from("charge"),
-        )
-        .outcome().await
-        .unwrap();
-        assert_eq!(resumed.status, RunStatus::Finished);
-        assert_eq!(payment_gateway::attempts(), 4, "续跑只再跑一次 charge");
-
-        let events_2 = store.get_events(&resumed.run_id).unwrap();
-        assert_eq!(
-            finished_count(&events_2, "gen-pdf"),
-            1,
-            "前缀 gen-pdf 不重跑"
-        );
-        assert_eq!(
-            finished_count(&events_2, "charge"),
-            1,
-            "truncate 后 charge 重记一条"
-        );
-        assert_eq!(
-            sf_ts(&events_2, "gen-pdf"),
-            pdf_ts_1,
-            "gen-pdf 的 checkpoint 未被触碰"
-        );
-    }
-
-    #[tokio::test]
-    async fn email_digest_resume_and_continue_from() {
-        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = email_digest();
-
-        let input = serde_json::json!({ "days": 7 });
-        let out = run_workflow(
-            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone()).input(input.clone()),
-        )
-        .outcome().await
-        .unwrap();
-        assert_eq!(out.status, RunStatus::Finished);
-        let run_id = out.run_id.clone();
-        let events_1 = store.get_events(&run_id).unwrap();
-        let scan_ts_1 = sf_ts(&events_1, "scan-events");
-        assert_eq!(finished_count(&events_1, "scan-events"), 1);
-
-        // 同 run_id resume：全部短路，不产生新 StepFinished
-        let again = run_workflow(
-            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
-                .input(input.clone())
-                .run_id(run_id.clone()),
-        )
-        .outcome().await
-        .unwrap();
-        assert_eq!(again.status, RunStatus::Finished);
-        let events_2 = store.get_events(&run_id).unwrap();
-        assert_eq!(sf_ts(&events_2, "scan-events"), scan_ts_1);
-        assert_eq!(finished_count(&events_2, "scan-events"), 1);
-        assert_eq!(finished_count(&events_2, "render"), 1);
-        assert_eq!(finished_count(&events_2, "send"), 1);
-
-        // continue_from render: render + send 重跑, scan-events 不重跑
-        let cont = run_workflow(
-            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
-                .input(input)
-                .run_id(run_id)
-                .continue_from("render"),
-        )
-        .outcome().await
-        .unwrap();
-        assert_eq!(cont.status, RunStatus::Finished);
-        let events_3 = store.get_events(&cont.run_id).unwrap();
-        assert_eq!(
-            sf_ts(&events_3, "scan-events"),
-            scan_ts_1,
-            "scan-events 不重跑"
-        );
-        assert_eq!(
-            finished_count(&events_3, "render"),
-            1,
-            "render 重记一条新终态"
-        );
-        assert_eq!(finished_count(&events_3, "send"), 1);
     }
 
     #[tokio::test]

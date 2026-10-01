@@ -65,7 +65,7 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunWorkflowOptions.r
 | `runId` | `RunWorkflowOptions::run_id()` | |
 | `input` | `RunWorkflowOptions::new(input)` | |
 | `targetStep` | `target_step()` | |
-| `continueFrom` | `continue_from()` | |
+| ~~`continueFrom`~~ | ~~`continue_from()`~~ | 已删除（非上游能力，见 `AGENTS.md`） |
 | `runtime.deadline` | `deadline()` | |
 | `runtime.minYieldRemainingMs` | `min_yield_remaining()`（缺省 1000） | |
 | `runtime.yieldResumeAt` | `yield_resume_at()` | |
@@ -148,8 +148,8 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunWorkflowOptions.r
       回放，形状漂移就永远查不出来。
 
     所以：调用方要只读订阅时显式 `.attach()`；重复 start 的防护放在调用点判断，
-    而不是悄悄改掉 `run_id` 的含义。真要重跑已完成的 run 仍照旧重驱动，或用
-    `continue_from` 显式截断。
+    而不是悄悄改掉 `run_id` 的含义。真要重跑已完成的 run 仍照旧重驱动（日志后缀删除式的
+    `continue_from` 曾是本地扩展，已删除）。
 
     与上游的签名差异：上游是 `selectWorkflowVersion(versions[], runId, store)`
     （显式数组 + 读 store），我们是 `select_workflow_version(workflow,

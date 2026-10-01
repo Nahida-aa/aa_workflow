@@ -22,7 +22,7 @@ store 只负责把它放哪儿——内存 map、JSON 文件、数据库行都�
 discover the pending wake”。
 
 注意别把 `RunState` 和某个具体 store 的文件布局混为一谈：本 crate 不假定
-介质，也没有任何代码知道 `run.json` 这种文件名（那是示例层 `FileRunStore`
+介质，也没有任何代码知道 `run.json` 这种文件名（那是示例层落盘 store
 的事）。
 
 ⚠️ **`RunState` 不是 `ctx.state`，两者毫无关系**（仅名字相似，极易混淆）。

@@ -296,6 +296,7 @@ dependencies = [
  "aa_workflow_core",
  "aa_workflow_runtime",
  "anyhow",
+ "example_shared",
  "serde",
  "serde_json",
  "tokio",

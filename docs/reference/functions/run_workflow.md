@@ -9,14 +9,11 @@ title: run_workflow
 pub fn run_workflow(opts: RunWorkflowOptions) -> RunEventStream
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:398`](../../../packages/workflow_core/src/engine/run_workflow.rs#L398)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:386`](../../../packages/workflow_core/src/engine/run_workflow.rs#L386)
 
 Runs (or resumes) a workflow by driving its async handler.
 
 Inputs:
-- `continue_from`: the store truncates everything at `step_id`'s latest
-  terminal checkpoint (inclusive) before re-running the handler, so the
-  prefix short-circuits and the suffix re-executes from scratch.
 - `target_step`: once that step succeeds the engine raises [`StepHalt`](../structs/StepHalt.md),
   the handler unwinds (users should propagate with `?`), and the run ends
   `Finished` with no output.

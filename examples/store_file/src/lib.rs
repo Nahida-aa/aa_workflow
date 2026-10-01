@@ -2,25 +2,25 @@
 //!
 //! # 为什么需要这个 crate（起因是我们自己踩的坑）
 //!
-//! `examples/shared` 里的 `FileRunStore` 实现的是 **core 的旧契约 `RunStore`**。
+//! 曾经 `examples/shared` 里有个落盘 store 实现的是 **core 的旧契约 `RunStore`**。
 //! 那让示例层看起来在示范「写 store adapter = 实现 `RunStore`」——而上游
 //! `docs/api/store-adapters.md` 开篇的规定恰好相反：
 //!
 //! > Store adapters implement `WorkflowExecutionStore` from
 //! > `@tanstack/workflow-runtime`.
 //!
-//! 我们**被这个示例误导过**（写 `AGENTS.md` 时一度把「实现 `RunStore`」当成 store
-//! adapter 的做法）。示例层不能只有旧契约的 store——所以这个 crate 提供**新契约**
-//! 的落盘实现示范。
-//!
-//! `examples/shared` 保留不动：它对齐 TanStack `examples/deployment-pocs/shared`
-//! 的位置，有对账价值。两者分工是**契约**，不是新旧：
+//! 我们**被那个示例误导过**（写 `AGENTS.md` 时一度把「实现 `RunStore`」当成 store
+//! adapter 的做法）。那个实现已经删掉：本 crate 是示例层**唯一**的落盘 store 示范，
+//! 实现新契约。写新的 store adapter 请照这里，不要照 core 的 `RunStore`。
 //!
 //! | crate | 契约 | 用途 |
 //! | --- | --- | --- |
-//! | `examples/shared`（`FileRunStore`） | `aa_workflow_core::RunStore`（旧） | 与上游示例对账 |
-//! | 本 crate（`FileExecutionStore`） | `WorkflowExecutionStore`（新） | store adapter 的参考实现 |
-//! | `packages/workflow_store_sqlx_postgres` | `WorkflowExecutionStore`（新） | 生产级 / 多 worker |
+//! | 本 crate（`FileExecutionStore`） | `WorkflowExecutionStore` | store adapter 的参考实现 |
+//! | `packages/workflow_store_sqlx_postgres` | `WorkflowExecutionStore` | 生产级 / 多 worker |
+//!
+//! core 的 `RunStore` 是**引擎入口形状**，不是「给第三方写的接口」：只有 core 自己的
+//! `InMemoryStore` 和 runtime 内部的 `RunStoreAdapter` 实现它。外部 store 一律实现
+//! 上面的 `WorkflowExecutionStore`。
 //!
 //! # 与 `-sqlx-postgres` 的分工：单进程 vs 多 worker
 //!

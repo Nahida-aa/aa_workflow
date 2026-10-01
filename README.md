@@ -100,7 +100,6 @@ let outcome = run_workflow(
     RunWorkflowOptions::new(Arc::new(workflow.clone()), store.clone())  // 必填两项
         .input(json!({ "orderId": "A-1" }))
         .run_id("run_1")          // 复用 run_id ⇒ resume
-        .continue_from("charge")  // 从该 step 截断后重跑后缀（本地扩展，见下）
         .target_step("gen-pdf")   // 命中即停（本地扩展）
         .deadline(now_ms + 30_000)
         .publisher(Some(tracing_publisher())),
@@ -128,7 +127,7 @@ let outcome = run_workflow(
 
 `ctx` 上所有会产生 checkpoint 的原语。引擎只保证「进事件日志、参与 replay」；
 **日志存在哪、存不存住，由 `RunStore` 实现决定**——`InMemoryStore` 进程一退就
-没了，`FileRunStore` 存文件，将来可能是 SQL 库或云 KV。core 不假定介质，也不
+没了，`FileExecutionStore` 存文件，将来可能是 SQL 库或云 KV。core 不假定介质，也不
 假定数据一定持久。
 
 key **必填**（确定性 / 可重入所需，与 TanStack 的可选 `id` 不同）。
@@ -181,7 +180,7 @@ step 结果。
 
 字段名是 snake_case，不是 TS 的 camelCase（`stepId`）—— 各守语言惯例，不做
 逐字段对齐。注意**存成什么格式是 store 实现者的事**：上面的形状是 Rust 侧
-`serde` 的默认产出，`events.jsonl` 这个文件本身只是示例层 `FileRunStore` 的
+`serde` 的默认产出，`events.jsonl` 这个文件本身只是示例层 `FileExecutionStore` 的
 选择，core 不认识它。换 Postgres 或自己写的 store，事件长什么样由那个 store
 决定。理由见 [`docs/tanstack-alignment.md`](docs/tanstack-alignment.md)。
 
@@ -195,8 +194,9 @@ per-step 状态是**派生投影**，从不独立存储：`fold_step_states(even
 `RunState` 把挂起态做成一等投影，观察者不扫日志就知道 run 在等什么：
 `waiting_for: {step_id, signal_name, deadline}` / `pending_approval: {step_id, approval_id, title}`。
 
-**失败即终局**：`StepFailed` 只会 rethrow，不会自动重跑。重试靠 `continue_from`
-（store 层截断到该 step 最新终态 checkpoint，含）或新开 run。
+**失败即终局**：`StepFailed` 只会 rethrow，不会自动重跑。重试只有一条路：**新开 run**
+（把已完成部分作为 input 带进去）。日志截断式的 `continue_from` 曾是本地扩展，
+因非上游能力已删除。
 
 ## 实现自己的 store
 
@@ -220,8 +220,8 @@ pub trait RunStore: Send + Sync {
 store 必须报 `StoreError::Io`，不许静默 no-op。
 
 内置 `InMemoryStore`（phase-0，含 subscribe fan-out）；示例层另有以文件为介质的
-`FileRunStore`（`run.json` + `events.jsonl`，`publish = false`）。两者都只是
-`RunStore` 的一种实现，换成数据库后端不需要动引擎。
+`FileExecutionStore`（`examples/store_file`）。两者实现的是**不同契约**——前者是 core
+`RunStore`，后者是新契约 `WorkflowExecutionStore`；换成数据库后端不需要动引擎。
 
 `RunState` 的 `input` / `output` 默认擦除成 `Value`（store 是 `dyn`，装不下泛型），
 要具体类型就 `state.into_typed::<In, Out>()?` —— 对应 TanStack 的
@@ -290,7 +290,7 @@ packages/workflow_runtime/  执行所有权层（lease / sweep / timer / schedul
   src/schedule_materializer.rs  spec → next_fire_at
   src/store_contract.rs     store 契约套件（N 个实现共用，对齐上游 contracts/）
   src/store_contract.rs     store 契约套件（N 个实现共用，对齐上游 contracts/）
-examples/shared/            host 无关示例层（10 个 workflow + FileRunStore + drive 薄壳）
+examples/shared/            host 无关示例层（10 个 workflow + drive 薄壳，不含 store）
 examples/guide/             TanStack guide 的可运行移植（唯一跑通 core+runtime 端到端的地方）
 docs/concepts/ctx-state.md   ctx.state 写入规则（串行 + 并行，判据与上游实测）
 docs/tanstack-alignment.md  对齐决策记录（含推翻第一轮的论证）
@@ -327,8 +327,8 @@ runtime + 各 host/store adapter。所以这是阶段性缺位而非设计缺陷
 
 其他缺口：
 
-- **没有生产级 store**：`FileRunStore`（examples 层，供 core 用）的
-  `append_event` 是全量读 + 全量重写（O(n²)），且 `Mutex` 只在单进程内有效。
+- **没有生产级 store**：`FileExecutionStore`（examples 层）的 `append_events` 是全量读
+  + 全量重写（O(n²)），且 `Mutex` 只在单进程内有效（多 worker 需 Postgres 那套行锁）。
 - **确定性契约未强制**：引擎不检测 handler 的非确定性写法（TanStack 同样不检测）。
 - **无 observability 集成**：`publisher` 是裸 `Arc<dyn Fn(&WorkflowEvent)>`，core 不依赖
   tracing，接入要自己搭桥。

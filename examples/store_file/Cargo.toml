@@ -15,4 +15,5 @@ anyhow = "1"
 tracing = "0.1"
 
 [dev-dependencies]
+example_shared = { path = "../shared" }
 uuid = { version = "1", features = ["v4"] }

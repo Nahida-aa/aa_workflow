@@ -237,23 +237,22 @@ let v2 = create_workflow(CreateWorkflowConfig::new("pipeline").version("v2"))
 resume 时引擎读 run 里的 `workflowVersion`，在 `[当前] + previous_versions` 里
 选定义（`select_workflow_version`）；匹配不上不回退。
 
-## Recipe: 失败重试——`continue_from`（本地扩展）
+## Recipe: 失败重试——新开一个 run
 
-**失败即终局**：`STEP_FAILED` 只会 rethrow，不自动重跑。重试靠 `continue_from`
-或新开 run。**TanStack 没有这个能力**，是本仓的一等公民扩展：
+**失败即终局**：`STEP_FAILED` 只会 rethrow，不自动重跑。重试只有一条路：**新开一个 run**，
+把已完成的部分作为 input 带进去（`continue_from` 那套日志截断曾是本地扩展，
+因**不是上游能力**已删除，见 `AGENTS.md`）。
 
 ```rust
 let outcome = run_workflow(
     RunWorkflowOptions::new(Arc::new(wf.clone()), store)
-        .input(input)
-        .run_id("run-1")
-        .continue_from("charge"),   // 截断 charge 的终态 checkpoint 及后缀
+        .input(json!({ "order_id": "o-1", "retry_of": "run-1" }))
+        .run_id("run-2"),
 ).outcome().await?;
-// 重放：前缀短路，charge 起的后缀从零重跑
 ```
 
-命中即停用 `.target_step("gen-pdf")`（同为本地扩展）。
-机制详见 `AGENTS.md` 的「日志是短路索引」。
+跑一部分后停在某步用 `.target_step("gen-pdf")`（本地扩展，保留）。
+
 
 ## Recipe: 换 store
 
@@ -287,8 +286,9 @@ store 是可插拔的，workflow 代码不动。本仓三个实现跑**同一份
   事件」，runtime 的 `classifyRun` 只看 store。原因是重放幂等——重 drive 一个已
   挂起的 run 一条新事件都不写。推导见 `docs/tanstack-alignment.md` 的「决策
   (2026-09-30)」。
-- 多了 `continue_from` / `target_step`；少了 `recover` / `attach` / `signal` /
+- 多了 `target_step`；少了 `recover` / `attach` / `signal` /
   `threadId` / `outputSink` / `telemetry`（对照表见 `docs/tanstack-alignment.md`）。
+  （`continue_from` 曾是本地扩展，已因非上游能力删除。）
 - 挂起即返回：所有 pause 类原语写完 checkpoint 就结束本次 drive。
 
 ## Where next

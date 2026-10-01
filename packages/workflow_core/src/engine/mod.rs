@@ -327,7 +327,7 @@ where
 
     // Replay short-circuit: a succeeded checkpoint returns the cached result
     // without re-running `run`. A failed checkpoint rethrows the stored error
-    // (failures are terminal; retry via continue_from / a new run).
+    // (failures are terminal; retry via a new run).
     if let Some(st) = inner.live(step_id) {
         match st.status {
             StepStatus::Success => {
