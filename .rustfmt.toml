@@ -1,0 +1,4 @@
+# 启用不稳定特性，这是 fn_single_line 生效的前提
+unstable_features = true
+
+fn_single_line = true
