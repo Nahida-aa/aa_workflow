@@ -167,7 +167,7 @@ impl<Ix: IndexType> RevCsr<Ix> {
     }
 
     #[inline]
-    pub fn predecessors_of(&self, i: usize) -> &[Ix] {
+    pub fn predecessors(&self, i: usize) -> &[Ix] {
         let start = self.offsets[i].to_usize();
         let end = self.offsets[i + 1].to_usize();
         &self.targets[start..end]

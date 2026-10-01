@@ -72,7 +72,7 @@ impl<N, E, Ix: IndexType> Dag<Static, N, E, Ix> {
     /// 入边迭代器。若未构建反向 CSR，返回 None。
     pub fn predecessors(&self, id: Ix) -> Option<impl Iterator<Item = Ix> + '_> {
         let rev = self.rev.as_ref()?;
-        Some(rev.predecessors_of(id.to_usize()).iter().copied())
+        Some(rev.predecessors(id.to_usize()).iter().copied())
     }
 
     /// 入度。若未构建反向 CSR，返回 None。
@@ -190,7 +190,7 @@ impl<N, E, Ix: IndexType> Dag<Static, N, E, Ix> {
             let rev = RevCsr::from_csr(&self.csr, n);
             for u in (0..=max_pos).rev() {
                 if visited[u] {
-                    for pred in rev.predecessors_of(u) {
+                    for pred in rev.predecessors(u) {
                         visited[pred.to_usize()] = true;
                     }
                 }
