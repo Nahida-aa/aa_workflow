@@ -1,4 +1,4 @@
-use std::{collections::{HashSet, VecDeque}, hash::Hash, marker::PhantomData};
+use std::{ marker::PhantomData};
 
 use crate::dag::{base::Dag, cap::Static, csr::{Csr, RevCsr}, edge::EdgeStore, idx::IndexType};
 
@@ -51,7 +51,7 @@ impl<N, E, Ix: IndexType> Dag<Static, N, E, Ix> {
     /// - successors: 从一条边出发可达的节点集合
     #[inline]
     pub fn successors(&self, id: Ix) -> impl Iterator<Item = Ix> + '_ {
-        self.csr.targets_of(id.to_usize()).iter().copied()
+        self.csr.successors(id.to_usize()).iter().copied()
     }
 
     /// 出度: 从一个节点出发的边的数量(从节点出发相邻的节点数)
@@ -65,11 +65,7 @@ impl<N, E, Ix: IndexType> Dag<Static, N, E, Ix> {
         &self,
         id: Ix,
     ) -> impl Iterator<Item = (Ix, Option<&E>)> + '_ {
-        let (start, end) = self.csr.range_of(id.to_usize());
-        let targets = self.csr.targets_of(id.to_usize());
-        let csr = &self.csr;
-        targets.iter().copied().enumerate()
-            .map(move |(k, t)| (t, csr.edge_data_at(start + k)))
+       self.csr.edges_with_data_of(id.to_usize())
     }
     // ---------- 反向遍历 ----------
 

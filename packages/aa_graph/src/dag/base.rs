@@ -1,11 +1,8 @@
 // dag/base.rs
 
 use std::marker::PhantomData;
-use std::collections::{HashSet, VecDeque};
-use std::hash::Hash;
 
 use crate::dag::csr::{Csr, RevCsr};
-use crate::dag::edge::EdgeStore;
 
 
 // ============================================================

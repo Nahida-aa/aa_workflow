@@ -1,5 +1,3 @@
-use std::marker::PhantomData;
-use std::collections::{HashSet, VecDeque};
 use std::hash::Hash;
 
 pub trait IndexType:

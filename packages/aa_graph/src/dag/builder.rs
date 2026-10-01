@@ -4,7 +4,7 @@
 
 use std::marker::PhantomData;
 
-use crate::dag::{base::Dag, csr::{Csr, RevCsr}, edge::EdgeStore, error::DagError, idx::IndexType,  static_dag::StaticDag, topo_sort_alg::topo_sort};
+use crate::dag::{base::Dag, csr::{Csr, RevCsr},  error::DagError, idx::IndexType,  static_dag::StaticDag, topo_sort_alg::topo_sort};
 
 pub struct DagBuilder<N, E = (), Ix = u32> {
    pub(crate) nodes: Vec<N>,
