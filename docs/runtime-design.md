@@ -199,9 +199,11 @@ pub fn run_store_adapter(store: Arc<dyn WorkflowExecutionStore>) -> Arc<dyn RunS
 - **CAS 冲突必须原样透出**：适配器把 `anyhow::Error` downcast 回
   `StoreError::Conflict`，否则 core 的 rebase-retry 循环会把它当普通 IO 错误
   处理（已由 `cas_conflict_survives_adaptation` 测试钉住）。
-- **两个方法如实报不支持**：`truncate_log_at_step`（`continue_from` 用）与 `subscribe`
-  在基础层没有对应物——上游的 `createRunStoreAdapter` 同样没实现 `truncateRuns`。
-  适配器选择**报错**而非静默 no-op。
+- **两个可选能力都不实现**：core `RunStore` 上的 `truncate_log_at_step`
+  （`continue_from` 用）与 `subscribe` 在基础层 `WorkflowRunStoreAdapterStore`
+  上没有对应物，所以适配器**不覆写**它们，直接继承默认体——截断默认体报
+  `StoreError::Io`、订阅默认体给 `None`。两者都是「实现是可选的」，但截断
+  那侧**报错而非静默 no-op**：`continue_from` 绝不能看起来成功却实际全部短路。
 
 代价：每次调用多一次 `dyn` 间接 + 参数转换。本地低频率调用可忽略。
 

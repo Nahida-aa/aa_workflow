@@ -445,17 +445,10 @@ impl RunStore for RunStoreAdapter {
             .map_err(to_store_error)
     }
 
-    fn truncate_log_at_step(&self, _run_id: &str, _step_id: &str) -> Result<(), StoreError> {
-        // 基础层没有对应方法（上游的 `createRunStoreAdapter` 也没有实现
-        // `truncateRuns` —— 那不在 `WorkflowRunStoreAdapterStore` 上）。
-        // core 的 `continue_from` 走这里，故对 runtime store 暂不支持。
-        Err(StoreError::Io(
-            "truncate_log_at_step 不在 WorkflowRunStoreAdapterStore 契约里；\
-             经适配器暴露给 core 的 store 暂不支持 continue_from"
-                .into(),
-        ))
-    }
-
+    // 注意这里**没有** `truncate_log_at_step`：那是 core `RunStore` 上的可选
+    // 能力（默认体返回 `Err`），基础层 `WorkflowRunStoreAdapterStore` 没有对应
+    // 物，适配器也就没有可转发的目标，故不实现、直接继承默认体。
+    // 于是经适配器暴露给 core 的 store 一样不支持 `continue_from`。
     fn subscribe(&self, run_id: &str) -> Option<Receiver<WorkflowEvent>> {
         // 底层 `subscribe_events` 是回调式（`Box<dyn Fn>`）+ 返回退订句柄，core
         // 要的是 `mpsc::Receiver`。用一条转发链弥合：
@@ -623,7 +616,8 @@ mod adapter_tests {
         );
     }
 
-    /// `truncate_log_at_step` 不在基础层契约里，适配器如实报错而非静默 no-op。
+    /// 适配器**不实现**截断这个可选能力（基础层没有可转发的目标），故继承
+    /// `RunStore` 的默认体——如实报错，而非静默 no-op。
     #[test]
     fn truncate_log_at_step_reports_unsupported() {
         let (store, _mem) = adapted();

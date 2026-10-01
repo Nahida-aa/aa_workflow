@@ -191,9 +191,10 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
 
 ### C. 同一概念，形状不同
 
-- **`RunStore`**：本仓多一个 `truncate_log_at_step`（**必需方法**，不是默认实现
-  ——不支持要报 `StoreError::Io`，不许静默 no-op，否则 `continue_from` 会看起来
-  成功、实际全部短路）
+- **`RunStore`**：本仓多一个 `truncate_log_at_step`（**可选能力**，带默认体，
+  实现者不必写——否则等于给每个 store 强加一个假桩；默认体报
+  `StoreError::Io` 而非静默 no-op，否则 `continue_from` 会看起来成功、
+  实际全部短路）
 - **`RunState`**：本仓 `waiting_for` / `pending_approval` 是两个具名槽；上游用
   `awaiting: RunAwaitable[]`（数组 + `type` 判别式）作**规范形**，两个具名字段是
   **镜像**。**2026-09-30 已补齐**（见下一节）

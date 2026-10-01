@@ -273,8 +273,9 @@ impl DeleteReason {
 /// | 方法 | 上游有吗 | 说明 |
 /// | ---- | -------- | ---- |
 /// | `get_run_state` / `set_run_state` / `delete_run` | ✅ | 一一对应 |
-/// | `append_event` / `get_events` / `subscribe` | ✅ | 一一对应 |
-/// | [`truncate_log_at_step`](Self::truncate_log_at_step) | ❌ **本地扩展** | 支撑 `continue_from`；上游连 `continueFrom` 都没有 |
+/// | `append_event` / `get_events` | ✅ | 一一对应 |
+/// | [`subscribe`](Self::subscribe) | ✅ | 一一对应；**可选能力**（默认体给 `None`） |
+/// | [`truncate_log_at_step`](Self::truncate_log_at_step) | ❌ **本地扩展** | 支撑 `continue_from`；上游连 `continueFrom` 都没有。**可选能力**（默认体报不支持），实现者不必写 |
 ///
 /// 详见 `docs/tanstack-alignment.md` 的「保留了分歧（本地扩展 / 一等公民）」。
 /// 这也是为什么 runtime 的新契约 `WorkflowExecutionStore` 没有截断能力——它对齐的
@@ -316,15 +317,35 @@ pub trait RunStore: Send + Sync {
     /// 所以对照上游时**不必**去找它的对端——找不到是正常的。这也解释了为什么新契约
     /// `WorkflowExecutionStore` 没有对等能力：它对齐的是上游，而截断是本仓独有的。
     ///
+    /// # 可选能力：默认实现报告**不支持**，store 无需实现
+    ///
+    /// 与 [`subscribe`](Self::subscribe) 同一个模式：方法带默认体，实现者只在
+    /// **真能截断**时才覆写。这样加这个本地扩展不会给每个 store（尤其
+    /// postgres 这类不可能在 SQL 层重写事件日志的）强加一个假的
+    /// `Err(unsupported)` 桩。
+    ///
+    /// 但**默认体仍然返回 `Err`、而不是静默 no-op**——那条约束没变：做不到
+    /// 截断必须让 [`continue_from`] 明确失败，否则它会看起来成功、实际重放时
+    /// 全部短路，用户以为重跑了却没有。所以「可选」说的是
+    /// **实现者的义务**，不是「调用方可以当作成功」。
+    ///
+    /// 调用方要能接受失败：目前**没有**「是否支持」的探测 API，调用方只能把
+    /// 这个 `Err` 当成「该 store 没有截断能力」。要区分「能力缺失」与「真出错了」
+    /// 得先加探测，本 trait 暂不提供。
+    ///
     /// # no-op 语义（有意为之，不是实现偷懒）
     ///
     /// **目标 step 没有终态 checkpoint 时，保持日志原样、不报错**。因为没 checkpoint
     /// 的 step 重放时本来就会真跑（日志里没它的终态 → 短路不命中），无须截断。
     ///
-    /// 与之相对，**"做不到截断"必须报错**：不支持该能力的 store 要返回
-    /// [`StoreError::Io`]，**不许静默 no-op** —— 否则 `continue_from` 会看起来成功、
-    /// 实际重放时全部短路，用户以为重跑了却没有。
-    fn truncate_log_at_step(&self, run_id: &str, step_id: &str) -> Result<(), StoreError>;
+    /// [`continue_from`]: crate::RunWorkflowOptions
+    fn truncate_log_at_step(&self, _run_id: &str, _step_id: &str) -> Result<(), StoreError> {
+        Err(StoreError::Io(
+            "truncate_log_at_step 是可选能力：本 store 未实现日志截断，\
+             不支持 continue_from"
+                .into(),
+        ))
+    }
 
     /// Live subscription: a receiver that sees every future event appended to
     /// this run's log. `None` if the store does not support subscriptions.
@@ -560,5 +581,45 @@ mod tests {
         };
         assert_eq!(step_id, "gate");
         assert_eq!(*meta, None);
+    }
+
+    /// 截断是**可选能力**：这个 store 一个字都没写 `truncate_log_at_step`，
+    /// 只实现 5 个必需方法就能通过 trait 约束。这条测试就是「加本地扩展不等于
+    /// 给每个 store 强加一个假桩」这条决定的守门人——有人把默认体去掉、本 trait
+    /// 改回必需方法时，这里会编译失败。
+    struct MinimalStore;
+
+    impl RunStore for MinimalStore {
+        fn get_run_state(&self, _run_id: &str) -> Result<Option<RunState>, StoreError> {
+            Ok(None)
+        }
+        fn set_run_state(&self, _run_id: &str, _state: &RunState) -> Result<(), StoreError> {
+            Ok(())
+        }
+        fn delete_run(&self, _run_id: &str, _reason: DeleteReason) -> Result<(), StoreError> {
+            Ok(())
+        }
+        fn append_event(
+            &self,
+            _run_id: &str,
+            _expected_next_index: usize,
+            _event: &WorkflowEvent,
+        ) -> Result<(), StoreError> {
+            Ok(())
+        }
+        fn get_events(&self, _run_id: &str) -> Result<Vec<WorkflowEvent>, StoreError> {
+            Ok(vec![])
+        }
+    }
+
+    #[test]
+    fn truncate_is_optional_and_defaults_to_reporting_unsupported() {
+        let err = MinimalStore
+            .truncate_log_at_step("r1", "a")
+            .expect_err("未实现截断的 store 必须明确报不支持，不许静默 no-op");
+        assert!(
+            matches!(err, StoreError::Io(_)),
+            "应是 Io 错误，实际 {err:?}"
+        );
     }
 }
