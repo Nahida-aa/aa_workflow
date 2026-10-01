@@ -244,6 +244,10 @@ impl InMemoryExecutionStore {
     /// 当前挂在 `run_id` 上的订阅回调数。仅供测试断言退订是否真的发生
     /// ——适配器的 `subscribe` 把 `Receiver` 桥接成回调后，「订阅有没有被
     /// 撤掉」只能从这里观察。
+    ///
+    /// `#[cfg(test)]`：这是**测试脚手架**，不是产品能力，不该出现在公开 API
+    /// 面上（`workflow_runtime` 没有 `public_api` 快照测试兜着，得自己拦住）。
+    #[cfg(test)]
     pub fn debug_subscriber_count(&self, run_id: &str) -> usize {
         self.inner
             .subscribers
