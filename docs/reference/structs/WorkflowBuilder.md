@@ -21,13 +21,18 @@ _（存在非公开字段）_
 pub fn middleware<PExt>(self, m: Middleware) -> WorkflowBuilder<TInput, TOutput, TState, PExt>
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:235`](../../../packages/workflow_core/src/define/define_workflow.rs#L235)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:240`](../../../packages/workflow_core/src/define/define_workflow.rs#L240)
 
 Attach a runtime middleware and re-key `TCtxExt` to `PExt` — the type of
-`ctx.ext` the handler reads (`produce`'s JSON output is deserialized
-into it; `Default` is used when the middleware has no `produce`).
-TanStack's intersection of extension types collapses to this single
-bundle; extra `wrap`s still compose in registration order.
+`ctx.ext` the handler reads. Every middleware's `produce` runs and its
+JSON output shallow-merges into the bundle in registration order (later
+keys win, matching TanStack's `Object.assign` accumulation), so with
+several producing middlewares each returns its own part and the *last*
+`.middleware::<PExt>()` call fixes the bundle type covering all parts;
+`Default` applies when no middleware has a `produce`. TanStack's
+intersection of extension types collapses to this single bundle, and a
+`produce` cannot read earlier middlewares' extensions (upstream can, via
+the shared ctx); extra `wrap`s still compose in registration order.
 
 #### Parameters
 
@@ -48,7 +53,7 @@ bundle; extra `wrap`s still compose in registration order.
 pub fn previous_versions<impl Into<AnyWorkflowDefinition>: Into, impl IntoIterator<Item = impl Into<AnyWorkflowDefinition>>: IntoIterator>(self, v: impl ?) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:250`](../../../packages/workflow_core/src/define/define_workflow.rs#L250)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:255`](../../../packages/workflow_core/src/define/define_workflow.rs#L255)
 
 Older versions of the same workflow to route resumed runs to (see
 [`select_workflow_version`](../functions/select_workflow_version.md)).
@@ -79,7 +84,7 @@ where
     Fut: Future + Send + 'static
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:262`](../../../packages/workflow_core/src/define/define_workflow.rs#L262)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:267`](../../../packages/workflow_core/src/define/define_workflow.rs#L267)
 
 Finalize with the orchestrating closure. `AOut` is inferred from the
 handler's return value; the engine stores it serialized as JSON, so on

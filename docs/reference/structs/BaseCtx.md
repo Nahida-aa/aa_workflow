@@ -74,10 +74,11 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:121`](../../../packages/w
 ext: TCtxExt
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:126`](../../../packages/workflow_core/src/define/mod.rs#L126)
+Defined in: [`packages/workflow_core/src/define/mod.rs:127`](../../../packages/workflow_core/src/define/mod.rs#L127)
 
 `TExtensions` — ctx extension bundle, the `{...context}` accumulated by
-middleware. `()` (the default) when no middleware declares one. Built by
+middleware (all `produce` hooks run and shallow-merge in registration
+order). `()` (the default) when no middleware declares one. Built by
 the middleware's `produce` and re-deserialized on every drive, so it is
 deterministic across resume.
 
@@ -96,7 +97,7 @@ where
     TState: Serialize
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:199`](../../../packages/workflow_core/src/define/mod.rs#L199)
+Defined in: [`packages/workflow_core/src/define/mod.rs:200`](../../../packages/workflow_core/src/define/mod.rs#L200)
 
 Runs `run` durably under `step_id` and resolves to `T` — the closure's own
 return type, the way upstream's `step<T>` behaves.
@@ -148,7 +149,7 @@ where
     TState: Serialize
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:213`](../../../packages/workflow_core/src/define/mod.rs#L213)
+Defined in: [`packages/workflow_core/src/define/mod.rs:214`](../../../packages/workflow_core/src/define/mod.rs#L214)
 
 Durable approval wait: pauses the run until [`signal_run`](../functions/signal_run.md)
 delivers a decision for `key`. `reason` is persisted in the `StepPaused`
@@ -180,7 +181,7 @@ where
     TState: Serialize
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:225`](../../../packages/workflow_core/src/define/mod.rs#L225)
+Defined in: [`packages/workflow_core/src/define/mod.rs:226`](../../../packages/workflow_core/src/define/mod.rs#L226)
 
 [`Self::approve`](BaseCtx.md) + [`ApproveOptions`](ApproveOptions.md)（`meta` / payload `schema`）。
 
@@ -213,7 +214,7 @@ where
     TState: Serialize
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:252`](../../../packages/workflow_core/src/define/mod.rs#L252)
+Defined in: [`packages/workflow_core/src/define/mod.rs:253`](../../../packages/workflow_core/src/define/mod.rs#L253)
 
 Durable sleep: pauses the run until `dur` elapses. `key` is the
 deterministic pause identity. An external timer (the runtime's sweep,
@@ -246,7 +247,7 @@ where
     TState: Serialize
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:271`](../../../packages/workflow_core/src/define/mod.rs#L271)
+Defined in: [`packages/workflow_core/src/define/mod.rs:272`](../../../packages/workflow_core/src/define/mod.rs#L272)
 
 Durable absolute-time wait: pauses until wall-clock `ts_ms` (equivalent
 to TanStack's `sleepUntil`). The timestamp is stored **verbatim** —
@@ -279,7 +280,7 @@ where
     TState: Serialize
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:288`](../../../packages/workflow_core/src/define/mod.rs#L288)
+Defined in: [`packages/workflow_core/src/define/mod.rs:289`](../../../packages/workflow_core/src/define/mod.rs#L289)
 
 Durable named wait: pauses the run until [`signal_event`](../functions/signal_event.md)
 delivers a payload for `event_name`. `key` is the deterministic pause
@@ -312,7 +313,7 @@ where
     TState: Serialize
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:302`](../../../packages/workflow_core/src/define/mod.rs#L302)
+Defined in: [`packages/workflow_core/src/define/mod.rs:303`](../../../packages/workflow_core/src/define/mod.rs#L303)
 
 [`Self::wait_for_event`](BaseCtx.md) + [`WaitForEventOptions`](WaitForEventOptions.md)（`deadline` / `meta` /
 payload `schema`）。对齐 TanStack `WaitForEventOptions`（`types.ts:268-279`）。
@@ -344,7 +345,7 @@ payload `schema`）。对齐 TanStack `WaitForEventOptions`（`types.ts:268-279`
 pub fn emit<impl AsRef<str>: AsRef>(&self, name: impl ?, value: Value)
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:328`](../../../packages/workflow_core/src/define/mod.rs#L328)
+Defined in: [`packages/workflow_core/src/define/mod.rs:329`](../../../packages/workflow_core/src/define/mod.rs#L329)
 
 Emit an observability event to the publisher. Never appended to the
 log, so it is outside replay — `fold_step_states` and resume ignore it
@@ -369,7 +370,7 @@ log, so it is outside replay — `fold_step_states` and resume ignore it
 pub fn now(&self) -> Result<i64>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:340`](../../../packages/workflow_core/src/define/mod.rs#L340)
+Defined in: [`packages/workflow_core/src/define/mod.rs:341`](../../../packages/workflow_core/src/define/mod.rs#L341)
 
 Deterministic wall-clock (TanStack `ctx.now`): records the call's
 timestamp as a checkpoint; replay serves the recorded value, so a run
@@ -388,7 +389,7 @@ sees the same clock across resumes. Returns `Err` only on store failure.
 pub fn uuid(&self) -> Result<String>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:347`](../../../packages/workflow_core/src/define/mod.rs#L347)
+Defined in: [`packages/workflow_core/src/define/mod.rs:348`](../../../packages/workflow_core/src/define/mod.rs#L348)
 
 Deterministic id (TanStack `ctx.uuid`): records a generated UUIDv4 as a
 checkpoint; replay serves the recorded id, so the same value is seen
@@ -407,7 +408,7 @@ across resumes. Returns `Err` only on store failure.
 pub fn is_cancelled(&self) -> bool
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:355`](../../../packages/workflow_core/src/define/mod.rs#L355)
+Defined in: [`packages/workflow_core/src/define/mod.rs:356`](../../../packages/workflow_core/src/define/mod.rs#L356)
 
 Whether this run was cancelled via [`cancel_run`](../functions/cancel_run.md).
 Polled at step boundaries only — the engine cannot interrupt a step's
@@ -427,7 +428,7 @@ must check cooperatively).
 pub fn deadline(&self) -> Option<i64>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:367`](../../../packages/workflow_core/src/define/mod.rs#L367)
+Defined in: [`packages/workflow_core/src/define/mod.rs:368`](../../../packages/workflow_core/src/define/mod.rs#L368)
 
 Absolute UTC ms runtime budget for this drive (TanStack `deadline`);
 `None` when the host set no budget.
@@ -445,7 +446,7 @@ Absolute UTC ms runtime budget for this drive (TanStack `deadline`);
 pub fn time_remaining(&self) -> u64
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:372`](../../../packages/workflow_core/src/define/mod.rs#L372)
+Defined in: [`packages/workflow_core/src/define/mod.rs:373`](../../../packages/workflow_core/src/define/mod.rs#L373)
 
 Ms of runtime budget left (`u64::MAX` when no deadline).
 
@@ -462,7 +463,7 @@ Ms of runtime budget left (`u64::MAX` when no deadline).
 pub fn should_yield(&self) -> bool
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:381`](../../../packages/workflow_core/src/define/mod.rs#L381)
+Defined in: [`packages/workflow_core/src/define/mod.rs:382`](../../../packages/workflow_core/src/define/mod.rs#L382)
 
 True once the budget is nearly exhausted: `time_remaining() <
 min_yield_remaining_ms` (default 1000ms).
@@ -482,7 +483,7 @@ where
     TState: Serialize
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:389`](../../../packages/workflow_core/src/define/mod.rs#L389)
+Defined in: [`packages/workflow_core/src/define/mod.rs:390`](../../../packages/workflow_core/src/define/mod.rs#L390)
 
 Cooperative hand-back of the runtime budget (TanStack `yield`): durably
 parks the run on a `"__timer"` wait until [`RunWorkflowOptions`](RunWorkflowOptions.md) 的 `yield_resume_at`
@@ -507,7 +508,7 @@ where
     TState: Serialize
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:409`](../../../packages/workflow_core/src/define/mod.rs#L409)
+Defined in: [`packages/workflow_core/src/define/mod.rs:410`](../../../packages/workflow_core/src/define/mod.rs#L410)
 
 [`step`](BaseCtx.md) with per-step options (retry policy, timeout,
 resource gate, `up_to_date` make-check). Same typing: resolves to the

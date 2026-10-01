@@ -5,7 +5,7 @@ title: StepOptions
 
 # Struct: StepOptions
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:468`](../../../packages/workflow_core/src/define/mod.rs#L468)
+Defined in: [`packages/workflow_core/src/define/mod.rs:469`](../../../packages/workflow_core/src/define/mod.rs#L469)
 
 Per-step configuration. `retry`/`timeout`/`resource`/`up_to_date` are
 per-call-site options (v2), whereas TanStack passes them as inline
@@ -19,7 +19,7 @@ per-call-site options (v2), whereas TanStack passes them as inline
 label: Option<String>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:469`](../../../packages/workflow_core/src/define/mod.rs#L469)
+Defined in: [`packages/workflow_core/src/define/mod.rs:470`](../../../packages/workflow_core/src/define/mod.rs#L470)
 
 
 ***
@@ -30,7 +30,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:469`](../../../packages/w
 retry: Option<RetryPolicy>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:470`](../../../packages/workflow_core/src/define/mod.rs#L470)
+Defined in: [`packages/workflow_core/src/define/mod.rs:471`](../../../packages/workflow_core/src/define/mod.rs#L471)
 
 
 ***
@@ -41,7 +41,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:470`](../../../packages/w
 timeout: Option<Duration>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:471`](../../../packages/workflow_core/src/define/mod.rs#L471)
+Defined in: [`packages/workflow_core/src/define/mod.rs:472`](../../../packages/workflow_core/src/define/mod.rs#L472)
 
 
 ***
@@ -52,7 +52,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:471`](../../../packages/w
 resource: Option<String>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:474`](../../../packages/workflow_core/src/define/mod.rs#L474)
+Defined in: [`packages/workflow_core/src/define/mod.rs:475`](../../../packages/workflow_core/src/define/mod.rs#L475)
 
 Resource key this step contends on (e.g. `"gpu:0"`). Steps with the
 same key are serialized (capacity-1 gate, sibling of a mutex).
@@ -66,7 +66,7 @@ same key are serialized (capacity-1 gate, sibling of a mutex).
 up_to_date: Option<Arc<dyn Fn(&StepCtx, &StepState) -> bool + Send + Sync>>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:479`](../../../packages/workflow_core/src/define/mod.rs#L479)
+Defined in: [`packages/workflow_core/src/define/mod.rs:480`](../../../packages/workflow_core/src/define/mod.rs#L480)
 
 Make-style freshness check against the *derived* step state. `Ok(true)`
 while a successful checkpoint exists ⇒ the step short-circuits; if it
@@ -81,7 +81,7 @@ durable checkpoint only.
 pub fn new() -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:483`](../../../packages/workflow_core/src/define/mod.rs#L483)
+Defined in: [`packages/workflow_core/src/define/mod.rs:484`](../../../packages/workflow_core/src/define/mod.rs#L484)
 
 #### Returns
 
@@ -96,7 +96,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:483`](../../../packages/w
 pub fn retry(self, retry: RetryPolicy) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:487`](../../../packages/workflow_core/src/define/mod.rs#L487)
+Defined in: [`packages/workflow_core/src/define/mod.rs:488`](../../../packages/workflow_core/src/define/mod.rs#L488)
 
 #### Parameters
 
@@ -117,7 +117,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:487`](../../../packages/w
 pub fn timeout(self, timeout: Duration) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:492`](../../../packages/workflow_core/src/define/mod.rs#L492)
+Defined in: [`packages/workflow_core/src/define/mod.rs:493`](../../../packages/workflow_core/src/define/mod.rs#L493)
 
 #### Parameters
 
@@ -138,7 +138,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:492`](../../../packages/w
 pub fn resource<impl Into<String>: Into>(self, resource: impl ?) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:497`](../../../packages/workflow_core/src/define/mod.rs#L497)
+Defined in: [`packages/workflow_core/src/define/mod.rs:498`](../../../packages/workflow_core/src/define/mod.rs#L498)
 
 #### Parameters
 
@@ -159,7 +159,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:497`](../../../packages/w
 pub fn up_to_date<impl Fn(&StepCtx, &StepState) -> bool + Send + Sync + 'static: Fn(&StepCtx, &StepState) -> bool + Send + Sync + 'static>(self, up_to_date: impl ? + ? + ? + ?) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:502`](../../../packages/workflow_core/src/define/mod.rs#L502)
+Defined in: [`packages/workflow_core/src/define/mod.rs:503`](../../../packages/workflow_core/src/define/mod.rs#L503)
 
 #### Parameters
 

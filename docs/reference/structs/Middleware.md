@@ -5,7 +5,7 @@ title: Middleware
 
 # Struct: Middleware
 
-Defined in: [`packages/workflow_core/src/middleware/create_middleware.rs:22`](../../../packages/workflow_core/src/middleware/create_middleware.rs#L22)
+Defined in: [`packages/workflow_core/src/middleware/create_middleware.rs:24`](../../../packages/workflow_core/src/middleware/create_middleware.rs#L24)
 
 Runtime middleware (erased): a [`wrap`](Middleware.md) around the handler
 future chain plus a [`produce`](Middleware.md) hook that builds the typed
@@ -22,11 +22,14 @@ extension value — see [`WorkflowBuilder::middleware`](WorkflowBuilder.md)).
 produce: Option<CtxProducer>
 ```
 
-Defined in: [`packages/workflow_core/src/middleware/create_middleware.rs:26`](../../../packages/workflow_core/src/middleware/create_middleware.rs#L26)
+Defined in: [`packages/workflow_core/src/middleware/create_middleware.rs:31`](../../../packages/workflow_core/src/middleware/create_middleware.rs#L31)
 
-Builds the handler's `ctx.ext` from the erased drive ctx. Runs on every
-drive before the handler; its JSON output is deserialized into the
-builder's `TCtxExt` type (the last middleware with a `produce` wins).
+Builds part of the handler's `ctx.ext` from the erased drive ctx. All
+`produce` hooks run on every drive, in registration order, and their
+JSON outputs shallow-merge into one object (later keys win, matching
+TanStack's `Object.assign` accumulation); only object outputs
+participate. The merged object is deserialized into the builder's
+`TCtxExt` type; `Default` applies when nothing produced an object.
 
 
 ***
@@ -37,7 +40,7 @@ builder's `TCtxExt` type (the last middleware with a `produce` wins).
 wrap: Option<CtxWrapper>
 ```
 
-Defined in: [`packages/workflow_core/src/middleware/create_middleware.rs:30`](../../../packages/workflow_core/src/middleware/create_middleware.rs#L30)
+Defined in: [`packages/workflow_core/src/middleware/create_middleware.rs:35`](../../../packages/workflow_core/src/middleware/create_middleware.rs#L35)
 
 Around-wrapper on the handler future: `next` is the rest of the pipeline
 (inner middlewares, then the typed handler). The first-listed middleware
@@ -51,7 +54,7 @@ is outermost, like TanStack's `composeMiddlewares`.
 pub fn new() -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/middleware/create_middleware.rs:47`](../../../packages/workflow_core/src/middleware/create_middleware.rs#L47)
+Defined in: [`packages/workflow_core/src/middleware/create_middleware.rs:52`](../../../packages/workflow_core/src/middleware/create_middleware.rs#L52)
 
 #### Returns
 
@@ -68,7 +71,7 @@ where
     F: Fn(&WorkflowCtx) -> Result<Value> + Send + Sync + 'static
 ```
 
-Defined in: [`packages/workflow_core/src/middleware/create_middleware.rs:55`](../../../packages/workflow_core/src/middleware/create_middleware.rs#L55)
+Defined in: [`packages/workflow_core/src/middleware/create_middleware.rs:60`](../../../packages/workflow_core/src/middleware/create_middleware.rs#L60)
 
 Set the ctx-extension producer.
 
@@ -93,7 +96,7 @@ where
     F: Fn(WorkflowCtx, BoxFuture<'static, Result<Value>>) -> BoxFuture<'static, Result<Value>> + Send + Sync + 'static
 ```
 
-Defined in: [`packages/workflow_core/src/middleware/create_middleware.rs:64`](../../../packages/workflow_core/src/middleware/create_middleware.rs#L64)
+Defined in: [`packages/workflow_core/src/middleware/create_middleware.rs:69`](../../../packages/workflow_core/src/middleware/create_middleware.rs#L69)
 
 Set the around-wrapper.
 

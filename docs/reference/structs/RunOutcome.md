@@ -5,7 +5,7 @@ title: RunOutcome
 
 # Struct: RunOutcome
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:326`](../../../packages/workflow_core/src/engine/run_workflow.rs#L326)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:317`](../../../packages/workflow_core/src/engine/run_workflow.rs#L317)
 
 ## Fields
 
@@ -15,7 +15,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:326`](../../../p
 run_id: String
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:327`](../../../packages/workflow_core/src/engine/run_workflow.rs#L327)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:318`](../../../packages/workflow_core/src/engine/run_workflow.rs#L318)
 
 
 ***
@@ -26,7 +26,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:327`](../../../p
 status: RunStatus
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:328`](../../../packages/workflow_core/src/engine/run_workflow.rs#L328)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:319`](../../../packages/workflow_core/src/engine/run_workflow.rs#L319)
 
 
 ***
@@ -37,7 +37,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:328`](../../../p
 output: Option<Value>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:329`](../../../packages/workflow_core/src/engine/run_workflow.rs#L329)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:320`](../../../packages/workflow_core/src/engine/run_workflow.rs#L320)
 
 
 ***
@@ -48,7 +48,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:329`](../../../p
 error: Option<RunError>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:335`](../../../packages/workflow_core/src/engine/run_workflow.rs#L335)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:326`](../../../packages/workflow_core/src/engine/run_workflow.rs#L326)
 
 与 [`RunState::error`](RunState.md) 是**同一个类型**——
 一次失败的 run 在「返回值」和「持久化信封」两处描述一致，不要只改一边。
@@ -64,7 +64,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:335`](../../../p
 pub fn from_run_state(state: RunState) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:362`](../../../packages/workflow_core/src/engine/run_workflow.rs#L362)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:353`](../../../packages/workflow_core/src/engine/run_workflow.rs#L353)
 
 从 **store 里的 [`RunState`](RunState.md)** 读出 run 结果，而不是从事件流末事件推。
 
@@ -109,7 +109,7 @@ history"*，commit `4f64b9c`；本仓对应 `exec_pause_with` 的
 pub fn try_from_run_state(state: Option<RunState>) -> Result<Self, WorkflowError>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:372`](../../../packages/workflow_core/src/engine/run_workflow.rs#L372)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:363`](../../../packages/workflow_core/src/engine/run_workflow.rs#L363)
 
 [`Self::from_run_state`](RunOutcome.md) 的 `Result` 版——`RunState` 读不出来才算错。
 

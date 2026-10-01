@@ -5,7 +5,7 @@ title: PayloadSchema
 
 # Struct: PayloadSchema
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:531`](../../../packages/workflow_core/src/define/mod.rs#L531)
+Defined in: [`packages/workflow_core/src/define/mod.rs:532`](../../../packages/workflow_core/src/define/mod.rs#L532)
 
 一个具名的 payload 形状声明。由 [`PayloadSchema::of::<T>`](PayloadSchema.md) 构造。
 
@@ -23,7 +23,7 @@ _（存在非公开字段）_
 pub fn of<T: DeserializeOwned + Send + Sync + 'static>() -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:537`](../../../packages/workflow_core/src/define/mod.rs#L537)
+Defined in: [`packages/workflow_core/src/define/mod.rs:538`](../../../packages/workflow_core/src/define/mod.rs#L538)
 
 用 `T` 作 schema：`T: Deserialize` 决定接受的 payload 形状。
 
