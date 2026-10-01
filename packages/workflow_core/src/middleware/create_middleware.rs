@@ -5,8 +5,10 @@
 //! - [`Middleware::produce`] —— 每 drive 产出一个 `ctx.ext`（typed ctx 扩展）；
 //! - [`Middleware::wrap`] —— 围绕 handler future 的洋葱式包裹，先注册的在最外层。
 //!
-//! 与 TanStack 的差异见 [`WorkflowBuilder::middleware`](crate::define::WorkflowBuilder::middleware)(crate::define::WorkflowBuilder::middleware)：
-//! 他们的多 middleware context 是类型交集，我们拍平成单一 `TCtxExt` 字段。
+//! 与 TanStack 的差异见 [`WorkflowBuilder::middleware`](crate::define::WorkflowBuilder::middleware)：
+//! 他们的多 middleware context 是共享 ctx 上的类型交集；我们仍是单一
+//! `TCtxExt` 字段，多个 `produce` 的输出按注册顺序浅合并进来，但单个
+//! `produce` 看不到彼此的扩展。
 
 use std::sync::Arc;
 
@@ -20,9 +22,12 @@ use crate::define::{BoxFuture, WorkflowCtx};
 /// extension value — see [`WorkflowBuilder::middleware`](crate::define::WorkflowBuilder::middleware)).
 #[derive(Clone)]
 pub struct Middleware {
-    /// Builds the handler's `ctx.ext` from the erased drive ctx. Runs on every
-    /// drive before the handler; its JSON output is deserialized into the
-    /// builder's `TCtxExt` type (the last middleware with a `produce` wins).
+    /// Builds part of the handler's `ctx.ext` from the erased drive ctx. All
+    /// `produce` hooks run on every drive, in registration order, and their
+    /// JSON outputs shallow-merge into one object (later keys win, matching
+    /// TanStack's `Object.assign` accumulation); only object outputs
+    /// participate. The merged object is deserialized into the builder's
+    /// `TCtxExt` type; [`Default`] applies when nothing produced an object.
     pub produce: Option<CtxProducer>,
     /// Around-wrapper on the handler future: `next` is the rest of the pipeline
     /// (inner middlewares, then the typed handler). The first-listed middleware

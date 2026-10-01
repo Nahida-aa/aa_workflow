@@ -228,10 +228,15 @@ pub struct WorkflowBuilder<TInput, TOutput, TState, TCtxExt = ()> {
 
 impl<TInput, TOutput, TState, TCtxExt> WorkflowBuilder<TInput, TOutput, TState, TCtxExt> {
     /// Attach a runtime middleware and re-key `TCtxExt` to `PExt` — the type of
-    /// `ctx.ext` the handler reads (`produce`'s JSON output is deserialized
-    /// into it; [`Default`] is used when the middleware has no `produce`).
-    /// TanStack's intersection of extension types collapses to this single
-    /// bundle; extra `wrap`s still compose in registration order.
+    /// `ctx.ext` the handler reads. Every middleware's `produce` runs and its
+    /// JSON output shallow-merges into the bundle in registration order (later
+    /// keys win, matching TanStack's `Object.assign` accumulation), so with
+    /// several producing middlewares each returns its own part and the *last*
+    /// `.middleware::<PExt>()` call fixes the bundle type covering all parts;
+    /// [`Default`] applies when no middleware has a `produce`. TanStack's
+    /// intersection of extension types collapses to this single bundle, and a
+    /// `produce` cannot read earlier middlewares' extensions (upstream can, via
+    /// the shared ctx); extra `wrap`s still compose in registration order.
     pub fn middleware<PExt>(
         mut self,
         m: Middleware,
@@ -298,13 +303,20 @@ impl<TInput, TOutput, TState, TCtxExt> WorkflowBuilder<TInput, TOutput, TState, 
             Box::pin(async move {
                 let input = serde_json::from_value(ctx.input.clone())?;
                 let state = serde_json::from_value(ctx.state.snapshot())?;
-                let ext: TCtxExt = produce_mw
-                    .iter()
-                    .filter_map(|m| m.produce.clone())
-                    .next_back()
-                    .map(|p| -> anyhow::Result<TCtxExt> { Ok(serde_json::from_value(p(&ctx)?)?) })
-                    .transpose()?
-                    .unwrap_or_default();
+                // 所有 produce 按注册顺序执行、浅合并成 ctx.ext —— 对齐上游
+                // composeMiddlewares 的 Object.assign 累加（后者覆盖同名键）；
+                // 非对象输出不参与合并（上游 `typeof ext === 'object'` 守卫同义）。
+                let mut ext_map: Option<serde_json::Map<String, serde_json::Value>> = None;
+                for produce in produce_mw.iter().filter_map(|m| m.produce.as_ref()) {
+                    let value = produce(&ctx)?;
+                    if let serde_json::Value::Object(map) = value {
+                        ext_map.get_or_insert_with(Default::default).extend(map);
+                    }
+                }
+                let ext: TCtxExt = match ext_map {
+                    Some(map) => serde_json::from_value(serde_json::Value::Object(map))?,
+                    None => TCtxExt::default(),
+                };
                 let typed = BaseCtx {
                     run_id: ctx.run_id,
                     input,

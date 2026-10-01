@@ -120,7 +120,8 @@ pub struct BaseCtx<TInput = serde_json::Value, TState = serde_json::Value, TCtxE
     /// `ctx.state === engine.state`）；见 `state_handle` 模块文档。
     pub state: StateHandle<TState>,
     /// `TExtensions` — ctx extension bundle, the `{...context}` accumulated by
-    /// middleware. `()` (the default) when no middleware declares one. Built by
+    /// middleware (all `produce` hooks run and shallow-merge in registration
+    /// order). `()` (the default) when no middleware declares one. Built by
     /// the middleware's `produce` and re-deserialized on every drive, so it is
     /// deterministic across resume.
     pub ext: TCtxExt,
@@ -909,6 +910,56 @@ mod tests {
         .outcome().await
         .unwrap();
         assert_eq!(out2.output, Some(serde_json::json!({ "user": "" })));
+    }
+
+    /// 多个 `produce` 全部执行并按注册顺序浅合并，后者覆盖同名键 —— 对齐上游
+    /// composeMiddlewares 的 Object.assign 累加，而非最后一个独占（旧实现只跑
+    /// 最后一个 produce，先注册的输出会缺失导致反序列化失败）。
+    #[tokio::test]
+    async fn middleware_produce_hooks_merge_in_registration_order() {
+        #[derive(serde::Deserialize, serde::Serialize, Default, Debug, PartialEq, Eq)]
+        struct BundleExt {
+            user: String,
+            trace: String,
+            shared: String,
+        }
+
+        let m_user = Middleware::new()
+            .produce(|_ctx| Ok(serde_json::json!({ "user": "alice", "shared": "from-user" })));
+        let m_trace = Middleware::new().produce(|_ctx| {
+            Ok(serde_json::json!({ "trace": "t-1", "shared": "from-trace" }))
+        });
+        let wf = create_workflow(
+            CreateWorkflowConfig::new("mw-merge").input::<serde_json::Value>(),
+        )
+        .middleware::<BundleExt>(m_user)
+        .middleware::<BundleExt>(m_trace)
+        .handler(
+            |ctx: BaseCtx<serde_json::Value, serde_json::Value, BundleExt>| async move {
+                Ok(serde_json::json!({
+                    "user": ctx.ext.user,
+                    "trace": ctx.ext.trace,
+                    "shared": ctx.ext.shared,
+                }))
+            },
+        );
+        let store = Arc::new(InMemoryStore::new());
+        let out = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store)
+                .input(serde_json::json!({})),
+        )
+        .outcome().await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        assert_eq!(
+            out.output,
+            Some(serde_json::json!({
+                "user": "alice",
+                "trace": "t-1",
+                "shared": "from-trace",
+            })),
+            "先注册的 produce 也执行；shared 被后注册的覆盖"
+        );
     }
 
     /// `wrap` 按注册序最外层包裹（TanStack `composeMiddlewares` 语义：先注册的
