@@ -186,7 +186,9 @@ pub struct WorkflowRuntimeRunResult {
     pub events: Vec<WorkflowEvent>,
     /// 观测到的事件总数（含被 `max_events` 截断的）。
     pub event_count: usize,
-    /// `true` = 事件列表因 `max_events` 被截断。
+    /// `Some(true)` = 事件列表因 `max_events` 被截断。
+    /// `None` = 未发生截断（未指定 `max_events`，或指定了但事件数没超）。
+    /// 对齐上游 `eventsTruncated?: boolean` 的可选属性 + `|| undefined` 归一。
     pub events_truncated: Option<bool>,
 }
 
@@ -1022,7 +1024,12 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
             run: snapshot,
             events,
             event_count,
-            events_truncated: max_events.map(|m| event_count > m),
+            // 对齐上游 `collected.eventsTruncated || undefined`（runtime-driver.ts:800）：
+            // 上游把裸 `boolean` 的 `false` 也抹成 `undefined`，好让下游
+            // `eventsTruncated !== undefined` 守卫同时覆盖「未指定 maxEvents」
+            // 与「指定了但没截断」两种情况，只在真发生截断时打点。
+            // Rust 侧同义：`Some(false)` 归一成 `None`，`None` = 未发生截断。
+            events_truncated: max_events.filter(|&m| event_count > m).map(|_| true),
         })
     }
 }
@@ -1427,6 +1434,64 @@ mod driver_tests {
         );
         assert!(out.event_count > 0, "应收集到事件");
         assert!(!out.events.is_empty());
+    }
+
+    /// `events_truncated` 的三档语义，对齐上游 `eventsTruncated?: boolean`
+    /// + `collected.eventsTruncated || undefined`（runtime-driver.ts:800）。
+    ///
+    /// 关键是中间那档：**指定了 `max_events` 但事件数没超**时给 `None` 而非
+    /// `Some(false)`——上游 `false || undefined` 把 `false` 抹成 `undefined`，
+    /// 这样下游 `eventsTruncated !== undefined` 只在真截断时打点。
+    #[tokio::test]
+    async fn events_truncated_normalizes_false_to_none() {
+        let fx = runtime_with("simple", simple_workflow());
+
+        // 上界宽松：指定了 max_events 但没截断 → None（不是 Some(false)）
+        let capped = fx
+            .rt
+            .start_run(WorkflowRuntimeStartRunArgs {
+                workflow_id: "simple".into(),
+                run_id: "r-capped".into(),
+                input: serde_json::json!({}),
+                max_events: Some(10_000),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(capped.event_count > 0);
+        assert_eq!(capped.events.len(), capped.event_count, "不应被截断");
+        assert_eq!(
+            capped.events_truncated, None,
+            "指定上限但未截断应归一成 None"
+        );
+
+        // 上界为 0：事件被整段截掉 → Some(true)
+        let zero = fx
+            .rt
+            .start_run(WorkflowRuntimeStartRunArgs {
+                workflow_id: "simple".into(),
+                run_id: "r-zero".into(),
+                input: serde_json::json!({}),
+                max_events: Some(0),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(zero.events.is_empty(), "max_events=0 应不留事件");
+        assert_eq!(zero.events_truncated, Some(true), "真截断应是 Some(true)");
+
+        // 不指定上限 → None
+        let uncap = fx
+            .rt
+            .start_run(WorkflowRuntimeStartRunArgs {
+                workflow_id: "simple".into(),
+                run_id: "r-uncapped".into(),
+                input: serde_json::json!({}),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(uncap.events_truncated, None);
     }
 
     /// `thread_id` 从 args 一路透到 `RUN_STARTED`（上游
