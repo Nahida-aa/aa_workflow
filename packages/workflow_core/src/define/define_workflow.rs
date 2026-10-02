@@ -237,6 +237,13 @@ impl<TInput, TOutput, TState, TCtxExt> WorkflowBuilder<TInput, TOutput, TState, 
     /// intersection of extension types collapses to this single bundle, and a
     /// `produce` cannot read earlier middlewares' extensions (upstream can, via
     /// the shared ctx); extra `wrap`s still compose in registration order.
+    ///
+    /// The collapse is deliberate: middleware lists are dynamic, so the wrap
+    /// chain is erased and extension-data flow is validated at runtime — the
+    /// same tradeoff as axum's `Router::layer` over erased `Route` services
+    /// (and axum's own extension injection is runtime-checked too). TS's
+    /// compile-time `UnionToIntersection` has no Rust equivalent worth
+    /// building; see `crate::middleware` for the full rationale.
     pub fn middleware<PExt>(
         mut self,
         m: Middleware,

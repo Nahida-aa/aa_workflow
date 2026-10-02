@@ -9,6 +9,16 @@
 //! 他们的多 middleware context 是共享 ctx 上的类型交集；我们仍是单一
 //! `TCtxExt` 字段，多个 `produce` 的输出按注册顺序浅合并进来，但单个
 //! `produce` 看不到彼此的扩展。
+//!
+//! 设计取舍（为什么类型层面不追 TS 的交集）：middleware 列表是动态的（存在
+//! [`WorkflowDefinition`](crate::define::WorkflowDefinition) 里、按 drive 应用），
+//! 包裹链只能整体擦除（`Arc<dyn Fn>`）——同 axum `Router::layer<L: Layer<Route>>`
+//! 把内层擦成 `Route` 的选择；数据流的正确性随之只剩运行时校验（serde）。
+//! 这与 Rust 生态同类做法同构：[`Middleware::wrap`] 即 `axum::middleware::from_fn`
+//! 的 `(req, Next) -> Response`（同样可改写输出）；而 axum 向 handler 传 middleware
+//! 注入的数据靠 extensions TypeMap + extractor，取不到在运行时报 `MissingExtension`，
+//! 同样不给静态保证。所以 TS 侧 `UnionToIntersection` 的编译期交集不在移植范围，
+//! 别再加回来。
 
 use std::sync::Arc;
 

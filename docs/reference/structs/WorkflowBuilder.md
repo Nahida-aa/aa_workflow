@@ -21,7 +21,7 @@ _（存在非公开字段）_
 pub fn middleware<PExt>(self, m: Middleware) -> WorkflowBuilder<TInput, TOutput, TState, PExt>
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:240`](../../../packages/workflow_core/src/define/define_workflow.rs#L240)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:247`](../../../packages/workflow_core/src/define/define_workflow.rs#L247)
 
 Attach a runtime middleware and re-key `TCtxExt` to `PExt` — the type of
 `ctx.ext` the handler reads. Every middleware's `produce` runs and its
@@ -33,6 +33,13 @@ several producing middlewares each returns its own part and the *last*
 intersection of extension types collapses to this single bundle, and a
 `produce` cannot read earlier middlewares' extensions (upstream can, via
 the shared ctx); extra `wrap`s still compose in registration order.
+
+The collapse is deliberate: middleware lists are dynamic, so the wrap
+chain is erased and extension-data flow is validated at runtime — the
+same tradeoff as axum's `Router::layer` over erased `Route` services
+(and axum's own extension injection is runtime-checked too). TS's
+compile-time `UnionToIntersection` has no Rust equivalent worth
+building; see `crate::middleware` for the full rationale.
 
 #### Parameters
 
@@ -53,7 +60,7 @@ the shared ctx); extra `wrap`s still compose in registration order.
 pub fn previous_versions<impl Into<AnyWorkflowDefinition>: Into, impl IntoIterator<Item = impl Into<AnyWorkflowDefinition>>: IntoIterator>(self, v: impl ?) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:255`](../../../packages/workflow_core/src/define/define_workflow.rs#L255)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:262`](../../../packages/workflow_core/src/define/define_workflow.rs#L262)
 
 Older versions of the same workflow to route resumed runs to (see
 [`select_workflow_version`](../functions/select_workflow_version.md)).
@@ -84,7 +91,7 @@ where
     Fut: Future + Send + 'static
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:267`](../../../packages/workflow_core/src/define/define_workflow.rs#L267)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:274`](../../../packages/workflow_core/src/define/define_workflow.rs#L274)
 
 Finalize with the orchestrating closure. `AOut` is inferred from the
 handler's return value; the engine stores it serialized as JSON, so on
