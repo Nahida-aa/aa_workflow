@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::define::{AnyWorkflowDefinition, WorkflowDefinition};
-use crate::engine::{DEFAULT_MIN_YIELD_REMAINING_MS, EngineRuntime, StepHalt, WorkflowCancelled, WorkflowParked, now_ms};
+use crate::engine::{DEFAULT_MIN_YIELD_REMAINING_MS, EngineRuntime, WorkflowCancelled, WorkflowParked, now_ms};
 use crate::error::{RunError, RunErrorCode, WorkflowError};
 use crate::event::{RunStatus, StepStatus, WorkflowEvent, fold_step_states};
 use crate::resource::Gate;
@@ -70,7 +70,7 @@ pub type PublisherFn =
 /// | `signalDelivery` / `approval` | — | 我们走 `signal_run` / `signal_event` 先落盘再 drive（D3 的形态差异） |
 /// | `attach` | ✅ `attach` | 只读回放，见 [`RunWorkflowOptions::attach`] |
 /// | `recover` / `signal` / `threadId` / `outputSink` / `telemetry` | — | **暂无**；未做，不是不做 |
-/// | — | ➕ `target_step` | **本地扩展**（上游连这个概念都没有） |
+/// | — | ➕ `interimGoals` | **本地扩展**（对齐 TS f2-lite 泊车语义） |
 ///
 /// # 为什么字段类型是 `AnyWorkflowDefinition`（newtype）而不是裸 `WorkflowDefinition`
 ///
@@ -101,7 +101,7 @@ pub struct RunWorkflowOptions {
     /// run 输入。默认 `Value::Null`。
     pub input: serde_json::Value,
     /// 命中即停（本地扩展；上游用 handler 内 early `return`）。
-    pub target_step: Option<String>,
+    pub interim_goals: Option<Vec<String>>,
     /// 只读回放一个已存在的 run（上游 `attach`，`run-workflow.ts:48` / `:371`）。
     ///
     /// 不碰 handler、不写日志、不改 `RunState`——把日志里已有的事件原样重放
@@ -204,7 +204,7 @@ impl RunWorkflowOptions {
             run_store,
             run_id: None,
             input: serde_json::Value::Null,
-            target_step: None,
+            interim_goals: None,
             attach: false,
             deadline: None,
             min_yield_remaining_ms: None,
@@ -233,8 +233,8 @@ impl RunWorkflowOptions {
     }
 
     /// 命中即停。
-    pub fn target_step(mut self, v: impl Into<String>) -> Self {
-        self.target_step = Some(v.into());
+    pub fn interim_goals(mut self, v: Vec<String>) -> Self {
+        self.interim_goals = Some(v);
         self
     }
 
@@ -376,7 +376,7 @@ pub use crate::registry::select_workflow_version;
 /// Runs (or resumes) a workflow by driving its async handler.
 ///
 /// Inputs:
-/// - `target_step`: once that step succeeds the engine raises [`StepHalt`],
+/// - `interim_goals`: once every listed step is checkpointed the engine parks
 ///   the handler unwinds (users should propagate with `?`), and the run ends
 ///   `Finished` with no output.
 ///
@@ -785,12 +785,14 @@ async fn drive(
     }
     let log_len = events.len();
 
-    let target_reached = match &opts.target_step {
-        Some(t) => lives
-            .get(t)
-            .map(|s| s.status == StepStatus::Success)
-            .unwrap_or(false),
-        None => false,
+    let goals_done_at_drive_start = match &opts.interim_goals {
+        Some(goals) if !goals.is_empty() => goals.iter().all(|g| {
+            lives
+                .get(g)
+                .map(|s| s.status == StepStatus::Success)
+                .unwrap_or(false)
+        }),
+        _ => false,
     };
 
     let state_mirror: Arc<Mutex<serde_json::Value>> = Arc::new(Mutex::new(state.clone()));
@@ -809,8 +811,9 @@ async fn drive(
         gate: Arc::new(Gate::new()),
         log_len: AtomicUsize::new(log_len),
         lives: Mutex::new(lives),
-        target_step: opts.target_step.clone(),
-        target_reached: AtomicBool::new(target_reached),
+        interim_goals: opts.interim_goals.clone(),
+        interim_goals_done: Mutex::new(std::collections::HashSet::new()),
+        goals_done_at_drive_start,
         publish_tx: Some(publish_tx.clone()),
         now_counter: AtomicUsize::new(0),
         uuid_counter: AtomicUsize::new(0),
@@ -822,6 +825,7 @@ async fn drive(
         yield_counter: AtomicUsize::new(0),
         default_step_retry: active.default_step_retry.clone(),
         compensations: std::sync::Mutex::new(Vec::new()),
+        interim_goal_parks: AtomicUsize::new(0),
         pending_retries: Mutex::new(pending_retries),
     });
     inner.publish(&WorkflowEvent::RunStarted {
@@ -848,7 +852,6 @@ async fn drive(
     // 返回（对齐上游 `if (engine.paused) return`，`run-workflow.ts:529`）。
     let (status, output, failure) = match handler_result {
         Ok(output) => (RunStatus::Finished, Some(output), None),
-        Err(e) if e.downcast_ref::<StepHalt>().is_some() => (RunStatus::Finished, None, None),
         // 挂起不是失败、也不是正常结束：run 停在挂起点等外部投递，
         // `exec_pause` 已经把 checkpoint 与 RunState 投影写好了。**不 append
         // 终局事件**（对齐上游 `if (engine.paused) return`，`run-workflow.ts:529`），
@@ -1747,7 +1750,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn target_step_stops_downstream() {
+    async fn interim_goals_park_at_goal() {
         let store = Arc::new(InMemoryStore::new());
         let log = Arc::new(Mutex::new(TestLog::default()));
         let wf = WorkflowDefinition::new("w").handler({
@@ -1773,14 +1776,16 @@ mod tests {
                 }
             }
         });
-        let out = run_workflow(
+        // interimGoals = [b]：b checkpoint 后泊车（run → paused，c 缺席即待续）
+        let first = run_workflow(
             RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
-            .target_step("b"),
+                .run_id("interim:1")
+                .interim_goals(vec!["b".into()]),
         )
         .outcome().await
         .unwrap();
-        assert_eq!(out.status, RunStatus::Finished);
+        assert_eq!(first.status, RunStatus::Paused, "泊车 → paused（非终态）");
         let l = log.lock().unwrap();
         assert_eq!(l.runs["a"], 1);
         assert_eq!(l.runs["b"], 1);
@@ -1789,6 +1794,21 @@ mod tests {
             0,
             "downstream never ran"
         );
+        drop(l);
+
+        // 续驱（不带 interimGoals）：泊车边界解除，c 补齐 → Finished
+        let second = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("interim:1"),
+        )
+        .outcome().await
+        .unwrap();
+        assert_eq!(second.status, RunStatus::Finished);
+        let l = log.lock().unwrap();
+        assert_eq!(l.runs["a"], 1, "上游短路：已完成的不重跑");
+        assert_eq!(l.runs["b"], 1);
+        assert_eq!(l.runs["c"], 1, "续驱只补缺席的 c");
     }
 
     #[tokio::test]

@@ -341,7 +341,12 @@ pub fn fold_step_states(events: &[WorkflowEvent]) -> HashMap<String, StepState> 
                 ..
             } => {
                 let st = states.entry(step_id.clone()).or_default();
-                st.status = StepStatus::Paused;
+                // 泊车不降级已完成/已失败的步骤：interim-goal 的泊车
+                // checkpoint 落在 StepFinished **之后**（跑完才停），若允许
+                // 覆盖，重驱时该步骤会被当"未执行"再次真跑。
+                if st.status != StepStatus::Success && st.status != StepStatus::Failed {
+                    st.status = StepStatus::Paused;
+                }
                 st.started_at = st.started_at.or(Some(*ts));
                 st.finished_at = due_at.or(st.finished_at);
             }

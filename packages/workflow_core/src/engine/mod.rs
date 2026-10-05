@@ -33,17 +33,6 @@ pub(crate) fn now_ms() -> i64 {
 }
 
 /// Internal sentinel: the engine stopped driving the handler after
-/// `target_step` succeeded. Becomes a `Finished` run, never `Errored`.
-#[derive(Debug)]
-pub struct StepHalt;
-
-impl std::fmt::Display for StepHalt {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "target_step reached, handler halted")
-    }
-}
-
-impl std::error::Error for StepHalt {}
 
 /// Internal sentinel: the engine parked the run at a durable wait point
 /// ([`exec_pause`]). The pause checkpoint and the `Paused` projection were
@@ -273,8 +262,13 @@ pub struct EngineRuntime {
     /// F2-lite 耐久重试：驱动启动时从日志折叠的待重试状态（按 step）。
     /// 空表 = 无待重试。exec_step 据此泊车（未到期）或续跑（到期）。
     pub pending_retries: Mutex<std::collections::HashMap<String, PendingRetry>>,
-    pub target_step: Option<String>,
-    target_reached: AtomicBool,
+    /// F2-lite 临时目标（INTERIM_GOAL）：名单内步骤全部 checkpoint 后经保留
+    /// 信号 `__interim-goal` 泊车（run → paused，宿主以 recover 续驱扩展边界）。
+    /// 转移检查防重挂；未到达的 goal 永不触发（best-effort fence）。
+    pub interim_goals: Option<Vec<String>>,
+    interim_goals_done: Mutex<std::collections::HashSet<String>>,
+    goals_done_at_drive_start: bool,
+    interim_goal_parks: AtomicUsize,
     /// Per-invocation positional counters for `ctx.now()` / `ctx.uuid()`
     /// (rebuilt on every drive, mirroring TanStack's per-run `engine.counters`);
     /// used to derive the checkpoint ids `__now-{n}` / `__uuid-{n}`.
@@ -399,18 +393,22 @@ impl EngineRuntime {
         self.lives.lock().ok()?.get(step_id).cloned()
     }
 
-    fn is_target(&self, step_id: &str) -> bool {
-        self.target_step.as_deref() == Some(step_id)
-    }
 
-    fn mark_target_reached(&self, step_id: &str) {
-        if self.is_target(step_id) {
-            self.target_reached.store(true, Ordering::Release);
+    /// F2-lite interim goal：goal 步骤 checkpoint 时记入 done 集合；全齐且
+    /// 本 drive 启动时尚未全齐 → 返回 true（调用者经保留信号 `__interim-goal`
+    /// 泊车）。转移检查防重挂；未到达的 goal 永不触发。
+    fn goal_boundary_reached(&self, step_id: &str) -> bool {
+        let Some(goals) = &self.interim_goals else {
+            return false;
+        };
+        if self.goals_done_at_drive_start {
+            return false;
         }
-    }
-
-    fn halted(&self) -> bool {
-        self.target_reached.load(Ordering::Acquire)
+        let mut done = self.interim_goals_done.lock().expect("interim goals lock");
+        if goals.iter().any(|g| g == step_id) {
+            done.insert(step_id.to_string());
+        }
+        goals.iter().all(|g| done.contains(g))
     }
 }
 
@@ -441,11 +439,6 @@ where
     F: FnOnce(StepCtx) -> Fut + Clone + Send + 'static,
     Fut: Future<Output = anyhow::Result<T>> + Send + 'static,
 {
-    // target_step reached → halt the whole handler.
-    if inner.halted() {
-        return Err(StepHalt.into());
-    }
-
     // Cancelled run → stop driving at this boundary.
     if is_cancelled(&inner.store, &inner.run_id) {
         return Err(WorkflowCancelled.into());
@@ -626,7 +619,23 @@ where
                     },
                 );
                 inner.publish(&ev);
-                inner.mark_target_reached(step_id);
+                // F2-lite interim goal：goal 全 checkpoint 且本 drive 启动时
+                // 尚未全齐 → 经保留信号 __interim-goal 泊车（宿主以 recover
+                // 续驱扩展边界；转移检查防重挂）。
+                if inner.goal_boundary_reached(step_id) {
+                    let goals = inner.interim_goals.clone().unwrap_or_default();
+                    let _ = crate::engine::exec_pause_with(
+                        inner,
+                        step_id,
+                        "__interim-goal",
+                        "interim goal reached",
+                        None,
+                        Some(serde_json::json!({ "goals": goals })),
+                        None,
+                    )
+                    .await;
+                    return Err(WorkflowParked.into());
+                }
                 return Ok(result);
             }
             Err(err) => {
