@@ -197,6 +197,38 @@ impl<TInput, TState, TCtxExt> BaseCtx<TInput, TState, TCtxExt> {
     /// keyed by a type with a custom `Deserialize` — will therefore work on the
     /// first drive and fail on resume. That asymmetry is inherent to storing the
     /// result as JSON, not something this signature can paper over.
+    /// Phase-1 补偿登记（undo 轴，对齐 #19 `ctx.compensate`）：登记先于受
+    /// 保护效果；内存登记 + 重放重建（handler 重跑确定性重登记，回调不
+    /// 序列化）。未捕获失败时引擎逆序执行已登记补偿；名单由使用者提供，
+    /// 不校验封闭性（"unsafe" 语义：名单外下游的处置由调用者负责）。
+    pub fn compensate(
+        &self,
+        id: impl Into<String>,
+        undo: impl Fn(StepCtx) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>,
+            > + Send
+            + Sync
+            + 'static,
+        retry: RetryPolicy,
+    ) -> anyhow::Result<()> {
+        let id = id.into();
+        if id.starts_with("__compensation:") || id.starts_with("__retry:") {
+            return Err(anyhow::anyhow!(
+                "compensation id \"{id}\" uses the reserved __compensation:/__retry: prefix"
+            ));
+        }
+        self.engine
+            .compensations
+            .lock()
+            .expect("compensations lock")
+            .push(crate::engine::Compensation {
+                id,
+                undo: std::sync::Arc::new(undo),
+                retry,
+            });
+        Ok(())
+    }
+
     pub async fn step<T, F, Fut>(&self, step_id: &str, run: F) -> anyhow::Result<T>
     where
         T: serde::Serialize + serde::de::DeserializeOwned + Send + 'static,
@@ -451,6 +483,9 @@ pub struct RetryPolicy {
     /// Total attempts, including the first. 1 == no retry.
     pub max_attempts: usize,
     pub backoff: Backoff,
+    /// 耐久重试（#19 `retry.durable`）：attempt/失败/下次截止时间持久化，
+    /// 重启后经 sweep 续跑。false = 内存级重试（现状）。
+    pub durable: bool,
 }
 
 impl RetryPolicy {
@@ -458,6 +493,7 @@ impl RetryPolicy {
         Self {
             max_attempts,
             backoff,
+            durable: false,
         }
     }
 }

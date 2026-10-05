@@ -760,6 +760,29 @@ async fn drive(
         Err(e) => return Err(err_event(&run_id, e, RunErrorCode::Error)),
     };
     let lives = fold_step_states(&events);
+    // F2-lite 耐久重试：折叠待重试状态（每 step 取最后一份
+    // STEP_RETRY_SCHEDULED）——exec_step 入口据此泊车或续跑。
+    let mut pending_retries: std::collections::HashMap<String, crate::engine::PendingRetry> =
+        std::collections::HashMap::new();
+    for ev in &events {
+        if let WorkflowEvent::StepRetryScheduled {
+            step_id,
+            attempt,
+            next_attempt_at,
+            attempts,
+            ..
+        } = ev
+        {
+            pending_retries.insert(
+                step_id.clone(),
+                crate::engine::PendingRetry {
+                    attempts: attempts.clone(),
+                    last_attempt: *attempt,
+                    next_attempt_at: *next_attempt_at,
+                },
+            );
+        }
+    }
     let log_len = events.len();
 
     let target_reached = match &opts.target_step {
@@ -798,6 +821,8 @@ async fn drive(
         yield_resume_at: opts.yield_resume_at,
         yield_counter: AtomicUsize::new(0),
         default_step_retry: active.default_step_retry.clone(),
+        compensations: std::sync::Mutex::new(Vec::new()),
+        pending_retries: Mutex::new(pending_retries),
     });
     inner.publish(&WorkflowEvent::RunStarted {
         ts,
@@ -836,11 +861,22 @@ async fn drive(
             None,
             Some((RunError::cancelled(), RunErrorCode::Aborted)),
         ),
-        Err(e) => (
-            RunStatus::Errored,
-            None,
-            Some((RunError::from_anyhow(&e), RunErrorCode::Error)),
-        ),
+        Err(e) => {
+            // Phase-1 补偿（undo 轴）：未捕获失败 → 逆序执行已登记撤销。
+            // 每个补偿一个 COMPENSATION_* checkpoint；某个补偿耗尽重试 →
+            // 链就地停止（后续补偿留给人工），run 仍以原始失败 errored 结束
+            // （对齐 #19 durable-recovery 语义）。
+            if let Err((cid, ce)) =
+                crate::engine::run_compensations(&inner, &run_id, &e).await
+            {
+                eprintln!("[compensation] {cid} 失败：{ce}");
+            }
+            (
+                RunStatus::Errored,
+                None,
+                Some((RunError::from_anyhow(&e), RunErrorCode::Error)),
+            )
+        }
     };
 
     let terminal = match &failure {
@@ -1037,6 +1073,7 @@ pub fn run_workflow_sync(mut opts: RunWorkflowOptions) -> Result<RunOutcome, Wor
 }
 #[cfg(test)]
 mod tests {
+    use crate::define::{Backoff, RetryPolicy};
     /// `threadId` 只挂在 `RUN_STARTED` 上（上游 `types.ts:76` / `run-workflow.ts:52`），
     /// 且 start / resume / attach 三条路径都要带上（上游 `:242` / `:353` / `:391`）。
     ///
@@ -1908,5 +1945,396 @@ mod tests {
             Some(serde_json::json!({ "ver": "v2" })),
             "全新 run 用当前版本"
         );
+    }
+
+    // ========================================================
+    // Phase-1 补偿（undo 轴）——对齐 #19 durable-recovery 语义
+    // ========================================================
+
+    type UndoLog = Arc<Mutex<Vec<&'static str>>>;
+
+    type UndoHandler = Arc<dyn Fn(StepCtx) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>,
+    > + Send + Sync>;
+
+    fn make_undo(log: &UndoLog, name: &'static str) -> UndoHandler {
+        let calls = Arc::clone(log);
+        Arc::new(move |_sc: StepCtx| {
+            let calls = Arc::clone(&calls);
+            Box::pin(async move {
+                calls.lock().unwrap().push(name);
+                Ok(())
+            })
+        })
+    }
+
+    fn compensation_events(store: &InMemoryStore, run_id: &str) -> Vec<(String, String)> {
+        store
+            .get_events(run_id)
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                WorkflowEvent::CompensationStarted { .. } => {
+                    Some(("COMPENSATION_STARTED".into(), String::new()))
+                }
+                WorkflowEvent::CompensationCompleted { compensation_id, .. } => {
+                    Some(("COMPENSATION_COMPLETED".into(), compensation_id.clone()))
+                }
+                WorkflowEvent::CompensationFailed { compensation_id, .. } => {
+                    Some(("COMPENSATION_FAILED".into(), compensation_id.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn compensation_runs_in_reverse_on_failure() {
+        let store = Arc::new(InMemoryStore::new());
+        let undo_log: UndoLog = Arc::new(Mutex::new(Vec::new()));
+        let undo_a = make_undo(&undo_log, "undo-a");
+        let undo_b = make_undo(&undo_log, "undo-b");
+
+        let wf = WorkflowDefinition::new("w").handler(move |ctx: WorkflowCtx| {
+            let undo_a = undo_a.clone();
+            let undo_b = undo_b.clone();
+            async move {
+                ctx.compensate(
+                    "undo-a",
+                    move |sc: StepCtx| undo_a(sc),
+                    RetryPolicy::new(1, Backoff::Fixed { base_ms: 1 }),
+                )?;
+                ctx.compensate(
+                    "undo-b",
+                    move |sc: StepCtx| undo_b(sc),
+                    RetryPolicy::new(1, Backoff::Fixed { base_ms: 1 }),
+                )?;
+                let _ = ctx
+                    .step("boom", move |_sc: StepCtx| async move {
+                        Err::<serde_json::Value, _>(anyhow::anyhow!("boom"))
+                    })
+                    .await?;
+                Ok(serde_json::Value::Null)
+            }
+        });
+
+        let out = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf), store.clone())
+                .input(serde_json::json!({})),
+        )
+        .outcome()
+        .await
+        .unwrap();
+
+        assert_eq!(out.status, RunStatus::Errored);
+        assert_eq!(
+            *undo_log.lock().unwrap(),
+            vec!["undo-b", "undo-a"],
+            "逆登记序执行（后登记先撤销）"
+        );
+        let comp = compensation_events(&store, &out.run_id);
+        assert_eq!(comp.len(), 3, "STARTED + COMPLETED ×2");
+        assert_eq!(comp[0].0, "COMPENSATION_STARTED");
+        assert_eq!(
+            comp.iter().filter(|(t, _)| t == "COMPENSATION_COMPLETED").count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn compensation_failure_stops_chain() {
+        let store = Arc::new(InMemoryStore::new());
+        let undo_log: UndoLog = Arc::new(Mutex::new(Vec::new()));
+        let undo_a = make_undo(&undo_log, "undo-a");
+        let undo_b = make_undo(&undo_log, "undo-b");
+
+        let handler_log = Arc::clone(&undo_log);
+        let wf = WorkflowDefinition::new("w").handler(move |ctx: WorkflowCtx| {
+            let undo_a = undo_a.clone();
+            let _undo_b = undo_b.clone();
+            let calls = Arc::clone(&handler_log);
+            async move {
+                ctx.compensate(
+                    "undo-a",
+                    move |sc: StepCtx| undo_a(sc),
+                    RetryPolicy::new(1, Backoff::Fixed { base_ms: 1 }),
+                )?;
+                // undo-b 的撤销动作本身失败（耗尽即停）
+                ctx.compensate(
+                    "undo-b",
+                    move |_sc: StepCtx| {
+                        calls.lock().unwrap().push("undo-b");
+                        Box::pin(async {
+                            Err::<(), _>(anyhow::anyhow!("undo-b 自身故障"))
+                        })
+                    },
+                    RetryPolicy::new(1, Backoff::Fixed { base_ms: 1 }),
+                )?;
+                let _ = ctx
+                    .step("boom", move |_sc: StepCtx| async move {
+                        Err::<serde_json::Value, _>(anyhow::anyhow!("boom"))
+                    })
+                    .await?;
+                Ok(serde_json::Value::Null)
+            }
+        });
+
+        let out = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf), store.clone())
+                .input(serde_json::json!({})),
+        )
+        .outcome()
+        .await
+        .unwrap();
+
+        assert_eq!(out.status, RunStatus::Errored);
+        assert_eq!(*undo_log.lock().unwrap(), vec!["undo-b"], "链就地停止：undo-a 未执行");
+        let comp = compensation_events(&store, &out.run_id);
+        assert!(comp.iter().any(|(t, _)| t == "COMPENSATION_FAILED"));
+        assert_eq!(comp.iter().filter(|(t, _)| t == "COMPENSATION_COMPLETED").count(), 0);
+    }
+
+    #[tokio::test]
+    async fn no_compensation_on_success() {
+        let store = Arc::new(InMemoryStore::new());
+        let undo_log: UndoLog = Arc::new(Mutex::new(Vec::new()));
+        let undo_a = make_undo(&undo_log, "undo-a");
+
+        let wf = WorkflowDefinition::new("w").handler(move |ctx: WorkflowCtx| {
+            let undo_a = undo_a.clone();
+            async move {
+                ctx.compensate(
+                    "undo-a",
+                    move |sc: StepCtx| undo_a(sc),
+                    RetryPolicy::new(1, Backoff::Fixed { base_ms: 1 }),
+                )?;
+                let _ = ctx
+                    .step("ok", move |_sc: StepCtx| async move { Ok(serde_json::Value::Null) })
+                    .await?;
+                Ok(serde_json::Value::Null)
+            }
+        });
+
+        let out = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf), store.clone())
+                .input(serde_json::json!({})),
+        )
+        .outcome()
+        .await
+        .unwrap();
+
+        assert_eq!(out.status, RunStatus::Finished);
+        assert!(
+            compensation_events(&store, &out.run_id).is_empty(),
+            "成功不触发补偿"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_compensations_skip_across_restart() {
+        let store = Arc::new(InMemoryStore::new());
+        let undo_log: UndoLog = Arc::new(Mutex::new(Vec::new()));
+        let undo_a = make_undo(&undo_log, "undo-a");
+        let undo_b = make_undo(&undo_log, "undo-b");
+
+        let wf = WorkflowDefinition::new("w").handler(move |ctx: WorkflowCtx| {
+            let undo_a = undo_a.clone();
+            let undo_b = undo_b.clone();
+            async move {
+                ctx.compensate(
+                    "undo-a",
+                    move |sc: StepCtx| undo_a(sc),
+                    RetryPolicy::new(1, Backoff::Fixed { base_ms: 1 }),
+                )?;
+                ctx.compensate(
+                    "undo-b",
+                    move |sc: StepCtx| undo_b(sc),
+                    RetryPolicy::new(1, Backoff::Fixed { base_ms: 1 }),
+                )?;
+                let _ = ctx
+                    .step("boom", move |_sc: StepCtx| async move {
+                        Err::<serde_json::Value, _>(anyhow::anyhow!("boom"))
+                    })
+                    .await?;
+                Ok(serde_json::Value::Null)
+            }
+        });
+
+        let opts = || {
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("comp:restart")
+        };
+        let first = run_workflow(opts()).outcome().await.unwrap();
+        assert_eq!(first.status, RunStatus::Errored);
+        let after_first = undo_log.lock().unwrap().len();
+
+        // 第二次驱动（同 run_id 同 store）：重放短路已完成的补偿
+        let second = run_workflow(opts()).outcome().await.unwrap();
+        assert_eq!(second.status, RunStatus::Errored);
+        assert_eq!(
+            undo_log.lock().unwrap().len(),
+            after_first,
+            "已完成的补偿跨重启不重复执行"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_retry_parks_then_succeeds() {
+        let store = Arc::new(InMemoryStore::new());
+        let attempts_seen: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+        let handler_seen = Arc::clone(&attempts_seen);
+        let wf = WorkflowDefinition::new("w").handler(move |ctx: WorkflowCtx| {
+            let seen = Arc::clone(&handler_seen);
+            async move {
+                let opts = crate::define::StepOptions {
+                    retry: Some(RetryPolicy {
+                        max_attempts: 2,
+                        backoff: Backoff::Fixed { base_ms: 30 },
+                        durable: true,
+                    }),
+                    ..Default::default()
+                };
+                let _ = ctx
+                    .step_with(
+                        "flaky",
+                        opts,
+                        move |sc: StepCtx| {
+                            let seen = Arc::clone(&seen);
+                            let attempt = sc.attempt;
+                            seen.lock().unwrap().push(attempt);
+                            async move {
+                                if attempt == 1 {
+                                    Err::<serde_json::Value, _>(anyhow::anyhow!("flaky"))
+                                } else {
+                                    Ok(serde_json::json!("ok"))
+                                }
+                            }
+                        },
+                    )
+                    .await?;
+                Ok(serde_json::json!({ "retried": true }))
+            }
+        });
+
+        // 第一次驱动：attempt 1 失败 → 耐久泊车（run 暂停，等下次重试）
+        let first = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("durable:1"),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        assert_eq!(first.status, RunStatus::Paused, "durable 失败 → 泊车等重试");
+        // 等重试 deadline（now + 30ms）过期——泊车语义：到期后由重驱续跑
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+        // 日志里应有 STEP_RETRY_SCHEDULED（attempt 1，deadline 已登记）
+        let scheduled = store
+            .get_events("durable:1")
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, WorkflowEvent::StepRetryScheduled { step_id, .. } if step_id == "flaky"))
+            .count();
+        assert_eq!(scheduled, 1, "STEP_RETRY_SCHEDULED 应持久化");
+
+        // 第二次驱动（deadline 已过）：attempt 2 成功 → Finished
+        let second = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("durable:1"),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        assert_eq!(second.status, RunStatus::Finished);
+        assert_eq!(
+            attempts_seen.lock().unwrap().as_slice(),
+            &[1, 2],
+            "attempts 跨重启携带"
+        );
+
+        // STEP_FAILED 未落日志（耐久路径只有 RETRY_SCHEDULED）——重放规则验证
+        let failed = store
+            .get_events("durable:1")
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, WorkflowEvent::StepFailed { step_id, .. } if step_id == "flaky"))
+            .count();
+        assert_eq!(failed, 0, "耐久路径耗尽前不落 STEP_FAILED");
+    }
+
+    #[tokio::test]
+    async fn durable_retry_exhausts_to_errored() {
+        let store = Arc::new(InMemoryStore::new());
+        let attempts_seen: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+        let handler_seen = Arc::clone(&attempts_seen);
+        let wf = WorkflowDefinition::new("w").handler(move |ctx: WorkflowCtx| {
+            let seen = Arc::clone(&handler_seen);
+            async move {
+                let opts = crate::define::StepOptions {
+                    retry: Some(RetryPolicy {
+                        max_attempts: 2,
+                        backoff: Backoff::Fixed { base_ms: 30 },
+                        durable: true,
+                    }),
+                    ..Default::default()
+                };
+                let _ = ctx
+                    .step_with(
+                        "always-fails",
+                        opts,
+                        move |sc: StepCtx| {
+                            let seen = Arc::clone(&seen);
+                            let attempt = sc.attempt;
+                            seen.lock().unwrap().push(attempt);
+                            async move {
+                                Err::<serde_json::Value, _>(anyhow::anyhow!("always"))
+                            }
+                        },
+                    )
+                    .await?;
+                Ok(serde_json::Value::Null)
+            }
+        });
+
+        let opts = || {
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("durable:ex")
+        };
+        let first = run_workflow(opts()).outcome().await.unwrap();
+        assert_eq!(first.status, RunStatus::Paused, "attempt 1 失败 → 泊车");
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+        let second = run_workflow(opts()).outcome().await.unwrap();
+        assert_eq!(second.status, RunStatus::Errored, "attempt 2 = 最后一次 → 耗尽即终态");
+        let run_err = second.error.as_ref().map(|e| e.to_string()).unwrap_or_default();
+        assert!(run_err.contains("always"), "原始错误保留：{run_err}");
+        assert_eq!(attempts_seen.lock().unwrap().len(), 2, "恰好两次 attempt（跨重启携带）");
+    }
+
+    #[tokio::test]
+    async fn reserved_compensation_prefix_rejected() {
+        let store = Arc::new(InMemoryStore::new());
+        let wf = WorkflowDefinition::new("w").handler(|ctx: WorkflowCtx| async move {
+            ctx.compensate(
+                "__compensation:steal",
+                move |_sc: StepCtx| Box::pin(async { Ok(()) }),
+                RetryPolicy::new(1, Backoff::Fixed { base_ms: 1 }),
+            )?;
+            Ok(serde_json::Value::Null)
+        });
+
+        let out = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf), store.clone())
+                .input(serde_json::json!({})),
+        )
+        .outcome()
+        .await
+        .unwrap();
+
+        assert_eq!(out.status, RunStatus::Errored, "保留前缀登记 → run 失败");
     }
 }

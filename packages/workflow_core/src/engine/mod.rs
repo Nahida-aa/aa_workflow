@@ -5,12 +5,13 @@
 //! `RunWorkflowOptions` / `RunOutcome`）在 `run_workflow` 子模块。
 
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::define::{AnyWorkflowDefinition, StepCtx, StepOptions};
+use crate::define::{AnyWorkflowDefinition, RetryPolicy, StepCtx, StepOptions};
 use crate::error::{RunError, StoreError, WorkflowError};
 use crate::event::{RunStatus, StepAttempt, StepState, StepStatus, WorkflowEvent};
 use crate::resource::Gate;
@@ -124,6 +125,125 @@ pub fn cancel_run(store: &dyn RunStore, run_id: &str) -> Result<(), WorkflowErro
 /// [`RunEventStream`](crate::RunEventStream) 靠 `poll_recv` 见到 `None` 结束），
 /// 不需要显式的 shutdown 哨兵——`EngineRuntime` 随引擎 future 一起 drop，
 /// 它是最后一个 sender。
+/// Phase-1 补偿（undo 轴）：一次登记的撤销动作。登记存于
+/// [`EngineRuntime::compensations`]（内存，handler 重放时按代码确定性重建，
+/// 回调不序列化——对齐 #19 "callbacks are loaded from code"）；执行在失败
+/// 路径（逆序、逐个耐久 checkpoint，见 [`run_compensations`]）。
+pub struct Compensation {
+    /// 唯一补偿 id（幂等键的组成部分；`__compensation:` 前缀保留）。
+    pub id: String,
+    /// 撤销动作：引擎在执行时构造 [`StepCtx`] 注入（id = 幂等键）。
+    pub undo: Arc<dyn Fn(StepCtx) -> UndoFuture + Send + Sync>,
+    /// 补偿自身的重试预算（默认 1 次 = 不重试）。
+    pub retry: RetryPolicy,
+}
+
+pub type UndoFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
+
+/// F2-lite 耐久重试的待重试状态（驱动启动时从日志折叠，每 step 取最后一份
+/// `StepRetryScheduled`）。
+#[derive(Debug, Clone)]
+pub(crate) struct PendingRetry {
+    /// 迄今为止的全部 attempt（含失败），耗尽时随 STEP_FAILED 原样携带。
+    pub attempts: Vec<StepAttempt>,
+    /// 已知的最后一次 attempt 序号。
+    pub last_attempt: usize,
+    /// 下次重试的绝对截止时间（UTC ms）。
+    pub next_attempt_at: i64,
+}
+
+/// Phase-1 补偿执行（undo 轴）：未捕获失败时由失败路径调用。逆序执行已登记
+/// 的撤销（每个补偿一个 `COMPENSATION_COMPLETED`/`FAILED` checkpoint）；某
+/// 个补偿耗尽重试 → 链就地停止（后续补偿留给人工），run 仍以原始失败
+/// `errored` 结束（对齐 #19 durable-recovery 语义）。
+pub(crate) async fn run_compensations(
+    engine: &Arc<EngineRuntime>,
+    run_id: &str,
+    original: &anyhow::Error,
+) -> Result<(), (String, RunError)> {
+    let comps: Vec<Compensation> = {
+        let mut list = engine.compensations.lock().expect("compensations lock");
+        std::mem::take(&mut *list)
+    };
+    if comps.is_empty() {
+        return Ok(());
+    }
+    let started = WorkflowEvent::CompensationStarted {
+        ts: now_ms(),
+        run_id: run_id.to_string(),
+        error: RunError::from_anyhow(original),
+    };
+    if let Err(e) = engine.append(&started) {
+        return Err((String::new(), RunError::from_anyhow(&anyhow::anyhow!(e))));
+    }
+    engine.publish(&started);
+
+    // 跨重启跳过：日志里已有 COMPENSATION_COMPLETED 的补偿不再重复。
+    let log = engine
+        .store
+        .get_events(run_id)
+        .map_err(|e| (String::new(), RunError::from_anyhow(&anyhow::anyhow!(e))))?;
+    let done = |cid: &str| {
+        log.iter().any(|e| {
+            matches!(e, WorkflowEvent::CompensationCompleted { compensation_id, .. } if compensation_id == cid)
+        })
+    };
+
+    for comp in comps.iter().rev() {
+        if done(&comp.id) {
+            continue;
+        }
+        let mut attempts = 1usize;
+        loop {
+            let step_ctx = StepCtx {
+                inner: Arc::clone(engine),
+                id: format!("{run_id}:__compensation:{}", comp.id),
+                attempt: attempts,
+            };
+            match (comp.undo)(step_ctx).await {
+                Ok(()) => {
+                    let ev = WorkflowEvent::CompensationCompleted {
+                        ts: now_ms(),
+                        run_id: run_id.to_string(),
+                        compensation_id: comp.id.clone(),
+                    };
+                    if let Err(e) = engine.append(&ev) {
+                        return Err((
+                            comp.id.clone(),
+                            RunError::from_anyhow(&anyhow::anyhow!(e)),
+                        ));
+                    }
+                    engine.publish(&ev);
+                    break;
+                }
+                Err(e) => {
+                    let err = RunError::from_anyhow(&e);
+                    if attempts >= comp.retry.max_attempts {
+                        let ev = WorkflowEvent::CompensationFailed {
+                            ts: now_ms(),
+                            run_id: run_id.to_string(),
+                            compensation_id: comp.id.clone(),
+                            error: err.clone(),
+                        };
+                        if let Err(e) = engine.append(&ev) {
+                            return Err((
+                                comp.id.clone(),
+                                RunError::from_anyhow(&anyhow::anyhow!(e)),
+                            ));
+                        }
+                        engine.publish(&ev);
+                        return Err((comp.id.clone(), err.clone()));
+                    }
+                    let delay = comp.retry.backoff.delay_ms(attempts);
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    attempts += 1;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub struct EngineRuntime {
     pub run_id: String,
     pub input: serde_json::Value,
@@ -147,6 +267,12 @@ pub struct EngineRuntime {
     log_len: AtomicUsize,
     /// Derived per-step states (replay short-circuit + result cache).
     lives: Mutex<std::collections::HashMap<String, StepState>>,
+    /// Phase-1 补偿登记（undo 轴）：handler 内 `ctx.compensate` 按代码确定性
+    /// 重登记；失败路径取走并逆序执行（见 `run_compensations`）。
+    pub compensations: Mutex<Vec<Compensation>>,
+    /// F2-lite 耐久重试：驱动启动时从日志折叠的待重试状态（按 step）。
+    /// 空表 = 无待重试。exec_step 据此泊车（未到期）或续跑（到期）。
+    pub pending_retries: Mutex<std::collections::HashMap<String, PendingRetry>>,
     pub target_step: Option<String>,
     target_reached: AtomicBool,
     /// Per-invocation positional counters for `ctx.now()` / `ctx.uuid()`
@@ -325,6 +451,34 @@ where
         return Err(WorkflowCancelled.into());
     }
 
+    // F2-lite 耐久重试：上次驱动留下的待重试状态——未到期则泊车（__timer +
+    // deadline，自轮询驱动循环到期后重驱），到期则以携带的 attempts 续跑。
+    // 跨重启等价：pending 状态从日志折叠（StepRetryScheduled），驱动启动时
+    // 重建（见 run_workflow 的 pending_retries 折叠）。
+    let pending_retry = inner
+        .pending_retries
+        .lock()
+        .expect("pending retries lock")
+        .get(step_id)
+        .cloned();
+    if let Some(pr) = &pending_retry {
+        if now_ms() < pr.next_attempt_at {
+            let park = crate::engine::exec_pause_with(
+                inner,
+                step_id,
+                "__timer",
+                "durable retry backoff",
+                Some(pr.next_attempt_at),
+                None,
+                None,
+            )
+            .await;
+            // 泊车路径必返回 WorkflowParked；resume 载荷不可能在此出现
+            // （本步骤没有 StepResume——它的续跑就是这次重试本身）。
+            return Err(park.err().expect("retry park")).map_err(|e| e);
+        }
+    }
+
     // Replay short-circuit: a succeeded checkpoint returns the cached result
     // without re-running `run`. A failed checkpoint rethrows the stored error
     // (failures are terminal; retry via a new run).
@@ -398,9 +552,16 @@ where
         .or_else(|| inner.default_step_retry.clone());
 
     let max_attempts = retry.as_ref().map(|p| p.max_attempts).unwrap_or(1);
-    let mut attempts: Vec<StepAttempt> = Vec::with_capacity(max_attempts);
+    // 耐久重试续跑：attempts 从上一版携带（STEP_RETRY_SCHEDULED.attempts），
+    // attempt 序号接续（幂等键与重试预算跨重启稳定）。
+    let carried = pending_retry
+        .as_ref()
+        .map(|p| (p.attempts.clone(), p.last_attempt))
+        .unwrap_or_else(|| (Vec::new(), 0));
+    let mut attempts: Vec<StepAttempt> = carried.0;
+    attempts.reserve(max_attempts.saturating_sub(attempts.len()));
 
-    for attempt in 1..=max_attempts {
+    for attempt in (carried.1 + 1)..=max_attempts {
         let step_ctx = StepCtx {
             inner: inner.clone(),
             id: step_id.to_string(),
@@ -478,6 +639,42 @@ where
                     error: Some(run_err.clone()),
                 });
                 let retrying = retry.is_some() && attempt < max_attempts;
+                let durable = retry.as_ref().map(|p| p.durable).unwrap_or(false);
+                if retrying && durable {
+                    if is_cancelled(&inner.store, &inner.run_id) {
+                        return Err(WorkflowCancelled.into());
+                    }
+                    let delay = retry
+                        .as_ref()
+                        .map(|p| p.backoff.delay_ms(attempt))
+                        .unwrap_or(0);
+                    let next_attempt_at = now_ms() + (delay as i64).max(1);
+                    let ev = WorkflowEvent::StepRetryScheduled {
+                        ts: now_ms(),
+                        run_id: inner.run_id.clone(),
+                        step_id: step_id.to_string(),
+                        attempt,
+                        next_attempt_at,
+                        error: run_err.clone(),
+                        attempts: attempts.clone(),
+                    };
+                    inner.append(&ev)?;
+                    inner.publish(&ev);
+                    // 泊车（__timer + deadline）：本 drive 结束，驱动循环到期
+                    // 重驱（自轮询 25ms 或 sweep）→ exec_step 入口的 pending
+                    // 检查以到期后的时间放行 → 该步骤以携带的 attempts 续跑。
+                    let _ = crate::engine::exec_pause_with(
+                        inner,
+                        step_id,
+                        "__timer",
+                        "durable retry backoff",
+                        Some(next_attempt_at),
+                        None,
+                        None,
+                    )
+                    .await;
+                    return Err(WorkflowParked.into());
+                }
                 if retrying {
                     if is_cancelled(&inner.store, &inner.run_id) {
                         return Err(WorkflowCancelled.into());

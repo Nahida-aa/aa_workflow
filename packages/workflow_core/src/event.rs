@@ -173,6 +173,44 @@ pub enum WorkflowEvent {
         run_id: String,
         delta: Vec<crate::engine::state_diff::Operation>,
     },
+    /// Checkpoint (persisted): 未捕获失败触发了补偿——原始失败随 `error`
+    /// 持久化，已登记的撤销 handler 将逆序执行。崩溃后恢复的驱动据此得知
+    /// "补偿进行中"。
+    CompensationStarted {
+        ts: i64,
+        run_id: String,
+        error: RunError,
+    },
+    /// Checkpoint (persisted): 一个已登记的撤销 handler 成功完成——重启后
+    /// 该补偿不再重复执行（幂等键 = 补偿 id）。
+    CompensationCompleted {
+        ts: i64,
+        run_id: String,
+        compensation_id: String,
+    },
+    /// Checkpoint (persisted): 一个撤销 handler 耗尽重试——补偿链就地停止
+    /// （后续登记的补偿保持未执行，留给人工处置）。
+    CompensationFailed {
+        ts: i64,
+        run_id: String,
+        compensation_id: String,
+        error: RunError,
+    },
+    /// Checkpoint (persisted)：耐久重试（#19 `retry.durable`）——步骤失败后
+    /// 登记下次重试的绝对截止时间，run 挂起（`__timer` + deadline），到期的
+    /// sweep/重驱以此恢复。重放规则：本事件后该步骤视同未完成（attempts 随
+    /// 事件携带，耗尽前的 STEP_FAILED 不落日志）。
+    StepRetryScheduled {
+        ts: i64,
+        run_id: String,
+        step_id: String,
+        /// 本次失败是第几次 attempt（重放时据此续算）。
+        attempt: usize,
+        /// 下次重试的绝对截止时间（UTC ms）。
+        next_attempt_at: i64,
+        error: RunError,
+        attempts: Vec<StepAttempt>,
+    },
 }
 
 impl WorkflowEvent {
@@ -182,8 +220,12 @@ impl WorkflowEvent {
             | WorkflowEvent::RunFinished { .. }
             | WorkflowEvent::RunErrored { .. }
             | WorkflowEvent::Custom { .. }
-            | WorkflowEvent::StateDelta { .. } => None,
-            WorkflowEvent::StepStarted { step_id, .. }
+            | WorkflowEvent::StateDelta { .. }
+            | WorkflowEvent::CompensationStarted { .. }
+            | WorkflowEvent::CompensationCompleted { .. }
+            | WorkflowEvent::CompensationFailed { .. } => None,
+            WorkflowEvent::StepRetryScheduled { step_id, .. }
+            | WorkflowEvent::StepStarted { step_id, .. }
             | WorkflowEvent::StepFinished { step_id, .. }
             | WorkflowEvent::StepFailed { step_id, .. }
             | WorkflowEvent::StepPaused { step_id, .. }
@@ -209,7 +251,11 @@ impl WorkflowEvent {
             | WorkflowEvent::Custom { ts, .. }
             | WorkflowEvent::NowRecorded { ts, .. }
             | WorkflowEvent::UuidRecorded { ts, .. }
-            | WorkflowEvent::StateDelta { ts, .. } => *ts,
+            | WorkflowEvent::StateDelta { ts, .. }
+            | WorkflowEvent::CompensationStarted { ts, .. }
+            | WorkflowEvent::CompensationCompleted { ts, .. }
+            | WorkflowEvent::CompensationFailed { ts, .. }
+            | WorkflowEvent::StepRetryScheduled { ts, .. } => *ts,
         }
     }
 
@@ -229,6 +275,10 @@ impl WorkflowEvent {
             WorkflowEvent::NowRecorded { .. } => "NOW_RECORDED",
             WorkflowEvent::UuidRecorded { .. } => "UUID_RECORDED",
             WorkflowEvent::StateDelta { .. } => "STATE_DELTA",
+            WorkflowEvent::CompensationStarted { .. } => "COMPENSATION_STARTED",
+            WorkflowEvent::CompensationCompleted { .. } => "COMPENSATION_COMPLETED",
+            WorkflowEvent::CompensationFailed { .. } => "COMPENSATION_FAILED",
+            WorkflowEvent::StepRetryScheduled { .. } => "STEP_RETRY_SCHEDULED",
         };
         debug_assert_eq!(
             serde_json::to_value(self).unwrap()["type"],
