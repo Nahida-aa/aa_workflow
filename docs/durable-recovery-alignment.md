@@ -17,9 +17,9 @@
 | runtime 四方法面 | startRun/deliverSignal/deliverApproval/sweep | ✅ 已对齐（runtime_driver.rs 同名四方法） | 无 |
 | store 契约 | WorkflowExecutionStore 19 方法 | 23 方法（store_contract.rs） | 形态差异已对齐 |
 | 信号 | bufferSignals 收件箱（早到持久化+原子消费） | `signal_run`/`signal_event` 先经 store 契约持久化再驱动（D3 形态） | **需评估**（见 Phase 3） |
-| step 重试 | `retry.durable`（attempt/deadline 持久化，sweep 恢复） | 内存级 retry（`default_step_retry`，attempts 记入 StepFailed） | **缺耐久化**（Phase 2） |
-| 补偿 | `ctx.compensate` + COMPENSATION_STARTED + 逆序 undo | **无**（grep 零命中） | **缺整轴**（Phase 1） |
-| checkpoint 导入/泊车 | reexecuteFrom / interimGoals（f2-lite 引擎 diff） | 无 | Phase 4 |
+| step 重试 | `retry.durable`（attempt/deadline 持久化，sweep 恢复） | ✅ 已实现（`RetryPolicy.durable` + STEP_RETRY_SCHEDULED 泊车/续驱，c1c7ddf） | 无 |
+| 补偿 | `ctx.compensate` + COMPENSATION_STARTED + 逆序 undo | ✅ 已实现（`ctx.compensate` 内存登记 + 重放重建 + 逆序 undo，c1c7ddf） | 无 |
+| checkpoint 导入/泊车 | reexecuteFrom / interimGoals（**上游已原生采纳**，run-workflow.ts:71-84） | ✅ 已实现（`reexecute_from` + `StepFinished.meta.imported_from` 溯源；`interim_goals` 泊车 a9a7424） | 无 |
 | 图原语 | ——（引擎涌现图） | aa_graph（图中性原语库） | Rust 侧反而领先 |
 
 确认：Rust 引擎**零补偿机制**（`grep -rn compensate packages/workflow_core/src`
@@ -140,14 +140,20 @@ pause/非 abort → 若 `engine.compensations` 非空 → 逆序执行补偿链 
 - 临时目标（interimGoals / 泊车）同理：core 只知道"这些 stepId checkpoint
   后挂起"，不知道也不关心它们在什么"图"上。
 
-**现状**：早停已有（`target_step` 命中即停 → Finished）；泊车形态（跑到
-目标后挂起等宿主扩展，TS f2-lite 的 `waitingFor.kind: 'goal'`）未实现——
-但泊车原语的材料已齐（本次 retry.durable 的 exec_pause 泊车 + sync_timer
-登记链路可直接复用）。
+**现状**（2026-10）：redo / 临时目标两半都已落地——
 
-**实现**：`reexecuteFrom`（checkpoint 导入 + meta.importedFrom 溯源）/
-`interimGoals`（goal 全 checkpoint 后经保留信号泊车，转移检查防重挂）——
-照 TS f2-lite 引擎 diff 语义移植，词汇保持图中性。
+- `reexecute_from(source_run_id, unsafe_invalidate)`：全新 run 首驱前导入
+  源 run 幸存 checkpoint（只导 `STEP_FINISHED`、失败 step 按设计重跑），
+  溯源 `meta.imported_from`（index 以源 run 持久化日志为基准）。参考上游
+  `run-workflow.ts:269-295`（上游已原生采纳 f2-lite 语义）；`StepFinished`
+  因此新增 `meta` 槽（缺省省略，日志形状前后兼容）。resume 驱动忽略、
+  `source_run_id == run_id` 报 validation、源缺失报 `run_lost`（上游
+  in-memory 对缺失源静默导零，我们显式报错——attach 同款约定）；
+- `interim_goals` 泊车/续驱（a9a7424）：goal 全 checkpoint 后泊车，
+  续驱补齐缺席 step。
+
+四个原语各有一个 demo（`packages/workflow_dag/tests/dag_recovery_demo.rs`），
+引擎侧三个场景测试镜像上游 `engine.rerun.test.ts`。
 **长期**：INVALIDATED 原语（失效事件 + 重放规则 + 状态转换）——Rust 引擎
 自有，无上游兼容包袱；undo（Phase 1）+ redo（本 Phase）两轴齐备后，
 agent 流水线的失败语义完整。

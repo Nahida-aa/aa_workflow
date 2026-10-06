@@ -9,7 +9,7 @@ title: fold_step_states
 pub fn fold_step_states(events: &[WorkflowEvent]) -> HashMap<String, StepState>
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:308`](../../../packages/workflow_core/src/event.rs#L308)
+Defined in: [`packages/workflow_core/src/event.rs:331`](../../../packages/workflow_core/src/event.rs#L331)
 
 Replays an event log and folds it into per-step states.
 

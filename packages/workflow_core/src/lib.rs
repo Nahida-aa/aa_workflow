@@ -52,11 +52,14 @@ pub mod run_store;
 pub use define::{AnyWorkflowDefinition, ApproveOptions, Backoff, BaseCtx, CreateWorkflowConfig, PayloadSchema, PayloadValidator, RetryPolicy, StepCtx, StepOptions, WaitForEventOptions, WorkflowBuilder, WorkflowCtx, WorkflowDefinition, create_workflow};
 pub use engine::{Operation, diff_state, snapshot_state};
 pub use engine::{
-    PublisherFn, RunId, RunOutcome, RunWorkflowOptions, cancel_run, run_workflow,
+    PublisherFn, ReexecuteFrom, RunId, RunOutcome, RunWorkflowOptions, cancel_run, run_workflow,
     run_workflow_sync, select_workflow_version, signal_event, signal_run,
 };
 pub use error::{RunError, RunErrorCode, StoreError, WorkflowError};
-pub use event::{RunStatus, StepAttempt, StepState, StepStatus, WorkflowEvent, fold_step_states};
+pub use event::{
+    ImportedFrom, RunStatus, StepAttempt, StepMeta, StepState, StepStatus, WorkflowEvent,
+    fold_step_states,
+};
 pub use middleware::{CtxProducer, CtxWrapper, Middleware};
 pub use resource::{Gate, GateGuard, ResourceKey};
 pub use run_store::{DeleteReason, InMemoryStore, PendingApproval, RunAwaitable, RunState, RunStore, WaitForState};

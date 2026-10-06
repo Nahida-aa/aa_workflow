@@ -2028,6 +2028,7 @@ mod driver_tests {
                         step_id: "before-sleep".into(),
                         result: None,
                         attempts: vec![],
+                        meta: None,
                     },
                     WorkflowEvent::StepPaused {
                         ts: now,

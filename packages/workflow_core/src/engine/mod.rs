@@ -20,8 +20,8 @@ use crate::run_store::RunStore;
 mod run_workflow;
 pub mod state_diff;
 pub use run_workflow::{
-    PublisherFn, RunId, RunOutcome, RunWorkflowOptions, run_workflow, run_workflow_sync,
-    select_workflow_version,
+    PublisherFn, ReexecuteFrom, RunId, RunOutcome, RunWorkflowOptions, run_workflow,
+    run_workflow_sync, select_workflow_version,
 };
 pub use state_diff::{Operation, diff_state, snapshot_state};
 
@@ -592,6 +592,7 @@ where
                     step_id: step_id.to_string(),
                     result: Some(recorded.clone()),
                     attempts,
+                    meta: None,
                 };
                 inner.append(&ev)?;
                 inner.set_live(
@@ -1795,6 +1796,7 @@ mod tests {
             step_id: "a".into(),
             result: None,
             attempts: vec![],
+            meta: None,
         };
         store.append_event("r1", 0, &ev).unwrap();
         store.append_event("r1", 1, &ev).unwrap();

@@ -4,10 +4,12 @@
 //! 这三个原语的组合上。
 //!
 //! ① interimGoals 泊车 + 续驱  ② compensate 逆序撤销  ③ durable retry 泊车/续跑
+//! ④ reexecuteFrom redo（失效名单导入重跑）
 
 use aa_workflow_core::{
-    Backoff, InMemoryStore, RetryPolicy, RunStatus, RunWorkflowOptions, StepCtx, StepOptions,
-    WorkflowCtx, WorkflowDefinition, run_workflow,
+    Backoff, ImportedFrom, InMemoryStore, ReexecuteFrom, RetryPolicy, RunStatus, RunStore,
+    RunWorkflowOptions, StepCtx, StepOptions, WorkflowCtx, WorkflowDefinition, WorkflowEvent,
+    run_workflow,
 };
 use std::sync::{Arc, Mutex};
 
@@ -28,6 +30,32 @@ fn make_undo(log: &UndoLog, name: &'static str) -> UndoHandler {
             calls.lock().unwrap().push(name);
             Ok(())
         })
+    })
+}
+
+fn three_step_wf(log: &Arc<Mutex<TestLog>>) -> WorkflowDefinition {
+    WorkflowDefinition::new("w").handler({
+        let log = log.clone();
+        move |ctx: WorkflowCtx| {
+            let log = log.clone();
+            async move {
+                for id in ["a", "b", "c"] {
+                    let log = log.clone();
+                    let id = id.to_string();
+                    let id_c = id.clone();
+                    ctx.step(&id, move |_sc: StepCtx| {
+                        let (log, id) = (log.clone(), id_c.clone());
+                        async move {
+                            log.lock().unwrap().note_start(&id);
+                            log.lock().unwrap().note_finish(&id);
+                            Ok(serde_json::Value::Null)
+                        }
+                    })
+                    .await?;
+                }
+                Ok(serde_json::Value::Null)
+            }
+        }
     })
 }
 
@@ -237,5 +265,66 @@ async fn demo_durable_retry_park_and_resume() {
         *attempts_seen.lock().unwrap(),
         vec![1, 2],
         "attempt 序号跨驱动携带"
+    );
+}
+
+/// ④ redo（INVALIDATE 侧）：`reexecuteFrom` 以新 run 起步，导入源 run 幸存
+///    的 checkpoint（带 `imported_from` 溯源），失效名单里的 b 重跑——a/c
+///    短路于导入的 checkpoint。c 拿着 b 的旧结果：名单封闭性是调用者的
+///    不变量，引擎没有图、只透传名单（`unsafe` 之名由此而来）。
+#[tokio::test]
+async fn demo_reexecute_from_invalidate_rerun() {
+    let store = Arc::new(InMemoryStore::new());
+    let src_log = Arc::new(Mutex::new(TestLog::default()));
+    let first = run_workflow(
+        RunWorkflowOptions::new(three_step_wf(&src_log), store.clone())
+            .input(serde_json::json!({})),
+    )
+    .outcome()
+    .await
+    .unwrap();
+    assert_eq!(first.status, RunStatus::Finished);
+    let source_run_id = first.run_id.clone();
+
+    // redo：失效名单 = ["b"]（使用者自己提供）
+    let redo_log = Arc::new(Mutex::new(TestLog::default()));
+    let out = run_workflow(
+        RunWorkflowOptions::new(three_step_wf(&redo_log), store.clone())
+            .input(serde_json::json!({}))
+            .run_id("demo:redo")
+            .reexecute_from(
+                ReexecuteFrom::new(source_run_id.clone()).with_invalidate(vec!["b".into()]),
+            ),
+    )
+    .outcome()
+    .await
+    .unwrap();
+    assert_eq!(out.status, RunStatus::Finished);
+    {
+        let l = redo_log.lock().unwrap();
+        assert_eq!(l.runs.get("a").copied().unwrap_or(0), 0, "a 导入短路");
+        assert_eq!(l.runs["b"], 1, "b 被失效重跑");
+        assert_eq!(l.runs.get("c").copied().unwrap_or(0), 0, "c 导入短路");
+    }
+
+    // 溯源：导入的 checkpoint 带 imported_from；index 以源 run 持久化日志
+    // 为基准（RUN_STARTED 不落盘、不占下标）
+    let src_events = store.get_events(&source_run_id).unwrap();
+    let src_idx_of_a = src_events
+        .iter()
+        .position(|e| matches!(e, WorkflowEvent::StepFinished { step_id, .. } if step_id == "a"))
+        .unwrap();
+    let redo_events = store.get_events("demo:redo").unwrap();
+    let imported_a = redo_events.iter().find_map(|e| match e {
+        WorkflowEvent::StepFinished { step_id, meta, .. } if step_id == "a" => meta.clone(),
+        _ => None,
+    });
+    assert_eq!(
+        imported_a.unwrap().imported_from,
+        Some(ImportedFrom {
+            run_id: source_run_id,
+            index: src_idx_of_a,
+        }),
+        "a 的 checkpoint 来自导入"
     );
 }

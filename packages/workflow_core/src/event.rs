@@ -46,6 +46,25 @@ pub struct StepAttempt {
     pub error: Option<RunError>,
 }
 
+/// `STEP_FINISHED` 的可选元数据槽（对齐上游事件上的 `meta`）。目前只承载
+/// 一种事实：checkpoint 从源 run 导入（`reexecute_from` 的 INVALIDATE 侧）。
+/// 引擎自己产生的 checkpoint 恒为 `None`——序列化时整个省略，旧日志反序
+/// 列化为 `None`，日志形状前后兼容。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StepMeta {
+    /// 导入溯源（上游 `meta.importedFrom`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_from: Option<ImportedFrom>,
+}
+
+/// 一次 checkpoint 导入的出处：源 run 与该事件在**源 run 持久化日志**里的
+/// 下标（`RUN_STARTED` 不落盘、不占下标——与上游同约定）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportedFrom {
+    pub run_id: String,
+    pub index: usize,
+}
+
 /// Append-only persisted events. Each event is immutable; the log is the
 /// engine's source of truth and doubling as the resume checkpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +109,10 @@ pub enum WorkflowEvent {
         step_id: String,
         result: Option<serde_json::Value>,
         attempts: Vec<StepAttempt>,
+        /// 元数据槽（上游 `meta`）；`reexecute_from` 导入的 checkpoint 在
+        /// 这里带 [`ImportedFrom`] 溯源，引擎自己产生的恒为 `None`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<StepMeta>,
     },
     /// Checkpoint (persisted): a step failed terminally.
     StepFailed {

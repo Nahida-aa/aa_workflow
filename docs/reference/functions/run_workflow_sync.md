@@ -9,7 +9,7 @@ title: run_workflow_sync
 pub fn run_workflow_sync(opts: RunWorkflowOptions) -> Result<RunOutcome, WorkflowError>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:1070`](../../../packages/workflow_core/src/engine/run_workflow.rs#L1070)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:1188`](../../../packages/workflow_core/src/engine/run_workflow.rs#L1188)
 
 Sync convenience over a local multi-thread runtime for callers that are
 not async themselves (e.g. LocalDub's CLI entrypoint).

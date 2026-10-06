@@ -631,6 +631,7 @@ mod adapter_tests {
                         step_id: format!("old{i}"),
                         result: None,
                         attempts: vec![],
+                        meta: None,
                     },
                 )
                 .unwrap();
@@ -653,6 +654,7 @@ mod adapter_tests {
                     step_id: "new".into(),
                     result: None,
                     attempts: vec![],
+                    meta: None,
                 },
             )
             .unwrap();
@@ -687,6 +689,7 @@ mod adapter_tests {
                     step_id: "a".into(),
                     result: None,
                     attempts: vec![],
+                    meta: None,
                 },
             )
             .unwrap();

@@ -5,7 +5,7 @@ title: WorkflowEvent
 
 # Enum: WorkflowEvent
 
-Defined in: [`packages/workflow_core/src/event.rs:53`](../../../packages/workflow_core/src/event.rs#L53)
+Defined in: [`packages/workflow_core/src/event.rs:72`](../../../packages/workflow_core/src/event.rs#L72)
 
 Append-only persisted events. Each event is immutable; the log is the
 engine's source of truth and doubling as the resume checkpoint.
@@ -18,7 +18,7 @@ engine's source of truth and doubling as the resume checkpoint.
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:55`](../../../packages/workflow_core/src/event.rs#L55)
+Defined in: [`packages/workflow_core/src/event.rs:74`](../../../packages/workflow_core/src/event.rs#L74)
 
 Observability only (not persisted): marks the start of a run.
 
@@ -31,7 +31,7 @@ Observability only (not persisted): marks the start of a run.
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:65`](../../../packages/workflow_core/src/event.rs#L65)
+Defined in: [`packages/workflow_core/src/event.rs:84`](../../../packages/workflow_core/src/event.rs#L84)
 
 Checkpoint (persisted): final state of a completed run.
 
@@ -44,7 +44,7 @@ Checkpoint (persisted): final state of a completed run.
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:71`](../../../packages/workflow_core/src/event.rs#L71)
+Defined in: [`packages/workflow_core/src/event.rs:90`](../../../packages/workflow_core/src/event.rs#L90)
 
 Checkpoint (persisted): the run errored (a step failed terminally).
 
@@ -57,7 +57,7 @@ Checkpoint (persisted): the run errored (a step failed terminally).
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:80`](../../../packages/workflow_core/src/event.rs#L80)
+Defined in: [`packages/workflow_core/src/event.rs:99`](../../../packages/workflow_core/src/event.rs#L99)
 
 Observability only (not persisted): a step began executing.
 
@@ -70,7 +70,7 @@ Observability only (not persisted): a step began executing.
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:87`](../../../packages/workflow_core/src/event.rs#L87)
+Defined in: [`packages/workflow_core/src/event.rs:106`](../../../packages/workflow_core/src/event.rs#L106)
 
 Checkpoint (persisted): a step finished successfully; the run may be
 resumed from here without re-execution.
@@ -84,7 +84,7 @@ resumed from here without re-execution.
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:95`](../../../packages/workflow_core/src/event.rs#L95)
+Defined in: [`packages/workflow_core/src/event.rs:118`](../../../packages/workflow_core/src/event.rs#L118)
 
 Checkpoint (persisted): a step failed terminally.
 
@@ -97,7 +97,7 @@ Checkpoint (persisted): a step failed terminally.
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:111`](../../../packages/workflow_core/src/event.rs#L111)
+Defined in: [`packages/workflow_core/src/event.rs:134`](../../../packages/workflow_core/src/event.rs#L134)
 
 Checkpoint (persisted): the run parked at a durable wait point
 (`ctx.approve` / `ctx.sleep` / `ctx.sleep_until` / `ctx.wait_for_event`).
@@ -118,7 +118,7 @@ external decision.
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:125`](../../../packages/workflow_core/src/event.rs#L125)
+Defined in: [`packages/workflow_core/src/event.rs:148`](../../../packages/workflow_core/src/event.rs#L148)
 
 Checkpoint (persisted): a signal was delivered for a paused run
 (see [`signal_run`](../functions/signal_run.md)). Resolves the pending
@@ -134,7 +134,7 @@ Checkpoint (persisted): a signal was delivered for a paused run
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:132`](../../../packages/workflow_core/src/event.rs#L132)
+Defined in: [`packages/workflow_core/src/event.rs:155`](../../../packages/workflow_core/src/event.rs#L155)
 
 Observability only (not persisted): 0.0..=1.0 progress signal.
 
@@ -147,7 +147,7 @@ Observability only (not persisted): 0.0..=1.0 progress signal.
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:141`](../../../packages/workflow_core/src/event.rs#L141)
+Defined in: [`packages/workflow_core/src/event.rs:164`](../../../packages/workflow_core/src/event.rs#L164)
 
 Observability only (not persisted): `ctx.emit` fan-out. Reaches only
 the publisher, never the log — so it never becomes part of replay
@@ -162,7 +162,7 @@ the publisher, never the log — so it never becomes part of replay
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:150`](../../../packages/workflow_core/src/event.rs#L150)
+Defined in: [`packages/workflow_core/src/event.rs:173`](../../../packages/workflow_core/src/event.rs#L173)
 
 Checkpoint (persisted): `ctx.now()` recorded a wall-clock timestamp.
 On replay the cached value is served so a run sees the same clock
@@ -177,7 +177,7 @@ across resumes (TanStack `NOW_RECORDED`).
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:158`](../../../packages/workflow_core/src/event.rs#L158)
+Defined in: [`packages/workflow_core/src/event.rs:181`](../../../packages/workflow_core/src/event.rs#L181)
 
 Checkpoint (persisted): `ctx.uuid()` recorded a generated id. On
 replay the same id is served (TanStack `UUID_RECORDED`).
@@ -191,7 +191,7 @@ replay the same id is served (TanStack `UUID_RECORDED`).
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:171`](../../../packages/workflow_core/src/event.rs#L171)
+Defined in: [`packages/workflow_core/src/event.rs:194`](../../../packages/workflow_core/src/event.rs#L194)
 
 Observability only (not persisted): RFC 6902 JSON Patch describing
 `ctx.state` changes since the last durable boundary (TanStack
@@ -210,7 +210,7 @@ delta 语义见 `crate::engine::state_diff`。
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:179`](../../../packages/workflow_core/src/event.rs#L179)
+Defined in: [`packages/workflow_core/src/event.rs:202`](../../../packages/workflow_core/src/event.rs#L202)
 
 Checkpoint (persisted): 未捕获失败触发了补偿——原始失败随 `error`
 持久化，已登记的撤销 handler 将逆序执行。崩溃后恢复的驱动据此得知
@@ -225,7 +225,7 @@ Checkpoint (persisted): 未捕获失败触发了补偿——原始失败随 `err
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:186`](../../../packages/workflow_core/src/event.rs#L186)
+Defined in: [`packages/workflow_core/src/event.rs:209`](../../../packages/workflow_core/src/event.rs#L209)
 
 Checkpoint (persisted): 一个已登记的撤销 handler 成功完成——重启后
 该补偿不再重复执行（幂等键 = 补偿 id）。
@@ -239,7 +239,7 @@ Checkpoint (persisted): 一个已登记的撤销 handler 成功完成——重�
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:193`](../../../packages/workflow_core/src/event.rs#L193)
+Defined in: [`packages/workflow_core/src/event.rs:216`](../../../packages/workflow_core/src/event.rs#L216)
 
 Checkpoint (persisted): 一个撤销 handler 耗尽重试——补偿链就地停止
 （后续登记的补偿保持未执行，留给人工处置）。
@@ -253,7 +253,7 @@ Checkpoint (persisted): 一个撤销 handler 耗尽重试——补偿链就地�
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:203`](../../../packages/workflow_core/src/event.rs#L203)
+Defined in: [`packages/workflow_core/src/event.rs:226`](../../../packages/workflow_core/src/event.rs#L226)
 
 Checkpoint (persisted)：耐久重试（#19 `retry.durable`）——步骤失败后
 登记下次重试的绝对截止时间，run 挂起（`__timer` + deadline），到期的
@@ -268,7 +268,7 @@ sweep/重驱以此恢复。重放规则：本事件后该步骤视同未完成�
 pub fn step_id(&self) -> Option<&str>
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:217`](../../../packages/workflow_core/src/event.rs#L217)
+Defined in: [`packages/workflow_core/src/event.rs:240`](../../../packages/workflow_core/src/event.rs#L240)
 
 #### Returns
 
@@ -283,7 +283,7 @@ Defined in: [`packages/workflow_core/src/event.rs:217`](../../../packages/workfl
 pub fn ts(&self) -> i64
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:240`](../../../packages/workflow_core/src/event.rs#L240)
+Defined in: [`packages/workflow_core/src/event.rs:263`](../../../packages/workflow_core/src/event.rs#L263)
 
 事件发生时间（每个变体都带 `ts`，对齐 TS 侧 `event.ts`）。
 
@@ -300,7 +300,7 @@ Defined in: [`packages/workflow_core/src/event.rs:240`](../../../packages/workfl
 pub fn type_name(&self) -> &'static str
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:263`](../../../packages/workflow_core/src/event.rs#L263)
+Defined in: [`packages/workflow_core/src/event.rs:286`](../../../packages/workflow_core/src/event.rs#L286)
 
 对齐 TS 侧 `event.type`）。
 
