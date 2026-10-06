@@ -22,8 +22,8 @@ pub fn tracing_publish() -> EventSubscriberFn {
 pub struct DriveOpts<'a> {
     /// 复用该 run_id ⇒ resume（成功 step 短路、失败 rethrow）。
     pub run_id: Option<&'a str>,
-    /// 命中即停（对齐 run_pipeline 的 targetStep）。
-    pub target_step: Option<&'a str>,
+    /// 全部 checkpoint 即泊车（interimGoals：缺席即待续，续驱补齐）。
+    pub interim_goals: Option<Vec<String>>,
     /// 事件订阅者；`None` 则不订阅。
     pub publish: Option<EventSubscriberFn>,
 }
@@ -41,8 +41,8 @@ impl DriveOpts<'_> {
         if let Some(id) = self.run_id {
             ro = ro.run_id(id);
         }
-        if let Some(ts) = self.target_step {
-            ro = ro.target_step(ts);
+        if let Some(goals) = &self.interim_goals {
+            ro = ro.interim_goals(goals.clone());
         }
         ro.publish(self.publish.clone())
     }

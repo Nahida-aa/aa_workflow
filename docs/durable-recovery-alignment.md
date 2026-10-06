@@ -16,7 +16,7 @@
 | --- | --- | --- | --- |
 | runtime 四方法面 | startRun/deliverSignal/deliverApproval/sweep | ✅ 已对齐（runtime_driver.rs 同名四方法） | 无 |
 | store 契约 | WorkflowExecutionStore 19 方法 | 23 方法（store_contract.rs） | 形态差异已对齐 |
-| 信号 | bufferSignals 收件箱（早到持久化+原子消费） | `signal_run`/`signal_event` 先落盘再驱动（D3 形态） | **需评估**（见 Phase 3） |
+| 信号 | bufferSignals 收件箱（早到持久化+原子消费） | `signal_run`/`signal_event` 先经 store 契约持久化再驱动（D3 形态） | **需评估**（见 Phase 3） |
 | step 重试 | `retry.durable`（attempt/deadline 持久化，sweep 恢复） | 内存级 retry（`default_step_retry`，attempts 记入 StepFailed） | **缺耐久化**（Phase 2） |
 | 补偿 | `ctx.compensate` + COMPENSATION_STARTED + 逆序 undo | **无**（grep 零命中） | **缺整轴**（Phase 1） |
 | checkpoint 导入/泊车 | reexecuteFrom / interimGoals（f2-lite 引擎 diff） | 无 | Phase 4 |
@@ -113,8 +113,10 @@ pause/非 abort → 若 `engine.compensations` 非空 → 逆序执行补偿链 
 
 ## 3. Phase 3 — 信号收件箱（评估先行）
 
-- Rust D3 现状：`signal_run`/`signal_event` **先落盘再驱动**——需评估：run 尚
-  未等待时的投递，当前是拒绝还是已持久化？
+- Rust D3 现状：`signal_run`/`signal_event` **先经 store 契约持久化再驱动**
+  （D3 形态）——需评估：run 尚未等待时的投递，当前是拒绝还是已按契约持久
+  化？core 只区分"哪些需要持久化、哪些是运行时数据"，介质（磁盘与否）不在
+  它的词汇里。
 - 若已按契约持久化 + 原子消费：Phase 3 = 语义对照文档（bufferSignals ≈ D3
   已有行为的正式化），零代码；
 - 若被拒：store 契约加收件箱方法（对齐 #19 的 `bufferSignal` /
@@ -124,15 +126,31 @@ pause/非 abort → 若 `engine.compensations` 非空 → 逆序执行补偿链 
 - 明确不做（对齐 #19 的范围声明）：无自动过期/大小限制；finished/errored/
   aborted 的信号返回 not-waiting；`__timer` 不可缓冲。
 
-## 4. Phase 4 — DAG 层的 redo / interimGoals（Rust 版 f2-lite 语义）
+## 4. Phase 4 — redo / 临时目标（名单透传原语，graph-agnostic）
 
-- 前置：Phase 1/2 落地后，Rust 引擎 = taren 引擎的语义超集（补偿 + 耐久重试）；
-- 移植 f2-lite 的两个 startRun 参数：`reexecuteFrom`（checkpoint 导入 +
-  meta.importedFrom 溯源）/ `interimGoals`（goal 全 checkpoint 后经保留信号
-  泊车，转移检查防重挂）——aa_graph 提供闭包计算，引擎保持图中性；
-- **长期**：INVALIDATED 原语（失效事件 + 重放规则 + 状态转换）——Rust 引擎
-  自有，无上游兼容包袱；undo（Phase 1）+ redo（本 Phase）两轴齐备后，
-  agent 流水线的失败语义完整。
+**核心定位修正**：core 是自由涌现代码——处理器里的步骤不必然构成 DAG（可以
+有环、可以条件重入），core **不知道也不需要知道**步骤间的依赖结构。所以：
+
+- `unsafeInvalidate` / redo 名单 = **使用者自己提供的步骤列表，原样透传**；
+  "unsafe" 前缀的含义正是：core 无法校验封闭性、无法推导消费者，后果由
+  调用者承担；
+- **不依赖 DAG 算法**：失效的是步骤列表，不是图节点；aa_graph / 声明式层的
+  闭包计算只是**可选的便利**（帮使用者算"建议名单"），core 的原语永远是
+  纯名单语义；
+- 临时目标（interimGoals / 泊车）同理：core 只知道"这些 stepId checkpoint
+  后挂起"，不知道也不关心它们在什么"图"上。
+
+**现状**：早停已有（`target_step` 命中即停 → Finished）；泊车形态（跑到
+目标后挂起等宿主扩展，TS f2-lite 的 `waitingFor.kind: 'goal'`）未实现——
+但泊车原语的材料已齐（本次 retry.durable 的 exec_pause 泊车 + sync_timer
+登记链路可直接复用）。
+
+**实现**：`reexecuteFrom`（checkpoint 导入 + meta.importedFrom 溯源）/
+`interimGoals`（goal 全 checkpoint 后经保留信号泊车，转移检查防重挂）——
+照 TS f2-lite 引擎 diff 语义移植，词汇保持图中性。
+**长期**：INVALIDATED 原语（失效事件 + 重放规则 + 状态转换）——Rust 引擎
+自有，无上游兼容包袱；undo（Phase 1）+ redo（本 Phase）两轴齐备后，
+agent 流水线的失败语义完整。
 
 ## 5. store_sqlx_postgres 对齐
 
