@@ -5,7 +5,7 @@ title: StepState
 
 # Struct: StepState
 
-Defined in: [`packages/workflow_core/src/event.rs:244`](../../../packages/workflow_core/src/event.rs#L244)
+Defined in: [`packages/workflow_core/src/event.rs:294`](../../../packages/workflow_core/src/event.rs#L294)
 
 Derived per-step state reconstructed from an event log.
 
@@ -17,7 +17,7 @@ Derived per-step state reconstructed from an event log.
 status: StepStatus
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:245`](../../../packages/workflow_core/src/event.rs#L245)
+Defined in: [`packages/workflow_core/src/event.rs:295`](../../../packages/workflow_core/src/event.rs#L295)
 
 
 ***
@@ -28,7 +28,7 @@ Defined in: [`packages/workflow_core/src/event.rs:245`](../../../packages/workfl
 result: Option<Value>
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:246`](../../../packages/workflow_core/src/event.rs#L246)
+Defined in: [`packages/workflow_core/src/event.rs:296`](../../../packages/workflow_core/src/event.rs#L296)
 
 
 ***
@@ -39,7 +39,7 @@ Defined in: [`packages/workflow_core/src/event.rs:246`](../../../packages/workfl
 error: Option<RunError>
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:248`](../../../packages/workflow_core/src/event.rs#L248)
+Defined in: [`packages/workflow_core/src/event.rs:298`](../../../packages/workflow_core/src/event.rs#L298)
 
 与 `StepAttempt::error` 同构（都是 `RunError`）。
 
@@ -52,7 +52,7 @@ Defined in: [`packages/workflow_core/src/event.rs:248`](../../../packages/workfl
 started_at: Option<i64>
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:249`](../../../packages/workflow_core/src/event.rs#L249)
+Defined in: [`packages/workflow_core/src/event.rs:299`](../../../packages/workflow_core/src/event.rs#L299)
 
 
 ***
@@ -63,7 +63,7 @@ Defined in: [`packages/workflow_core/src/event.rs:249`](../../../packages/workfl
 finished_at: Option<i64>
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:250`](../../../packages/workflow_core/src/event.rs#L250)
+Defined in: [`packages/workflow_core/src/event.rs:300`](../../../packages/workflow_core/src/event.rs#L300)
 
 ## Trait Implementations
 

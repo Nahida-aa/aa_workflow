@@ -5,16 +5,7 @@ title: EngineRuntime
 
 # Struct: EngineRuntime
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:127`](../../../packages/workflow_core/src/engine/mod.rs#L127)
-
-Shared driver state handed to every step (and to the `<WorkflowCtx>`).
-This is the code-as-DAG substrate: the "graph" is just this state plus the
-handler's control flow, discovered as the handler runs.
-
-事件扇出通道直接传 `WorkflowEvent`：收尾**靠关通道**（`run_workflow` 返回的
-[`RunEventStream`](crate::RunEventStream) 靠 `poll_recv` 见到 `None` 结束），
-不需要显式的 shutdown 哨兵——`EngineRuntime` 随引擎 future 一起 drop，
-它是最后一个 sender。
+Defined in: [`packages/workflow_core/src/engine/mod.rs:236`](../../../packages/workflow_core/src/engine/mod.rs#L236)
 
 ## Fields
 
@@ -24,7 +15,7 @@ handler's control flow, discovered as the handler runs.
 run_id: String
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:128`](../../../packages/workflow_core/src/engine/mod.rs#L128)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:237`](../../../packages/workflow_core/src/engine/mod.rs#L237)
 
 
 ***
@@ -35,7 +26,7 @@ Defined in: [`packages/workflow_core/src/engine/mod.rs:128`](../../../packages/w
 input: Value
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:129`](../../../packages/workflow_core/src/engine/mod.rs#L129)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:238`](../../../packages/workflow_core/src/engine/mod.rs#L238)
 
 
 ***
@@ -46,7 +37,7 @@ Defined in: [`packages/workflow_core/src/engine/mod.rs:129`](../../../packages/w
 state_mirror: Arc<Mutex<Value>>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:138`](../../../packages/workflow_core/src/engine/mod.rs#L138)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:247`](../../../packages/workflow_core/src/engine/mod.rs#L247)
 
 Per-invocation state, rebuilt from `initialize(input)` on every start
 and resume (see `define::WorkflowDefinition::initialize`). Guarded by a
@@ -66,7 +57,7 @@ handler's `StateHandle`**（handle 在变更语句与 drop 时同步进这里）
 prev_state_snapshot: Mutex<Value>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:142`](../../../packages/workflow_core/src/engine/mod.rs#L142)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:251`](../../../packages/workflow_core/src/engine/mod.rs#L251)
 
 State as of the last flush — the "before" side of the
 [`WorkflowEvent::StateDelta`](../enums/WorkflowEvent.md) diff. Reset at drive start (upstream
@@ -81,7 +72,7 @@ State as of the last flush — the "before" side of the
 store: Arc<dyn RunStore>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:143`](../../../packages/workflow_core/src/engine/mod.rs#L143)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:252`](../../../packages/workflow_core/src/engine/mod.rs#L252)
 
 
 ***
@@ -92,18 +83,50 @@ Defined in: [`packages/workflow_core/src/engine/mod.rs:143`](../../../packages/w
 gate: Arc<Gate>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:144`](../../../packages/workflow_core/src/engine/mod.rs#L144)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:253`](../../../packages/workflow_core/src/engine/mod.rs#L253)
 
 
 ***
 
-### target_step
+### compensations
 
 ```rust
-target_step: Option<String>
+compensations: Mutex<Vec<Compensation>>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:150`](../../../packages/workflow_core/src/engine/mod.rs#L150)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:261`](../../../packages/workflow_core/src/engine/mod.rs#L261)
+
+Phase-1 补偿登记（undo 轴）：handler 内 `ctx.compensate` 按代码确定性
+重登记；失败路径取走并逆序执行（见 `run_compensations`）。
+
+
+***
+
+### pending_retries
+
+```rust
+pending_retries: Mutex<HashMap<String, PendingRetry>>
+```
+
+Defined in: [`packages/workflow_core/src/engine/mod.rs:264`](../../../packages/workflow_core/src/engine/mod.rs#L264)
+
+F2-lite 耐久重试：驱动启动时从日志折叠的待重试状态（按 step）。
+空表 = 无待重试。exec_step 据此泊车（未到期）或续跑（到期）。
+
+
+***
+
+### interim_goals
+
+```rust
+interim_goals: Option<Vec<String>>
+```
+
+Defined in: [`packages/workflow_core/src/engine/mod.rs:268`](../../../packages/workflow_core/src/engine/mod.rs#L268)
+
+F2-lite 临时目标（INTERIM_GOAL）：名单内步骤全部 checkpoint 后经保留
+信号 `__interim-goal` 泊车（run → paused，宿主以 recover 续驱扩展边界）。
+转移检查防重挂；未到达的 goal 永不触发（best-effort fence）。
 
 
 ***
@@ -114,7 +137,7 @@ Defined in: [`packages/workflow_core/src/engine/mod.rs:150`](../../../packages/w
 deadline: Option<i64>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:158`](../../../packages/workflow_core/src/engine/mod.rs#L158)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:278`](../../../packages/workflow_core/src/engine/mod.rs#L278)
 
 Runtime budget (TanStack `deadline`): absolute UTC ms for this drive.
 
@@ -127,7 +150,7 @@ Runtime budget (TanStack `deadline`): absolute UTC ms for this drive.
 min_yield_remaining_ms: u64
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:160`](../../../packages/workflow_core/src/engine/mod.rs#L160)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:280`](../../../packages/workflow_core/src/engine/mod.rs#L280)
 
 Headroom threshold for `should_yield()` (TanStack `minYieldRemainingMs`).
 
@@ -140,7 +163,7 @@ Headroom threshold for `should_yield()` (TanStack `minYieldRemainingMs`).
 yield_resume_at: Option<i64>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:162`](../../../packages/workflow_core/src/engine/mod.rs#L162)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:282`](../../../packages/workflow_core/src/engine/mod.rs#L282)
 
 Absolute ms at which `ctx.yield_()` re-wakes (TanStack `yieldResumeAt`).
 
@@ -154,7 +177,7 @@ _（存在非公开字段）_
 pub fn publish_progress(&self, step_id: &str, value: f64)
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:257`](../../../packages/workflow_core/src/engine/mod.rs#L257)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:377`](../../../packages/workflow_core/src/engine/mod.rs#L377)
 
 #### Parameters
 

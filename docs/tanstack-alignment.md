@@ -130,8 +130,10 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
    `StepHalt` 哨兵，命中即停、handler 展开（`?` 传播）后 run `Finished`。
 3. **资源门**：`resource` key 用容量-1 的 async `Semaphore`，同 key 串行
    （等待而不是"并发守恒"）。对齐"同一把锁"的直觉，先到先跑。
-4. **`up_to_date`（make 式 freshness）**：成功 checkpoint 存在但 make-check 报
-   stale 时仍重新执行——TanStack 没有这个钩子，是续跑定语的本地扩展。
+4. **~~`up_to_date`~~（make 式 freshness）**：**已删除**（2026-10）。上游零对应
+   物；且它是引擎里唯一被容忍的「同日志不同驱动可分叉」点，陈旧又不向下游传
+   播（a 重算后 b 仍短路 `f(a旧值)`）——陈旧语义改由 redo 名单承担（调用者显
+   式给、引擎透传，Phase 4）。
 5. **signals / pause**：TanStack 用 `ctx.approve` + `__timer`（sleep）内建；
    我们按同一语义落地：`ctx.approve(key, reason)` / `ctx.sleep(key, dur)` 在
    handler 内挂起，引擎持久化 `STEP_PAUSED` checkpoint（`deadline` 是**绝对
@@ -166,7 +168,7 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
 | 本仓 | 上游实测 | 性质 |
 | --- | --- | --- |
 | `resource` 模块：`Gate` / `GateGuard` / `ResourceKey` | `rg -c resource` = **0 文件** | 并发门原语（见上节 3） |
-| `up_to_date`（`StepOptions`） | `upToDate` = **0** | make 式 freshness（见上节 4） |
+| ~~`up_to_date`~~（`StepOptions`） | `upToDate` = **0** | **已删除**（见上节 4） |
 | `target_step` | 仅 `run-workflow.ts:1412` 一个**同名局部变量**，非选项 | 见上节 2 |
 | ~~`continue_from`~~ + ~~`truncate_log_at_step`~~ | `continueFrom` = **0**；上游 `RunStore` 只有 6 个方法 | **已删除**，见上节 1 |
 | `cancel_run` | `cancelRun` = **0** | 取消一个 run（写 `Aborted` 终局）；上游只有 `AbortSignal` |

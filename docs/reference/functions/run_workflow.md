@@ -14,7 +14,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:386`](../../../p
 Runs (or resumes) a workflow by driving its async handler.
 
 Inputs:
-- `target_step`: once that step succeeds the engine raises [`StepHalt`](../structs/StepHalt.md),
+- `interim_goals`: once every listed step is checkpointed the engine parks
   the handler unwinds (users should propagate with `?`), and the run ends
   `Finished` with no output.
 

@@ -48,8 +48,8 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunWorkflowOptions.r
 
 | TanStack StepContext | Rust（StepCtx） | 状态 | 备注 |
 | -------------------- | --------------- | ---- | ---- |
-| `id: string` | `StepCtx.id: String` | ✅ | 确定性 step ID，跨 retry 与 replay 稳定；`up_to_date` 内部 probe 用 `attempt: 0` 构造 |
-| `attempt: number` | `StepCtx.attempt: usize` | ✅ | 1-based；`0` 仅见于 `up_to_date` make-check 的内部 probe |
+| `id: string` | `StepCtx.id: String` | ✅ | 确定性 step ID，跨 retry 与 replay 稳定 |
+| `attempt: number` | `StepCtx.attempt: usize` | ✅ | 1-based |
 | `input: TInput` | `input()` | ✅ | TS StepContext 无此字段，Rust 额外提供 |
 | `runtime: StepRuntimeContext` | `deadline()/time_remaining()/should_yield()` | ◐ | 同 ctx 的 runtime 拍平 |
 | `signal: AbortSignal`（attempt 级，step timeout / run abort） | `StepCtx::is_cancelled()` | ◐ | 协作式轮询谓词（差异 #2）：Rust 无法中止 in-flight future，长 step 必须自定节奏自检 |

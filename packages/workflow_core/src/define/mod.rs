@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::engine::EngineRuntime;
-use crate::event::{StepState, WorkflowEvent};
+use crate::event::WorkflowEvent;
 use crate::middleware::Middleware;
 
 mod define_workflow;
@@ -44,8 +44,7 @@ pub struct StepCtx {
     /// Deterministic step ID. Stable across retries *and* replays of the same
     /// run — the idempotency-key candidate for external systems (`id`).
     pub id: String,
-    /// Current attempt number (1-indexed). 0 only for internal probes (e.g.
-    /// the `up_to_date` make-check).
+    /// Current attempt number (1-indexed).
     pub attempt: usize,
 }
 
@@ -437,7 +436,7 @@ impl<TInput, TState, TCtxExt> BaseCtx<TInput, TState, TCtxExt> {
     }
 
     /// [`step`](Self::step) with per-step options (retry policy, timeout,
-    /// resource gate, `up_to_date` make-check). Same typing: resolves to the
+    /// resource gate). Same typing: resolves to the
     /// closure's own `T`.
     pub async fn step_with<T, F, Fut>(
         &self,
@@ -498,9 +497,10 @@ impl RetryPolicy {
     }
 }
 
-/// Per-step configuration. `retry`/`timeout`/`resource`/`up_to_date` are
-/// per-call-site options (v2), whereas TanStack passes them as inline
-/// `step(id, fn, opts)`. Everything here is orthogonal to the durable log.
+/// Per-step configuration. `retry`/`timeout` match upstream `StepOptions`
+/// (upstream passes them as inline `step(id, fn, opts)`); `retry.durable`
+/// maps to upstream `StepRetryOptions.durable`. `label`/`resource` are local
+/// extensions. Everything here is orthogonal to the durable log.
 #[derive(Clone, Default)]
 pub struct StepOptions {
     pub label: Option<String>,
@@ -509,11 +509,6 @@ pub struct StepOptions {
     /// Resource key this step contends on (e.g. `"gpu:0"`). Steps with the
     /// same key are serialized (capacity-1 gate, sibling of a mutex).
     pub resource: Option<String>,
-    /// Make-style freshness check against the *derived* step state. `Ok(true)`
-    /// while a successful checkpoint exists ⇒ the step short-circuits; if it
-    /// reports stale a step still re-executes on resume. Defaults to the
-    /// durable checkpoint only.
-    pub up_to_date: Option<Arc<dyn Fn(&StepCtx, &StepState) -> bool + Send + Sync>>,
 }
 
 impl StepOptions {
@@ -533,14 +528,6 @@ impl StepOptions {
 
     pub fn resource(mut self, resource: impl Into<String>) -> Self {
         self.resource = Some(resource.into());
-        self
-    }
-
-    pub fn up_to_date(
-        mut self,
-        up_to_date: impl Fn(&StepCtx, &StepState) -> bool + Send + Sync + 'static,
-    ) -> Self {
-        self.up_to_date = Some(Arc::new(up_to_date));
         self
     }
 }

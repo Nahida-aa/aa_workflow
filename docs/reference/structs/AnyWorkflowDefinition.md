@@ -5,7 +5,7 @@ title: AnyWorkflowDefinition
 
 # Struct: AnyWorkflowDefinition
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:692`](../../../packages/workflow_core/src/define/mod.rs#L692)
+Defined in: [`packages/workflow_core/src/define/mod.rs:715`](../../../packages/workflow_core/src/define/mod.rs#L715)
 
 The erased workflow, and the type every run site takes — TanStack's
 `AnyWorkflowDefinition` (`types.ts:466`).

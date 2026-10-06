@@ -200,8 +200,7 @@ if ctx.input.expedited {            // 分支 = 普通 if
 }
 ```
 
-同 key 串行用 `.resource(key)`（容量-1 资源门）；make 式新鲜度检查用
-`.up_to_date(|| ..)`。
+同 key 串行用 `.resource(key)`（容量-1 资源门）。
 
 ## Recipe: middleware 扩展 ctx
 

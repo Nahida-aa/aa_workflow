@@ -5,7 +5,7 @@ title: BaseCtx
 
 # Struct: BaseCtx
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:114`](../../../packages/workflow_core/src/define/mod.rs#L114)
+Defined in: [`packages/workflow_core/src/define/mod.rs:113`](../../../packages/workflow_core/src/define/mod.rs#L113)
 
 The handler's argument — mirrors TanStack's `BaseCtx<TInput, TState>`
 interface member-for-member. Public surface is exactly `Self::run_id`
@@ -34,7 +34,7 @@ clone (or move) values as needed across `await` points.
 run_id: String
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:116`](../../../packages/workflow_core/src/define/mod.rs#L116)
+Defined in: [`packages/workflow_core/src/define/mod.rs:115`](../../../packages/workflow_core/src/define/mod.rs#L115)
 
 `runId: string`
 
@@ -47,7 +47,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:116`](../../../packages/w
 input: TInput
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:118`](../../../packages/workflow_core/src/define/mod.rs#L118)
+Defined in: [`packages/workflow_core/src/define/mod.rs:117`](../../../packages/workflow_core/src/define/mod.rs#L117)
 
 `input: TInput` — frozen run input (typed or `Value`)
 
@@ -60,7 +60,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:118`](../../../packages/w
 state: StateHandle<TState>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:121`](../../../packages/workflow_core/src/define/mod.rs#L121)
+Defined in: [`packages/workflow_core/src/define/mod.rs:120`](../../../packages/workflow_core/src/define/mod.rs#L120)
 
 `state: TState` — 共享可变的 typed state（对齐 TS 的
 `ctx.state === engine.state`）；见 `state_handle` 模块文档。
@@ -74,7 +74,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:121`](../../../packages/w
 ext: TCtxExt
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:127`](../../../packages/workflow_core/src/define/mod.rs#L127)
+Defined in: [`packages/workflow_core/src/define/mod.rs:126`](../../../packages/workflow_core/src/define/mod.rs#L126)
 
 `TExtensions` — ctx extension bundle, the `{...context}` accumulated by
 middleware (all `produce` hooks run and shallow-merge in registration
@@ -86,18 +86,13 @@ _（存在非公开字段）_
 
 ## Implementations
 
-### step()
+### compensate()
 
 ```rust
-pub async fn step<T, F, Fut>(&self, step_id: &str, run: F) -> Result<T>
-where
-    T: Serialize + DeserializeOwned + Send + 'static,
-    F: FnOnce(StepCtx) -> Fut + Clone + Send + 'static,
-    Fut: Future + Send + 'static,
-    TState: Serialize
+pub fn compensate<impl Into<String>: Into, impl Fn(StepCtx) ->     std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> +     Send>> + Send + Sync + 'static: Fn(StepCtx) -> Pin<Box<dyn Future + Send>> + Send + Sync + 'static>(&self, id: impl ?, undo: impl ? + ? + ? + ?, retry: RetryPolicy) -> Result<()>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:200`](../../../packages/workflow_core/src/define/mod.rs#L200)
+Defined in: [`packages/workflow_core/src/define/mod.rs:203`](../../../packages/workflow_core/src/define/mod.rs#L203)
 
 Runs `run` durably under `step_id` and resolves to `T` — the closure's own
 return type, the way upstream's `step<T>` behaves.
@@ -123,6 +118,44 @@ can't deserialize from — a `f64` field that may be `NaN`, a `HashMap`
 keyed by a type with a custom `Deserialize` — will therefore work on the
 first drive and fail on resume. That asymmetry is inherent to storing the
 result as JSON, not something this signature can paper over.
+Phase-1 补偿登记（undo 轴，对齐 #19 `ctx.compensate`）：登记先于受
+保护效果；内存登记 + 重放重建（handler 重跑确定性重登记，回调不
+序列化）。未捕获失败时引擎逆序执行已登记补偿；名单由使用者提供，
+不校验封闭性（"unsafe" 语义：名单外下游的处置由调用者负责）。
+
+#### Parameters
+
+##### id
+
+`impl ?`
+
+##### undo
+
+`impl ? + ? + ? + ?`
+
+##### retry
+
+[`RetryPolicy`](RetryPolicy.md)
+
+#### Returns
+
+`Result<()>`
+
+
+***
+
+### step()
+
+```rust
+pub async fn step<T, F, Fut>(&self, step_id: &str, run: F) -> Result<T>
+where
+    T: Serialize + DeserializeOwned + Send + 'static,
+    F: FnOnce(StepCtx) -> Fut + Clone + Send + 'static,
+    Fut: Future + Send + 'static,
+    TState: Serialize
+```
+
+Defined in: [`packages/workflow_core/src/define/mod.rs:231`](../../../packages/workflow_core/src/define/mod.rs#L231)
 
 #### Parameters
 
@@ -149,7 +182,7 @@ where
     TState: Serialize
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:214`](../../../packages/workflow_core/src/define/mod.rs#L214)
+Defined in: [`packages/workflow_core/src/define/mod.rs:245`](../../../packages/workflow_core/src/define/mod.rs#L245)
 
 Durable approval wait: pauses the run until [`signal_run`](../functions/signal_run.md)
 delivers a decision for `key`. `reason` is persisted in the `StepPaused`
@@ -181,7 +214,7 @@ where
     TState: Serialize
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:226`](../../../packages/workflow_core/src/define/mod.rs#L226)
+Defined in: [`packages/workflow_core/src/define/mod.rs:257`](../../../packages/workflow_core/src/define/mod.rs#L257)
 
 [`Self::approve`](BaseCtx.md) + [`ApproveOptions`](ApproveOptions.md)（`meta` / payload `schema`）。
 
@@ -214,7 +247,7 @@ where
     TState: Serialize
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:253`](../../../packages/workflow_core/src/define/mod.rs#L253)
+Defined in: [`packages/workflow_core/src/define/mod.rs:284`](../../../packages/workflow_core/src/define/mod.rs#L284)
 
 Durable sleep: pauses the run until `dur` elapses. `key` is the
 deterministic pause identity. An external timer (the runtime's sweep,
@@ -247,7 +280,7 @@ where
     TState: Serialize
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:272`](../../../packages/workflow_core/src/define/mod.rs#L272)
+Defined in: [`packages/workflow_core/src/define/mod.rs:303`](../../../packages/workflow_core/src/define/mod.rs#L303)
 
 Durable absolute-time wait: pauses until wall-clock `ts_ms` (equivalent
 to TanStack's `sleepUntil`). The timestamp is stored **verbatim** —
@@ -280,7 +313,7 @@ where
     TState: Serialize
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:289`](../../../packages/workflow_core/src/define/mod.rs#L289)
+Defined in: [`packages/workflow_core/src/define/mod.rs:320`](../../../packages/workflow_core/src/define/mod.rs#L320)
 
 Durable named wait: pauses the run until [`signal_event`](../functions/signal_event.md)
 delivers a payload for `event_name`. `key` is the deterministic pause
@@ -313,7 +346,7 @@ where
     TState: Serialize
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:303`](../../../packages/workflow_core/src/define/mod.rs#L303)
+Defined in: [`packages/workflow_core/src/define/mod.rs:334`](../../../packages/workflow_core/src/define/mod.rs#L334)
 
 [`Self::wait_for_event`](BaseCtx.md) + [`WaitForEventOptions`](WaitForEventOptions.md)（`deadline` / `meta` /
 payload `schema`）。对齐 TanStack `WaitForEventOptions`（`types.ts:268-279`）。
@@ -345,7 +378,7 @@ payload `schema`）。对齐 TanStack `WaitForEventOptions`（`types.ts:268-279`
 pub fn emit<impl AsRef<str>: AsRef>(&self, name: impl ?, value: Value)
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:329`](../../../packages/workflow_core/src/define/mod.rs#L329)
+Defined in: [`packages/workflow_core/src/define/mod.rs:360`](../../../packages/workflow_core/src/define/mod.rs#L360)
 
 Emit an observability event to the publisher. Never appended to the
 log, so it is outside replay — `fold_step_states` and resume ignore it
@@ -370,7 +403,7 @@ log, so it is outside replay — `fold_step_states` and resume ignore it
 pub fn now(&self) -> Result<i64>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:341`](../../../packages/workflow_core/src/define/mod.rs#L341)
+Defined in: [`packages/workflow_core/src/define/mod.rs:372`](../../../packages/workflow_core/src/define/mod.rs#L372)
 
 Deterministic wall-clock (TanStack `ctx.now`): records the call's
 timestamp as a checkpoint; replay serves the recorded value, so a run
@@ -389,7 +422,7 @@ sees the same clock across resumes. Returns `Err` only on store failure.
 pub fn uuid(&self) -> Result<String>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:348`](../../../packages/workflow_core/src/define/mod.rs#L348)
+Defined in: [`packages/workflow_core/src/define/mod.rs:379`](../../../packages/workflow_core/src/define/mod.rs#L379)
 
 Deterministic id (TanStack `ctx.uuid`): records a generated UUIDv4 as a
 checkpoint; replay serves the recorded id, so the same value is seen
@@ -408,7 +441,7 @@ across resumes. Returns `Err` only on store failure.
 pub fn is_cancelled(&self) -> bool
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:356`](../../../packages/workflow_core/src/define/mod.rs#L356)
+Defined in: [`packages/workflow_core/src/define/mod.rs:387`](../../../packages/workflow_core/src/define/mod.rs#L387)
 
 Whether this run was cancelled via [`cancel_run`](../functions/cancel_run.md).
 Polled at step boundaries only — the engine cannot interrupt a step's
@@ -428,7 +461,7 @@ must check cooperatively).
 pub fn deadline(&self) -> Option<i64>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:368`](../../../packages/workflow_core/src/define/mod.rs#L368)
+Defined in: [`packages/workflow_core/src/define/mod.rs:399`](../../../packages/workflow_core/src/define/mod.rs#L399)
 
 Absolute UTC ms runtime budget for this drive (TanStack `deadline`);
 `None` when the host set no budget.
@@ -446,7 +479,7 @@ Absolute UTC ms runtime budget for this drive (TanStack `deadline`);
 pub fn time_remaining(&self) -> u64
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:373`](../../../packages/workflow_core/src/define/mod.rs#L373)
+Defined in: [`packages/workflow_core/src/define/mod.rs:404`](../../../packages/workflow_core/src/define/mod.rs#L404)
 
 Ms of runtime budget left (`u64::MAX` when no deadline).
 
@@ -463,7 +496,7 @@ Ms of runtime budget left (`u64::MAX` when no deadline).
 pub fn should_yield(&self) -> bool
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:382`](../../../packages/workflow_core/src/define/mod.rs#L382)
+Defined in: [`packages/workflow_core/src/define/mod.rs:413`](../../../packages/workflow_core/src/define/mod.rs#L413)
 
 True once the budget is nearly exhausted: `time_remaining() <
 min_yield_remaining_ms` (default 1000ms).
@@ -483,7 +516,7 @@ where
     TState: Serialize
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:390`](../../../packages/workflow_core/src/define/mod.rs#L390)
+Defined in: [`packages/workflow_core/src/define/mod.rs:421`](../../../packages/workflow_core/src/define/mod.rs#L421)
 
 Cooperative hand-back of the runtime budget (TanStack `yield`): durably
 parks the run on a `"__timer"` wait until [`RunWorkflowOptions`](RunWorkflowOptions.md) 的 `yield_resume_at`
@@ -508,10 +541,10 @@ where
     TState: Serialize
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:410`](../../../packages/workflow_core/src/define/mod.rs#L410)
+Defined in: [`packages/workflow_core/src/define/mod.rs:441`](../../../packages/workflow_core/src/define/mod.rs#L441)
 
 [`step`](BaseCtx.md) with per-step options (retry policy, timeout,
-resource gate, `up_to_date` make-check). Same typing: resolves to the
+resource gate). Same typing: resolves to the
 closure's own `T`.
 
 #### Parameters

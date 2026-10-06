@@ -201,6 +201,65 @@ Observability only (not persisted): RFC 6902 JSON Patch describing
 delta 会在每次 invocation 重放时重复 append，或者需要重放时跳过。
 delta 语义见 `crate::engine::state_diff`。
 
+
+***
+
+### CompensationStarted
+
+```rust
+{ .. }
+```
+
+Defined in: [`packages/workflow_core/src/event.rs:179`](../../../packages/workflow_core/src/event.rs#L179)
+
+Checkpoint (persisted): 未捕获失败触发了补偿——原始失败随 `error`
+持久化，已登记的撤销 handler 将逆序执行。崩溃后恢复的驱动据此得知
+"补偿进行中"。
+
+
+***
+
+### CompensationCompleted
+
+```rust
+{ .. }
+```
+
+Defined in: [`packages/workflow_core/src/event.rs:186`](../../../packages/workflow_core/src/event.rs#L186)
+
+Checkpoint (persisted): 一个已登记的撤销 handler 成功完成——重启后
+该补偿不再重复执行（幂等键 = 补偿 id）。
+
+
+***
+
+### CompensationFailed
+
+```rust
+{ .. }
+```
+
+Defined in: [`packages/workflow_core/src/event.rs:193`](../../../packages/workflow_core/src/event.rs#L193)
+
+Checkpoint (persisted): 一个撤销 handler 耗尽重试——补偿链就地停止
+（后续登记的补偿保持未执行，留给人工处置）。
+
+
+***
+
+### StepRetryScheduled
+
+```rust
+{ .. }
+```
+
+Defined in: [`packages/workflow_core/src/event.rs:203`](../../../packages/workflow_core/src/event.rs#L203)
+
+Checkpoint (persisted)：耐久重试（#19 `retry.durable`）——步骤失败后
+登记下次重试的绝对截止时间，run 挂起（`__timer` + deadline），到期的
+sweep/重驱以此恢复。重放规则：本事件后该步骤视同未完成（attempts 随
+事件携带，耗尽前的 STEP_FAILED 不落日志）。
+
 ## Implementations
 
 ### step_id()
@@ -209,7 +268,7 @@ delta 语义见 `crate::engine::state_diff`。
 pub fn step_id(&self) -> Option<&str>
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:179`](../../../packages/workflow_core/src/event.rs#L179)
+Defined in: [`packages/workflow_core/src/event.rs:217`](../../../packages/workflow_core/src/event.rs#L217)
 
 #### Returns
 
@@ -224,7 +283,7 @@ Defined in: [`packages/workflow_core/src/event.rs:179`](../../../packages/workfl
 pub fn ts(&self) -> i64
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:198`](../../../packages/workflow_core/src/event.rs#L198)
+Defined in: [`packages/workflow_core/src/event.rs:240`](../../../packages/workflow_core/src/event.rs#L240)
 
 事件发生时间（每个变体都带 `ts`，对齐 TS 侧 `event.ts`）。
 
@@ -241,7 +300,7 @@ Defined in: [`packages/workflow_core/src/event.rs:198`](../../../packages/workfl
 pub fn type_name(&self) -> &'static str
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:217`](../../../packages/workflow_core/src/event.rs#L217)
+Defined in: [`packages/workflow_core/src/event.rs:263`](../../../packages/workflow_core/src/event.rs#L263)
 
 对齐 TS 侧 `event.type`）。
 

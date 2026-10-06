@@ -10,6 +10,7 @@ title: aa_workflow_core
 - [AnyWorkflowDefinition](structs/AnyWorkflowDefinition.md)
 - [ApproveOptions](structs/ApproveOptions.md)
 - [BaseCtx](structs/BaseCtx.md)
+- [Compensation](structs/Compensation.md)
 - [CreateWorkflowConfig](structs/CreateWorkflowConfig.md)
 - [EngineRuntime](structs/EngineRuntime.md)
 - [Gate](structs/Gate.md)
@@ -26,7 +27,6 @@ title: aa_workflow_core
 - [StateHandle](structs/StateHandle.md)
 - [StepAttempt](structs/StepAttempt.md)
 - [StepCtx](structs/StepCtx.md)
-- [StepHalt](structs/StepHalt.md)
 - [StepOptions](structs/StepOptions.md)
 - [StepState](structs/StepState.md)
 - [WaitForEventOptions](structs/WaitForEventOptions.md)
@@ -76,6 +76,7 @@ title: aa_workflow_core
 - [PublisherFn](type-aliases/PublisherFn.md)
 - [ResourceKey](type-aliases/ResourceKey.md)
 - [RunId](type-aliases/RunId.md)
+- [UndoFuture](type-aliases/UndoFuture.md)
 - [WorkflowCtx](type-aliases/WorkflowCtx.md)
 - [WorkflowHandler](type-aliases/WorkflowHandler.md)
 ## Constants

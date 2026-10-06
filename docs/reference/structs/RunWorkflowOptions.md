@@ -27,7 +27,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:88`](../../../pa
 | `signalDelivery` / `approval` | — | 我们走 `signal_run` / `signal_event` 先落盘再 drive（D3 的形态差异） |
 | `attach` | ✅ `attach` | 只读回放，见 [`RunWorkflowOptions::attach`](RunWorkflowOptions.md) |
 | `recover` / `signal` / `threadId` / `outputSink` / `telemetry` | — | **暂无**；未做，不是不做 |
-| — | ➕ `target_step` | **本地扩展**（上游连这个概念都没有） |
+| — | ➕ `interimGoals` | **本地扩展**（对齐 TS f2-lite 泊车语义） |
 
 # 为什么字段类型是 `AnyWorkflowDefinition`（newtype）而不是裸 `WorkflowDefinition`
 
@@ -101,10 +101,10 @@ run 输入。默认 `Value::Null`。
 
 ***
 
-### target_step
+### interim_goals
 
 ```rust
-target_step: Option<String>
+interim_goals: Option<Vec<String>>
 ```
 
 Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:104`](../../../packages/workflow_core/src/engine/run_workflow.rs#L104)
@@ -364,10 +364,10 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:230`](../../../p
 
 ***
 
-### target_step()
+### interim_goals()
 
 ```rust
-pub fn target_step<impl Into<String>: Into>(self, v: impl ?) -> Self
+pub fn interim_goals(self, v: Vec<String>) -> Self
 ```
 
 Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:236`](../../../packages/workflow_core/src/engine/run_workflow.rs#L236)
@@ -378,7 +378,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:236`](../../../p
 
 ##### v
 
-`impl ?`
+`Vec<String>`
 
 #### Returns
 

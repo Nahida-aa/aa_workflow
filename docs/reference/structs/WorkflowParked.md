@@ -5,8 +5,9 @@ title: WorkflowParked
 
 # Struct: WorkflowParked
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:55`](../../../packages/workflow_core/src/engine/mod.rs#L55)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:45`](../../../packages/workflow_core/src/engine/mod.rs#L45)
 
+Internal sentinel: the engine stopped driving the handler after
 Internal sentinel: the engine parked the run at a durable wait point
 ([`exec_pause`](../functions/exec_pause.md)). The pause checkpoint and the `Paused` projection were
 already written; this only unwinds the handler so the drive can end

@@ -478,32 +478,18 @@ where
     if let Some(st) = inner.live(step_id) {
         match st.status {
             StepStatus::Success => {
-                let fresh = match &opts.up_to_date {
-                    Some(utd) => {
-                        let probe = StepCtx {
-                            inner: inner.clone(),
-                            id: step_id.to_string(),
-                            attempt: 0,
-                        };
-                        utd(&probe, &st)
-                    }
-                    None => true,
-                };
-                if fresh {
-                    let raw = st.result.clone().unwrap_or(serde_json::Value::Null);
-                    return serde_json::from_value(raw).map_err(|e| {
-                        anyhow::anyhow!(
-                            "step `{step_id}`: recorded result does not deserialize back into \
-                             `{}` (the log says {}): {e}",
-                            std::any::type_name::<T>(),
-                            st.result
-                                .as_ref()
-                                .map(|v| v.to_string())
-                                .unwrap_or_else(|| "null".into()),
-                        )
-                    });
-                }
-                // stale → fall through and re-execute below.
+                let raw = st.result.clone().unwrap_or(serde_json::Value::Null);
+                return serde_json::from_value(raw).map_err(|e| {
+                    anyhow::anyhow!(
+                        "step `{step_id}`: recorded result does not deserialize back into \
+                         `{}` (the log says {}): {e}",
+                        std::any::type_name::<T>(),
+                        st.result
+                            .as_ref()
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "null".into()),
+                    )
+                });
             }
             StepStatus::Failed => {
                 let err = st
@@ -1546,64 +1532,6 @@ mod tests {
         assert_eq!(second.status, RunStatus::Finished);
         let l = log.lock().unwrap();
         assert_eq!(l.runs["a"], 1);
-        assert_eq!(l.runs["b"], 1);
-    }
-
-    #[tokio::test]
-    async fn stale_up_to_date_reruns() {
-        let store = Arc::new(InMemoryStore::new());
-        let log = Arc::new(Mutex::new(TestLog::default()));
-        let fresh_a = Arc::new(AtomicBool::new(true));
-        let fresh_b = Arc::new(AtomicBool::new(true));
-        let wf = WorkflowDefinition::new("w").handler({
-            let log = log.clone();
-            let fresh_a = fresh_a.clone();
-            let fresh_b = fresh_b.clone();
-            move |ctx: WorkflowCtx| {
-                let log = log.clone();
-                let fresh_a = fresh_a.clone();
-                let fresh_b = fresh_b.clone();
-                async move {
-                    let opts_a =
-                        StepOptions::new().up_to_date(move |_, _| fresh_a.load(Ordering::SeqCst));
-                    let opts_b =
-                        StepOptions::new().up_to_date(move |_, _| fresh_b.load(Ordering::SeqCst));
-                    for (id, opts) in [("a", opts_a), ("b", opts_b)] {
-                        let log = log.clone();
-                        let id = id.to_string();
-                        let id_c = id.clone();
-                        ctx.step_with(&id, opts, move |_sc: StepCtx| {
-                            let (log, id) = (log.clone(), id_c.clone());
-                            async move {
-                                log.lock().unwrap().note_start(&id);
-                                log.lock().unwrap().note_finish(&id);
-                                Ok(serde_json::Value::Null)
-                            }
-                        })
-                        .await?;
-                    }
-                    Ok(serde_json::Value::Null)
-                }
-            }
-        });
-        let out = run_workflow(
-            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
-                .input(serde_json::json!({})),
-        )
-        .outcome().await
-        .unwrap();
-        // mark a stale, rereun: a reruns, b stays cached
-        fresh_a.store(false, Ordering::SeqCst);
-        let second = run_workflow(
-            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
-                .input(serde_json::json!({}))
-            .run_id(out.run_id),
-        )
-        .outcome().await
-        .unwrap();
-        assert_eq!(second.status, RunStatus::Finished);
-        let l = log.lock().unwrap();
-        assert_eq!(l.runs["a"], 2);
         assert_eq!(l.runs["b"], 1);
     }
 
