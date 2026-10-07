@@ -331,49 +331,65 @@ async fn demo_reexecute_from_invalidate_rerun() {
     );
 }
 
-/// ⑤ 形状图合龙：声明菱形 a → (b, c) → d，源 run 执行序 a→c→b→d、死在 b——
-///    c 与 b 同层但先执行所以**成功 checkpoint 在案**。`DagShape::reexecute_plan`
-///    从源日志算缺省种子（未成功 = {b, d}）、展开闭包（种子自含 ∪ 后继 =
-///    {b, d}；无关分支 c 不进名单）。修复版 handler 里 b、d 真实重跑，a、c
-///    导入短路。形状只是名单计算依据，执行顺序仍是 handler 的事。
+/// ⑤ 形状图合龙（dub_sf_ocr 同款真实形状，examples/store_file 10 步）：
+///    两条并行分支（人声轴 separate→separate_after；字幕轴
+///    sf_ocr_pre→sf_ocr→sf_ocr_fix→translate）+ 汇聚链
+///    （split_audio 吃两支产物 → tts → mix_audio → mix_video）。
+///    场景：翻译服务故障——translate 失败，其余 5 步成功在案。
+///    `DagShape::reexecute_plan` 缺省 from = 未成功节点 {translate 及其下游
+///    4 步}，闭包展开后交给 reexecute_from；修复后重跑恰好那 5 步，
+///    OCR 链与人声轴全部导入短路。形状只是名单计算依据——真实 handler
+///    的 try_join! 并行在 demo 里串行化（执行序与形状解耦，见 ④ 的教训）。
 #[tokio::test]
-async fn demo_dag_shape_closure_expansion_feeds_reexecute_from() {
+async fn demo_dub_sf_ocr_shape_closure_redo() {
     let store = Arc::new(InMemoryStore::new());
+    // 依赖方向与 examples/store_file/src/dub_sf_ocr.rs 的 handler 逐步对应：
+    // split_audio 同时吃两支的产物（separated + translated）——两条分支在此汇合。
     let shape = DagShape::build(&[
-        ("a", &[]),
-        ("b", &["a"]),
-        ("c", &["a"]),
-        ("d", &["b", "c"]),
+        ("separate", &[]),
+        ("separate_after", &["separate"]),
+        ("sf_ocr_pre", &[]),
+        ("sf_ocr", &["sf_ocr_pre"]),
+        ("sf_ocr_fix", &["sf_ocr"]),
+        ("translate", &["sf_ocr_fix"]),
+        ("split_audio", &["separate_after", "translate"]),
+        ("tts", &["split_audio"]),
+        ("mix_audio", &["separate_after", "tts"]),
+        ("mix_video", &["separate_after", "mix_audio"]),
     ])
-    .expect("菱形无环");
+    .expect("dub 形状无环");
 
-    // 源 run：执行序 a→c→b→d（c 先于 b），b 失败——a、c 成功在案，
-    // b 失败、d 没跑到。执行顺序由 handler 决定，形状图只管名单。
+    // 源 run：翻译服务故障，translate 失败（执行序串行化：分支 A 全部
+    // checkpoint 后分支 B 才走到 translate，保证确定性）
     let src_log = Arc::new(Mutex::new(TestLog::default()));
     let first = run_workflow(
-        RunWorkflowOptions::new(diamond_wf(&src_log, Some("b")), store.clone())
+        RunWorkflowOptions::new(dub_wf(&src_log, Some("translate")), store.clone())
             .input(serde_json::json!({}))
-            .run_id("demo:shape-src"),
+            .run_id("dub:src"),
     )
     .outcome()
     .await
     .unwrap();
-    assert_eq!(first.status, RunStatus::Errored);
+    assert_eq!(first.status, RunStatus::Errored, "translate 失败 → errored");
     let source_run_id = first.run_id.clone();
 
-    // 缺省 from = 源日志未成功节点；展开 = 种子 ∪ 后继闭包
+    // 缺省 from = 源日志未成功节点：translate + 它下游的 4 步（汇聚链没跑到）
     let source_events = store.get_events(&source_run_id).unwrap();
     let plan = shape
-        .reexecute_plan(source_run_id, &source_events, None)
+        .reexecute_plan(&source_run_id, &source_events, None)
         .expect("from 缺省不引入未知 step");
-    assert_eq!(plan.unsafe_invalidate, vec!["b", "d"], "闭包展开 = 种子∪后继；无关分支不在名单");
+    assert_eq!(
+        plan.unsafe_invalidate,
+        vec!["mix_audio", "mix_video", "split_audio", "translate", "tts"],
+        "闭包展开：翻译轴 + 汇聚链；人声轴与 OCR 链不在名单"
+    );
 
-    // redo：b 修好了——名单里的 b、d 重跑，a、c 导入短路
+    // redo：翻译服务修好了——名单里 5 步真实重跑，其余 5 步导入短路
     let redo_log = Arc::new(Mutex::new(TestLog::default()));
     let out = run_workflow(
-        RunWorkflowOptions::new(diamond_wf(&redo_log, None), store.clone())
+        RunWorkflowOptions::new(dub_wf(&redo_log, None), store.clone())
             .input(serde_json::json!({}))
-            .run_id("demo:shape-redo")
+            .run_id("dub:redo")
             .reexecute_from(plan),
     )
     .outcome()
@@ -382,22 +398,36 @@ async fn demo_dag_shape_closure_expansion_feeds_reexecute_from() {
     assert_eq!(out.status, RunStatus::Finished);
     {
         let l = redo_log.lock().unwrap();
-        assert_eq!(l.runs.get("a").copied().unwrap_or(0), 0, "a 导入短路");
-        assert_eq!(l.runs["b"], 1, "b 重跑（失败未导入）");
-        assert_eq!(l.runs.get("c").copied().unwrap_or(0), 0, "c 导入短路");
-        assert_eq!(l.runs["d"], 1, "d 重跑（b 的消费者，随闭包失效）");
+        for id in ["separate", "separate_after", "sf_ocr_pre", "sf_ocr", "sf_ocr_fix"] {
+            assert_eq!(l.runs.get(id).copied().unwrap_or(0), 0, "{id} 导入短路");
+        }
+        for id in ["translate", "split_audio", "tts", "mix_audio", "mix_video"] {
+            assert_eq!(l.runs[id], 1, "{id} 重跑恰好一次");
+        }
     }
 }
 
-/// 菱形四步串行执行；`fail_at` 指名的 step 失败。形状图只管名单，这里
-/// 的执行顺序由 handler 决定——两者解耦。
-fn diamond_wf(log: &Arc<Mutex<TestLog>>, fail_at: Option<&'static str>) -> WorkflowDefinition {
-    WorkflowDefinition::new("w").handler({
+/// dub_sf_ocr 同款 10 步（执行序串行化；`fail_at` 指名的 step 失败）。
+/// 真实 handler（examples/store_file）两条分支 try_join! 并行、产物是
+/// 强类型结构体——demo 只保形状与语义，产物压成 step id。
+fn dub_wf(log: &Arc<Mutex<TestLog>>, fail_at: Option<&'static str>) -> WorkflowDefinition {
+    WorkflowDefinition::new("dub_sf_ocr").handler({
         let log = log.clone();
         move |ctx: WorkflowCtx| {
             let log = log.clone();
             async move {
-                for id in ["a", "c", "b", "d"] {
+                for id in [
+                    "separate",
+                    "separate_after",
+                    "sf_ocr_pre",
+                    "sf_ocr",
+                    "sf_ocr_fix",
+                    "translate",
+                    "split_audio",
+                    "tts",
+                    "mix_audio",
+                    "mix_video",
+                ] {
                     let log = log.clone();
                     let id_s = id.to_string();
                     let fail = fail_at == Some(id);
@@ -406,7 +436,9 @@ fn diamond_wf(log: &Arc<Mutex<TestLog>>, fail_at: Option<&'static str>) -> Workf
                         async move {
                             log.lock().unwrap().note_start(&id);
                             if fail {
-                                return Err::<serde_json::Value, _>(anyhow::anyhow!("{id} 失败"));
+                                return Err::<serde_json::Value, _>(anyhow::anyhow!(
+                                    "翻译服务不可用"
+                                ));
                             }
                             Ok(serde_json::json!(id))
                         }
