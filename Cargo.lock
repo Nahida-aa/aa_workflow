@@ -22,6 +22,7 @@ dependencies = [
 name = "aa_workflow_dag"
 version = "0.1.0"
 dependencies = [
+ "aa_graph",
  "aa_workflow_core",
  "anyhow",
  "serde_json",

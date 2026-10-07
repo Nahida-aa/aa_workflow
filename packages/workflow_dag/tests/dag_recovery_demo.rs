@@ -4,13 +4,15 @@
 //! 这三个原语的组合上。
 //!
 //! ① interimGoals 泊车 + 续驱  ② compensate 逆序撤销  ③ durable retry 泊车/续跑
-//! ④ reexecuteFrom redo（失效名单导入重跑）
+//! ④ reexecuteFrom redo（失效名单导入重跑）  ⑤ 形状图合龙：aa_graph 闭包展开
+//!    → 名单透传（本 crate 的 DagShape 是「DAG 术语」唯一合法驻地，core 不知道图）
 
 use aa_workflow_core::{
     Backoff, ImportedFrom, InMemoryStore, ReexecuteFrom, RetryPolicy, RunStatus, RunStore,
     RunWorkflowOptions, StepCtx, StepOptions, WorkflowCtx, WorkflowDefinition, WorkflowEvent,
     run_workflow,
 };
+use aa_workflow_dag::DagShape;
 use std::sync::{Arc, Mutex};
 
 type UndoLog = Arc<Mutex<Vec<&'static str>>>;
@@ -327,4 +329,92 @@ async fn demo_reexecute_from_invalidate_rerun() {
         }),
         "a 的 checkpoint 来自导入"
     );
+}
+
+/// ⑤ 形状图合龙：声明菱形 a → (b, c) → d，源 run 执行序 a→c→b→d、死在 b——
+///    c 与 b 同层但先执行所以**成功 checkpoint 在案**。`DagShape::reexecute_plan`
+///    从源日志算缺省种子（未成功 = {b, d}）、展开闭包（种子自含 ∪ 后继 =
+///    {b, d}；无关分支 c 不进名单）。修复版 handler 里 b、d 真实重跑，a、c
+///    导入短路。形状只是名单计算依据，执行顺序仍是 handler 的事。
+#[tokio::test]
+async fn demo_dag_shape_closure_expansion_feeds_reexecute_from() {
+    let store = Arc::new(InMemoryStore::new());
+    let shape = DagShape::build(&[
+        ("a", &[]),
+        ("b", &["a"]),
+        ("c", &["a"]),
+        ("d", &["b", "c"]),
+    ])
+    .expect("菱形无环");
+
+    // 源 run：执行序 a→c→b→d（c 先于 b），b 失败——a、c 成功在案，
+    // b 失败、d 没跑到。执行顺序由 handler 决定，形状图只管名单。
+    let src_log = Arc::new(Mutex::new(TestLog::default()));
+    let first = run_workflow(
+        RunWorkflowOptions::new(diamond_wf(&src_log, Some("b")), store.clone())
+            .input(serde_json::json!({}))
+            .run_id("demo:shape-src"),
+    )
+    .outcome()
+    .await
+    .unwrap();
+    assert_eq!(first.status, RunStatus::Errored);
+    let source_run_id = first.run_id.clone();
+
+    // 缺省 from = 源日志未成功节点；展开 = 种子 ∪ 后继闭包
+    let source_events = store.get_events(&source_run_id).unwrap();
+    let plan = shape
+        .reexecute_plan(source_run_id, &source_events, None)
+        .expect("from 缺省不引入未知 step");
+    assert_eq!(plan.unsafe_invalidate, vec!["b", "d"], "闭包展开 = 种子∪后继；无关分支不在名单");
+
+    // redo：b 修好了——名单里的 b、d 重跑，a、c 导入短路
+    let redo_log = Arc::new(Mutex::new(TestLog::default()));
+    let out = run_workflow(
+        RunWorkflowOptions::new(diamond_wf(&redo_log, None), store.clone())
+            .input(serde_json::json!({}))
+            .run_id("demo:shape-redo")
+            .reexecute_from(plan),
+    )
+    .outcome()
+    .await
+    .unwrap();
+    assert_eq!(out.status, RunStatus::Finished);
+    {
+        let l = redo_log.lock().unwrap();
+        assert_eq!(l.runs.get("a").copied().unwrap_or(0), 0, "a 导入短路");
+        assert_eq!(l.runs["b"], 1, "b 重跑（失败未导入）");
+        assert_eq!(l.runs.get("c").copied().unwrap_or(0), 0, "c 导入短路");
+        assert_eq!(l.runs["d"], 1, "d 重跑（b 的消费者，随闭包失效）");
+    }
+}
+
+/// 菱形四步串行执行；`fail_at` 指名的 step 失败。形状图只管名单，这里
+/// 的执行顺序由 handler 决定——两者解耦。
+fn diamond_wf(log: &Arc<Mutex<TestLog>>, fail_at: Option<&'static str>) -> WorkflowDefinition {
+    WorkflowDefinition::new("w").handler({
+        let log = log.clone();
+        move |ctx: WorkflowCtx| {
+            let log = log.clone();
+            async move {
+                for id in ["a", "c", "b", "d"] {
+                    let log = log.clone();
+                    let id_s = id.to_string();
+                    let fail = fail_at == Some(id);
+                    ctx.step(&id_s, move |_sc: StepCtx| {
+                        let (log, id) = (log.clone(), id.to_string());
+                        async move {
+                            log.lock().unwrap().note_start(&id);
+                            if fail {
+                                return Err::<serde_json::Value, _>(anyhow::anyhow!("{id} 失败"));
+                            }
+                            Ok(serde_json::json!(id))
+                        }
+                    })
+                    .await?;
+                }
+                Ok(serde_json::Value::Null)
+            }
+        }
+    })
 }

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+aa_graph = { path = "../aa_graph" }
 aa_workflow_core = { path = "../workflow_core" }
 anyhow = "1"
 serde_json = "1"
