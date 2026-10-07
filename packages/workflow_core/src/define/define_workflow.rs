@@ -90,6 +90,22 @@ impl<TInput, TOutput, TState> CreateWorkflowConfig<TInput, TOutput, TState> {
         self
     }
 
+    /// Declare the state's *shape* for validation **without** re-typing the
+    /// handler's view of `ctx.state`（保持 `Value`）——`.state::<T>()` 会把
+    /// `TState` 重键为 `T`（handler 拿到强类型 state），而这里只安装同一份
+    /// serde 校验（initialize 产物 / 重放重建的 state 必须能反序列化回
+    /// `T`，否则 run 在声明点就报 validation）。handler 想以强类型读写
+    /// state 时用 [`Self::state`]，想保持擦除态只做形状把关时用本方法。
+    pub fn state_schema<T: serde::de::DeserializeOwned + Send + Sync + 'static>(
+        mut self,
+    ) -> Self {
+        self.state_validator = Some(Arc::new(|v| {
+            serde_json::from_value::<T>(v.clone())?;
+            Ok(())
+        }));
+        self
+    }
+
     /// Fallback retry for steps that declare no retry of their own
     /// (see [`StepOptions`](super::StepOptions)).
     pub fn default_step_retry(mut self, retry: RetryPolicy) -> Self {

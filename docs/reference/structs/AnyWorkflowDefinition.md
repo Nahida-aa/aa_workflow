@@ -5,7 +5,7 @@ title: AnyWorkflowDefinition
 
 # Struct: AnyWorkflowDefinition
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:715`](../../../packages/workflow_core/src/define/mod.rs#L715)
+Defined in: [`packages/workflow_core/src/define/mod.rs:712`](../../../packages/workflow_core/src/define/mod.rs#L712)
 
 The erased workflow, and the type every run site takes — TanStack's
 `AnyWorkflowDefinition` (`types.ts:466`).
@@ -23,17 +23,14 @@ Conversion is explicit, lossless, and free (both directions go through an
 `Arc`, so no deep clone):
 
 ```
-use aa_workflow_core::{AnyWorkflowDefinition, CreateWorkflowConfig, WorkflowDefinition, create_workflow};
+use aa_workflow_core::{AnyWorkflowDefinition, CreateWorkflowConfig, create_workflow};
 
 // the erased form — what a run site takes
-let erased: AnyWorkflowDefinition = WorkflowDefinition::new("charge").into();
-assert_eq!(erased.id, "charge");
-
-// a typed declaration site erases just as cheaply
 let typed = create_workflow(CreateWorkflowConfig::new("charge"))
     .handler(|_ctx| async { Ok(()) });
 let erased: AnyWorkflowDefinition = typed.into();
 assert_eq!(erased.id, "charge");
+assert_eq!(erased.version, None);
 ```
 
 # Why it holds an `Arc`

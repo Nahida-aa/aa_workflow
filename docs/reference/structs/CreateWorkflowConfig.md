@@ -243,13 +243,35 @@ typed：闭包吃 `&TInput`、产 `TState`（对齐上游——`TState` 由
 
 ***
 
+### state_schema()
+
+```rust
+pub fn state_schema<T: DeserializeOwned + Send + Sync + 'static>(self) -> Self
+```
+
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:99`](../../../packages/workflow_core/src/define/define_workflow.rs#L99)
+
+Declare the state's *shape* for validation **without** re-typing the
+handler's view of `ctx.state`（保持 `Value`）——`.state::<T>()` 会把
+`TState` 重键为 `T`（handler 拿到强类型 state），而这里只安装同一份
+serde 校验（initialize 产物 / 重放重建的 state 必须能反序列化回
+`T`，否则 run 在声明点就报 validation）。handler 想以强类型读写
+state 时用 [`Self::state`](CreateWorkflowConfig.md)，想保持擦除态只做形状把关时用本方法。
+
+#### Returns
+
+`Self`
+
+
+***
+
 ### default_step_retry()
 
 ```rust
 pub fn default_step_retry(self, retry: RetryPolicy) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:95`](../../../packages/workflow_core/src/define/define_workflow.rs#L95)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:111`](../../../packages/workflow_core/src/define/define_workflow.rs#L111)
 
 Fallback retry for steps that declare no retry of their own
 (see [`StepOptions`](StepOptions.md)).
@@ -275,7 +297,7 @@ where
     NewIn: DeserializeOwned + Send + Sync + 'static
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:105`](../../../packages/workflow_core/src/define/define_workflow.rs#L105)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:121`](../../../packages/workflow_core/src/define/define_workflow.rs#L121)
 
 Declare the input schema as a serde type: re-types the config to
 `CreateWorkflowConfig<NewIn, TOutput, TState>` so `create_workflow` builds a
@@ -298,7 +320,7 @@ where
     NewSt: DeserializeOwned + Send + Sync + 'static
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:131`](../../../packages/workflow_core/src/define/define_workflow.rs#L131)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:147`](../../../packages/workflow_core/src/define/define_workflow.rs#L147)
 
 Declare the state schema as a serde type: the state built by
 [`initialize`](CreateWorkflowConfig.md) is shape-checked against `NewSt` on
@@ -319,7 +341,7 @@ where
     NewOut: DeserializeOwned + Send + Sync + 'static
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:159`](../../../packages/workflow_core/src/define/define_workflow.rs#L159)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:175`](../../../packages/workflow_core/src/define/define_workflow.rs#L175)
 
 Declare the output schema as a serde type: re-types the config to
 `CreateWorkflowConfig<_, NewOut, _>`; the handler's `TOutput` is validated

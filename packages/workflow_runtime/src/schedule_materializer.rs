@@ -453,7 +453,7 @@ mod tests {
     use crate::types::ClaimDueScheduleBucketsArgs;
     use crate::{WorkflowRegistration, WorkflowScheduleDefinition};
     use std::collections::HashMap;
-    use aa_workflow_core::WorkflowDefinition;
+    use aa_workflow_core::{CreateWorkflowConfig, WorkflowCtx, create_workflow};
 
     fn spec_interval(ms: i64) -> WorkflowScheduleSpec {
         WorkflowScheduleSpec::Interval {
@@ -619,7 +619,11 @@ mod tests {
         workflows.insert(
             "digest".to_string(),
             WorkflowRegistration {
-                load: std::sync::Arc::new(|| WorkflowDefinition::new("digest").into()),
+                load: std::sync::Arc::new(|| {
+                    create_workflow(CreateWorkflowConfig::new("digest").input::<serde_json::Value>())
+                        .handler(|_ctx: WorkflowCtx| async { Ok(serde_json::Value::Null) })
+                        .into()
+                }),
                 previous_versions: HashMap::new(),
                 version: Some("v1".into()),
                 schedules,

@@ -163,40 +163,13 @@ _（存在非公开字段）_
 
 ## Implementations
 
-### new()
-
-```rust
-pub fn new<impl Into<String>: Into>(id: impl ?) -> Self
-```
-
-Defined in: [`packages/workflow_core/src/define/mod.rs:791`](../../../packages/workflow_core/src/define/mod.rs#L791)
-
-The erased workflow: no `TInput`/`TOutput`/`TState`/`TCtxExt`. This is
-the engine-facing constructor (it replaces the old standalone `Workflow`
-type); a *typed* definition comes from
-[`create_workflow`](../functions/create_workflow.md)(...).handler(...), which
-pins the parameters from the declaration site.
-
-#### Parameters
-
-##### id
-
-`impl ?`
-
-#### Returns
-
-`Self`
-
-
-***
-
 ### version()
 
 ```rust
 pub fn version<impl Into<String>: Into>(self, version: impl ?) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:811`](../../../packages/workflow_core/src/define/mod.rs#L811)
+Defined in: [`packages/workflow_core/src/define/mod.rs:809`](../../../packages/workflow_core/src/define/mod.rs#L809)
 
 #### Parameters
 
@@ -217,7 +190,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:811`](../../../packages/w
 pub fn description<impl Into<String>: Into>(self, description: impl ?) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:816`](../../../packages/workflow_core/src/define/mod.rs#L816)
+Defined in: [`packages/workflow_core/src/define/mod.rs:814`](../../../packages/workflow_core/src/define/mod.rs#L814)
 
 #### Parameters
 
@@ -238,7 +211,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:816`](../../../packages/w
 pub fn default_step_retry(self, retry: RetryPolicy) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:823`](../../../packages/workflow_core/src/define/mod.rs#L823)
+Defined in: [`packages/workflow_core/src/define/mod.rs:821`](../../../packages/workflow_core/src/define/mod.rs#L821)
 
 Fallback retry policy for steps that declare no
 [`StepOptions::retry`](StepOptions.md).
@@ -262,7 +235,7 @@ Fallback retry policy for steps that declare no
 pub fn previous_versions<impl Into<AnyWorkflowDefinition>: Into, impl IntoIterator<Item = impl Into<AnyWorkflowDefinition>>: IntoIterator>(self, v: impl ?) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:831`](../../../packages/workflow_core/src/define/mod.rs#L831)
+Defined in: [`packages/workflow_core/src/define/mod.rs:829`](../../../packages/workflow_core/src/define/mod.rs#L829)
 
 Same as
 [`WorkflowBuilder::previous_versions`](WorkflowBuilder.md) —
@@ -287,7 +260,7 @@ the direct-construction variant for engine-facing code.
 pub fn initialize<impl Fn(&serde_json::Value) -> anyhow::Result<serde_json::Value> + Send + Sync + 'static: Fn(&Value) -> Result<Value> + Send + Sync + 'static>(self, f: impl ? + ? + ? + ?) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:843`](../../../packages/workflow_core/src/define/mod.rs#L843)
+Defined in: [`packages/workflow_core/src/define/mod.rs:841`](../../../packages/workflow_core/src/define/mod.rs#L841)
 
 Declare the initial per-invocation state, derived from the frozen run
 input (TanStack `initialize`). Called on every invocation — start and
@@ -313,7 +286,7 @@ resume — and the handler re-runs from scratch, so mutations written
 pub fn state_schema<T: DeserializeOwned + Send + Sync + 'static>(self) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:856`](../../../packages/workflow_core/src/define/mod.rs#L856)
+Defined in: [`packages/workflow_core/src/define/mod.rs:854`](../../../packages/workflow_core/src/define/mod.rs#L854)
 
 Declare a typed state (serde `Deserialize` type = schema). The initial
 state built by [`initialize`](WorkflowDefinition.md) is shape-checked against
@@ -337,7 +310,7 @@ where
     Fut: Future + Send + 'static
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:866`](../../../packages/workflow_core/src/define/mod.rs#L866)
+Defined in: [`packages/workflow_core/src/define/mod.rs:864`](../../../packages/workflow_core/src/define/mod.rs#L864)
 
 Installs the orchestrating closure. Branching/parallelism/order are
 plain async code; only durable side effects go through `ctx.step`.

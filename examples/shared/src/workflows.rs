@@ -265,7 +265,7 @@ pub fn email_digest() -> WorkflowDefinition<EmailDigestInput, serde_json::Value>
 /// 人工审批流：`draft` → `review`（`ctx.approve` 挂起，等外部决定）→ `publish`。
 /// 审批决定（signal 的 payload）就是 `approve` 的返回值，最后作为 run 输出。
 pub fn approval_review() -> WorkflowDefinition {
-    WorkflowDefinition::new("approval-review").handler(|ctx: WorkflowCtx| async move {
+    create_workflow(CreateWorkflowConfig::new("approval-review").input::<serde_json::Value>()).handler(|ctx: WorkflowCtx| async move {
         ctx.step("draft", move |_sc: StepCtx| async move {
             tracing::info!(target: "examples", "draft the proposal");
             Ok(serde_json::json!({ "draft": true }))
@@ -1150,10 +1150,13 @@ mod tests {
     #[tokio::test]
     async fn state_validation_rejects_init_shape() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = WorkflowDefinition::new("state-bad-shape")
-            .state_schema::<CounterState>()
-            .initialize(|_input| Ok(serde_json::json!({ "bogus": 1 })))
-            .handler(|_ctx: WorkflowCtx| async move { Ok(serde_json::json!({})) });
+        let wf = create_workflow(
+            CreateWorkflowConfig::new("state-bad-shape")
+                .input::<serde_json::Value>()
+                .state_schema::<CounterState>()
+                .initialize(|_input| Ok(serde_json::json!({ "bogus": 1 }))),
+        )
+        .handler(|_ctx: WorkflowCtx| async move { Ok(serde_json::json!({})) });
         let out = run_workflow(
             RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({})),
@@ -1302,10 +1305,13 @@ mod tests {
     #[tokio::test]
     async fn state_parallel_steps_snapshot_then_driver_flush() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = WorkflowDefinition::new("state-concurrency")
-            .state_schema::<CounterState>()
-            .initialize(|_| Ok(serde_json::json!({ "total": 0, "settleEvents": [] })))
-            .handler(|mut ctx: WorkflowCtx| async move {
+        let wf = create_workflow(
+            CreateWorkflowConfig::new("state-concurrency")
+                .input::<serde_json::Value>()
+                .state_schema::<CounterState>()
+                .initialize(|_| Ok(serde_json::json!({ "total": 0, "settleEvents": [] }))),
+        )
+        .handler(|mut ctx: WorkflowCtx| async move {
                 // clone 发生在 step 创建时 = state 快照；闭包内看到的都与 driver
                 // 无关，3 个并发等待互不锁（state 是字段，不经过 RwLock）。
                 let qa = ctx.clone();
@@ -1361,15 +1367,18 @@ mod tests {
     #[tokio::test]
     async fn state_step_closure_mutation_lost_on_resume() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
-        let wf = WorkflowDefinition::new("state-sharp-edge")
-            .state_schema::<CounterState>()
-            .initialize(|input| {
-                Ok(serde_json::json!({
-                    "total": input["amount"].as_i64().unwrap_or(0),
-                    "settleEvents": [],
-                }))
-            })
-            .handler(|mut ctx: WorkflowCtx| async move {
+        let wf = create_workflow(
+            CreateWorkflowConfig::new("state-sharp-edge")
+                .input::<serde_json::Value>()
+                .state_schema::<CounterState>()
+                .initialize(|input| {
+                    Ok(serde_json::json!({
+                        "total": input["amount"].as_i64().unwrap_or(0),
+                        "settleEvents": [],
+                    }))
+                }),
+        )
+        .handler(|mut ctx: WorkflowCtx| async move {
                 // mutation 在 step 闭包内：重放时整个闭包被跳过 → 修改丢失；
                 // 且闭包持 clone 快照，首个 drive 内也不写 driver 的字段。
                 let inner = ctx.clone();

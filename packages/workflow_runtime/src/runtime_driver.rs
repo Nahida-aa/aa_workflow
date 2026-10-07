@@ -1768,7 +1768,7 @@ mod driver_tests {
         let seen: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
         let s1 = seen.clone();
         let m1 = mem.clone();
-        let wf = WorkflowDefinition::new("peek").handler(move |ctx: WorkflowCtx| {
+        let wf = create_workflow(CreateWorkflowConfig::new("peek").input::<serde_json::Value>()).handler(move |ctx: WorkflowCtx| {
             let s1 = s1.clone();
             let m1 = m1.clone();
             async move {
@@ -1832,7 +1832,7 @@ mod driver_tests {
         let seen: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
         let s1 = seen.clone();
         let m1 = mem.clone();
-        let wf = WorkflowDefinition::new("peek").handler(move |ctx: WorkflowCtx| {
+        let wf = create_workflow(CreateWorkflowConfig::new("peek").input::<serde_json::Value>()).handler(move |ctx: WorkflowCtx| {
             let s1 = s1.clone();
             let m1 = m1.clone();
             async move {

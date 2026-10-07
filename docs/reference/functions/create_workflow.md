@@ -9,7 +9,7 @@ title: create_workflow
 pub fn create_workflow<TInput, TOutput, TState>(config: CreateWorkflowConfig<TInput, TOutput, TState>) -> WorkflowBuilder<TInput, TOutput, TState, ()>
 ```
 
-Defined in: [`packages/workflow_core/src/define/define_workflow.rs:208`](../../../packages/workflow_core/src/define/define_workflow.rs#L208)
+Defined in: [`packages/workflow_core/src/define/define_workflow.rs:224`](../../../packages/workflow_core/src/define/define_workflow.rs#L224)
 
 Define a workflow. Returns a builder chain:
 

@@ -692,17 +692,14 @@ impl<TInput, TOutput, TState, TCtxExt> Clone
 /// `Arc`, so no deep clone):
 ///
 /// ```
-/// use aa_workflow_core::{AnyWorkflowDefinition, CreateWorkflowConfig, WorkflowDefinition, create_workflow};
+/// use aa_workflow_core::{AnyWorkflowDefinition, CreateWorkflowConfig, create_workflow};
 ///
 /// // the erased form — what a run site takes
-/// let erased: AnyWorkflowDefinition = WorkflowDefinition::new("charge").into();
-/// assert_eq!(erased.id, "charge");
-///
-/// // a typed declaration site erases just as cheaply
 /// let typed = create_workflow(CreateWorkflowConfig::new("charge"))
 ///     .handler(|_ctx| async { Ok(()) });
 /// let erased: AnyWorkflowDefinition = typed.into();
 /// assert_eq!(erased.id, "charge");
+/// assert_eq!(erased.version, None);
 /// ```
 ///
 /// # Why it holds an `Arc`
@@ -783,12 +780,13 @@ impl<TInput, TOutput, TState, TCtxExt> WorkflowDefinition<TInput, TOutput, TStat
 }
 
 impl WorkflowDefinition {
-    /// The erased workflow: no `TInput`/`TOutput`/`TState`/`TCtxExt`. This is
-    /// the engine-facing constructor (it replaces the old standalone `Workflow`
-    /// type); a *typed* definition comes from
-    /// [`create_workflow`](super::create_workflow)(...).handler(...), which
-    /// pins the parameters from the declaration site.
-    pub fn new(id: impl Into<String>) -> Self {
+    /// The erased workflow: no `TInput`/`TOutput`/`TState`/`TCtxExt`.
+    ///
+    /// **Crate-internal only**（引擎测试 / registry 内部用）：公共声明期的唯一
+    /// 入口是 [`create_workflow`](super::create_workflow)(...).handler(...)——
+    /// 它在声明点钉死类型参数，并要求 config（input schema / version 等）。
+    /// 擦除态直造会绕过这些声明期设施，不对外提供。
+    pub(crate) fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             version: None,

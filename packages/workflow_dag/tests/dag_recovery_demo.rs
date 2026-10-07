@@ -8,9 +8,9 @@
 //!    → 名单透传（本 crate 的 DagShape 是「DAG 术语」唯一合法驻地，core 不知道图）
 
 use aa_workflow_core::{
-    Backoff, ImportedFrom, InMemoryStore, ReexecuteFrom, RetryPolicy, RunStatus, RunStore,
-    RunWorkflowOptions, StepCtx, StepOptions, WorkflowCtx, WorkflowDefinition, WorkflowEvent,
-    run_workflow,
+    Backoff, CreateWorkflowConfig, ImportedFrom, InMemoryStore, ReexecuteFrom, RetryPolicy,
+    RunStatus, RunStore, RunWorkflowOptions, StepCtx, StepOptions, WorkflowCtx,
+    WorkflowDefinition, WorkflowEvent, create_workflow, run_workflow,
 };
 use aa_workflow_dag::DagShape;
 use std::sync::{Arc, Mutex};
@@ -36,7 +36,7 @@ fn make_undo(log: &UndoLog, name: &'static str) -> UndoHandler {
 }
 
 fn three_step_wf(log: &Arc<Mutex<TestLog>>) -> WorkflowDefinition {
-    WorkflowDefinition::new("w").handler({
+    create_workflow(CreateWorkflowConfig::new("w").input::<serde_json::Value>()).handler({
         let log = log.clone();
         move |ctx: WorkflowCtx| {
             let log = log.clone();
@@ -83,7 +83,7 @@ impl TestLog {
 async fn demo_interim_goals_park_and_continue() {
     let store = Arc::new(InMemoryStore::new());
     let log = Arc::new(Mutex::new(TestLog::default()));
-    let wf = WorkflowDefinition::new("w").handler({
+    let wf = create_workflow(CreateWorkflowConfig::new("w").input::<serde_json::Value>()).handler({
         let log = log.clone();
         move |ctx: WorkflowCtx| {
             let log = log.clone();
@@ -153,7 +153,7 @@ async fn demo_compensate_reverse_undo() {
     let undo_b = make_undo(&undo_log, "undo-b");
     let undo_c = make_undo(&undo_log, "undo-c");
 
-    let wf = WorkflowDefinition::new("w").handler(move |ctx: WorkflowCtx| {
+    let wf = create_workflow(CreateWorkflowConfig::new("w").input::<serde_json::Value>()).handler(move |ctx: WorkflowCtx| {
         let undo_a = undo_a.clone();
         let undo_b = undo_b.clone();
         let undo_c = undo_c.clone();
@@ -211,7 +211,7 @@ async fn demo_durable_retry_park_and_resume() {
     let store = Arc::new(InMemoryStore::new());
     let attempts_seen: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
     let handler_seen = Arc::clone(&attempts_seen);
-    let wf = WorkflowDefinition::new("w").handler(move |ctx: WorkflowCtx| {
+    let wf = create_workflow(CreateWorkflowConfig::new("w").input::<serde_json::Value>()).handler(move |ctx: WorkflowCtx| {
         let seen = Arc::clone(&handler_seen);
         async move {
             let opts = StepOptions {
@@ -411,7 +411,7 @@ async fn demo_dub_sf_ocr_shape_closure_redo() {
 /// 真实 handler（examples/store_file）两条分支 try_join! 并行、产物是
 /// 强类型结构体——demo 只保形状与语义，产物压成 step id。
 fn dub_wf(log: &Arc<Mutex<TestLog>>, fail_at: Option<&'static str>) -> WorkflowDefinition {
-    WorkflowDefinition::new("dub_sf_ocr").handler({
+    create_workflow(CreateWorkflowConfig::new("dub_sf_ocr").input::<serde_json::Value>()).handler({
         let log = log.clone();
         move |ctx: WorkflowCtx| {
             let log = log.clone();
