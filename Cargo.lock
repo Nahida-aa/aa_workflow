@@ -24,6 +24,7 @@ version = "0.1.0"
 dependencies = [
  "aa_graph",
  "aa_workflow_core",
+ "aa_workflow_runtime",
  "anyhow",
  "serde_json",
  "tokio",
