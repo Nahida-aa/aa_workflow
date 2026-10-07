@@ -2866,4 +2866,211 @@ mod tests {
             .expect("源缺失 → 流里有 RUN_ERRORED");
         assert_eq!(code, RunErrorCode::RunLost);
     }
+    // ========================================================
+    // resume 两场景 × interimGoals 组合（泊车续驱 / 错误停止的恢复）
+    // ========================================================
+
+    /// a → b → c → d；`fail_at` 指名的 step 失败（其余返回自己的 id）。
+    fn chain_wf(log: &Arc<Mutex<TestLog>>, fail_at: Option<&'static str>) -> WorkflowDefinition {
+        WorkflowDefinition::new("w").handler({
+            let log = log.clone();
+            move |ctx: WorkflowCtx| {
+                let log = log.clone();
+                async move {
+                    for id in ["a", "b", "c", "d"] {
+                        let log = log.clone();
+                        let id_s = id.to_string();
+                        let fail = fail_at == Some(id);
+                        ctx.step(&id_s, move |_sc: StepCtx| {
+                            let (log, id) = (log.clone(), id.to_string());
+                            async move {
+                                log.lock().unwrap().note_start(&id);
+                                if fail {
+                                    return Err::<serde_json::Value, _>(anyhow::anyhow!("{id} 失败"));
+                                }
+                                Ok(serde_json::json!(id))
+                            }
+                        })
+                        .await?;
+                    }
+                    Ok(serde_json::Value::Null)
+                }
+            }
+        })
+    }
+
+    /// 场景 1 + 临时目标：泊车后续驱**可以换一份新名单**（per-drive 语义）。
+    /// goals ["b"] 泊车 → goals ["c"] 续驱到 c 再泊车 → 无名单补齐 d。
+    #[tokio::test]
+    async fn parked_resume_can_carry_a_new_interim_goals_list() {
+        let store = Arc::new(InMemoryStore::new());
+        let log = Arc::new(Mutex::new(TestLog::default()));
+
+        let first = run_workflow(
+            RunWorkflowOptions::new(chain_wf(&log, None), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("goal:hop")
+                .interim_goals(vec!["b".into()]),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        assert_eq!(first.status, RunStatus::Paused);
+
+        // 续驱带新名单：a/b 短路，c 执行后再泊车（d 缺席即待续）
+        let second = run_workflow(
+            RunWorkflowOptions::new(chain_wf(&log, None), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("goal:hop")
+                .interim_goals(vec!["c".into()]),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        assert_eq!(second.status, RunStatus::Paused, "goal c checkpoint 后再泊车");
+        {
+            let l = log.lock().unwrap();
+            assert_eq!(l.runs["c"], 1);
+            assert_eq!(l.runs.get("d").copied().unwrap_or(0), 0);
+        }
+
+        // 无名单：d 补齐 → Finished
+        let third = run_workflow(
+            RunWorkflowOptions::new(chain_wf(&log, None), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("goal:hop"),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        assert_eq!(third.status, RunStatus::Finished);
+        {
+            let l = log.lock().unwrap();
+            assert_eq!(l.runs["d"], 1);
+            assert_eq!(l.runs["a"], 1, "上游全程短路");
+        }
+    }
+
+    /// 场景 2（基线）：errored 的 run 直接重驱 = 失败 checkpoint rethrow——
+    /// a/b 短路、c 闭包**不重入**，run 再次 errored。失败是终态，就地重试
+    /// 不存在（重试在 step 内 / redo / 新 run）。
+    #[tokio::test]
+    async fn errored_run_redrive_rethrows_without_reclosures() {
+        let store = Arc::new(InMemoryStore::new());
+        let log = Arc::new(Mutex::new(TestLog::default()));
+
+        let first = run_workflow(
+            RunWorkflowOptions::new(chain_wf(&log, Some("c")), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("err:redrive"),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        assert_eq!(first.status, RunStatus::Errored);
+        assert_eq!(log.lock().unwrap().runs["c"], 1);
+
+        let second = run_workflow(
+            RunWorkflowOptions::new(chain_wf(&log, Some("c")), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("err:redrive"),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        assert_eq!(second.status, RunStatus::Errored, "失败 checkpoint rethrow");
+        let l = log.lock().unwrap();
+        assert_eq!(l.runs["c"], 1, "c 闭包不重入");
+        assert_eq!(l.runs["a"], 1, "a 短路");
+        assert_eq!(l.runs.get("d").copied().unwrap_or(0), 0, "下游不推进");
+    }
+
+    /// 场景 2（redo）：因错误停止的 run 的恢复路 = reexecuteFrom——失败的
+    /// checkpoint 不导入（缺席即待续），幸存 a/b 导入短路；修复版 handler
+    /// 里 c 真实重跑 → Finished。
+    #[tokio::test]
+    async fn reexecute_from_errored_source_reruns_failed_step() {
+        let store = Arc::new(InMemoryStore::new());
+        let src_log = Arc::new(Mutex::new(TestLog::default()));
+        let first = run_workflow(
+            RunWorkflowOptions::new(chain_wf(&src_log, Some("c")), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("err:src"),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        assert_eq!(first.status, RunStatus::Errored);
+        let source_run_id = first.run_id.clone();
+
+        // 修复版：同形状，c 不再失败；零失效名单（失败 step 本就不导入）
+        let fixed_log = Arc::new(Mutex::new(TestLog::default()));
+        let out = run_workflow(
+            RunWorkflowOptions::new(chain_wf(&fixed_log, None), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("err:fixed")
+                .reexecute_from(ReexecuteFrom::new(source_run_id.clone())),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        let l = fixed_log.lock().unwrap();
+        assert_eq!(l.runs.get("a").copied().unwrap_or(0), 0, "a 导入短路");
+        assert_eq!(l.runs.get("b").copied().unwrap_or(0), 0, "b 导入短路");
+        assert_eq!(l.runs["c"], 1, "c（失败未导入）真实重跑");
+        assert_eq!(l.runs["d"], 1, "d 顺次补齐");
+    }
+
+    /// 场景 2 + 临时目标：错误源 redo 可以带 goals——c 重跑 checkpoint 后
+    /// 泊车（d 缺席），续驱补齐。goals_done_at_drive_start 的转移检查以
+    /// **导入后**的 lives 计算：c 起步时缺席 → 不跳过泊车。
+    #[tokio::test]
+    async fn reexecute_from_errored_source_with_interim_goals_parks_at_goal() {
+        let store = Arc::new(InMemoryStore::new());
+        let src_log = Arc::new(Mutex::new(TestLog::default()));
+        let first = run_workflow(
+            RunWorkflowOptions::new(chain_wf(&src_log, Some("c")), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("err:goal-src"),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        assert_eq!(first.status, RunStatus::Errored);
+        let source_run_id = first.run_id.clone();
+
+        let fixed_log = Arc::new(Mutex::new(TestLog::default()));
+        let second = run_workflow(
+            RunWorkflowOptions::new(chain_wf(&fixed_log, None), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("err:goal-fixed")
+                .reexecute_from(ReexecuteFrom::new(source_run_id.clone()))
+                .interim_goals(vec!["c".into()]),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        assert_eq!(second.status, RunStatus::Paused, "c 重跑后泊车（d 缺席）");
+        {
+            let l = fixed_log.lock().unwrap();
+            assert_eq!(l.runs["c"], 1);
+            assert_eq!(l.runs.get("d").copied().unwrap_or(0), 0);
+        }
+
+        let third = run_workflow(
+            RunWorkflowOptions::new(chain_wf(&fixed_log, None), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("err:goal-fixed"),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        assert_eq!(third.status, RunStatus::Finished);
+        {
+            let l = fixed_log.lock().unwrap();
+            assert_eq!(l.runs["d"], 1);
+            assert_eq!(l.runs["c"], 1, "c 不重跑");
+        }
+    }
 }
