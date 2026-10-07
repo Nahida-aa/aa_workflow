@@ -9,21 +9,10 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:505`](../../../packages/w
 
 Per-step configuration. `retry`/`timeout` match upstream `StepOptions`
 (upstream passes them as inline `step(id, fn, opts)`); `retry.durable`
-maps to upstream `StepRetryOptions.durable`. `label`/`resource` are local
-extensions. Everything here is orthogonal to the durable log.
+maps to upstream `StepRetryOptions.durable`. `resource` is a local
+extension. Everything here is orthogonal to the durable log.
 
 ## Fields
-
-### label
-
-```rust
-label: Option<String>
-```
-
-Defined in: [`packages/workflow_core/src/define/mod.rs:506`](../../../packages/workflow_core/src/define/mod.rs#L506)
-
-
-***
 
 ### retry
 
@@ -31,7 +20,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:506`](../../../packages/w
 retry: Option<RetryPolicy>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:507`](../../../packages/workflow_core/src/define/mod.rs#L507)
+Defined in: [`packages/workflow_core/src/define/mod.rs:506`](../../../packages/workflow_core/src/define/mod.rs#L506)
 
 
 ***
@@ -42,7 +31,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:507`](../../../packages/w
 timeout: Option<Duration>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:508`](../../../packages/workflow_core/src/define/mod.rs#L508)
+Defined in: [`packages/workflow_core/src/define/mod.rs:507`](../../../packages/workflow_core/src/define/mod.rs#L507)
 
 
 ***
@@ -53,7 +42,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:508`](../../../packages/w
 resource: Option<String>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:511`](../../../packages/workflow_core/src/define/mod.rs#L511)
+Defined in: [`packages/workflow_core/src/define/mod.rs:510`](../../../packages/workflow_core/src/define/mod.rs#L510)
 
 Resource key this step contends on (e.g. `"gpu:0"`). Steps with the
 same key are serialized (capacity-1 gate, sibling of a mutex).
@@ -66,7 +55,7 @@ same key are serialized (capacity-1 gate, sibling of a mutex).
 pub fn new() -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:515`](../../../packages/workflow_core/src/define/mod.rs#L515)
+Defined in: [`packages/workflow_core/src/define/mod.rs:514`](../../../packages/workflow_core/src/define/mod.rs#L514)
 
 #### Returns
 
@@ -81,7 +70,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:515`](../../../packages/w
 pub fn retry(self, retry: RetryPolicy) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:519`](../../../packages/workflow_core/src/define/mod.rs#L519)
+Defined in: [`packages/workflow_core/src/define/mod.rs:518`](../../../packages/workflow_core/src/define/mod.rs#L518)
 
 #### Parameters
 
@@ -102,7 +91,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:519`](../../../packages/w
 pub fn timeout(self, timeout: Duration) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:524`](../../../packages/workflow_core/src/define/mod.rs#L524)
+Defined in: [`packages/workflow_core/src/define/mod.rs:523`](../../../packages/workflow_core/src/define/mod.rs#L523)
 
 #### Parameters
 
@@ -123,7 +112,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:524`](../../../packages/w
 pub fn resource<impl Into<String>: Into>(self, resource: impl ?) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:529`](../../../packages/workflow_core/src/define/mod.rs#L529)
+Defined in: [`packages/workflow_core/src/define/mod.rs:528`](../../../packages/workflow_core/src/define/mod.rs#L528)
 
 #### Parameters
 

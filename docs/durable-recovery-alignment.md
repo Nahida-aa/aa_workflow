@@ -16,7 +16,7 @@
 | --- | --- | --- | --- |
 | runtime 四方法面 | startRun/deliverSignal/deliverApproval/sweep | ✅ 已对齐（runtime_driver.rs 同名四方法） | 无 |
 | store 契约 | WorkflowExecutionStore 19 方法 | 23 方法（store_contract.rs） | 形态差异已对齐 |
-| 信号 | bufferSignals 收件箱（早到持久化+原子消费） | `signal_run`/`signal_event` 先经 store 契约持久化再驱动（D3 形态） | **需评估**（见 Phase 3） |
+| 信号 | bufferSignals 收件箱（早到持久化+原子消费） | core `signal_run` 收件箱 ✅（早到信号测试钉死）；runtime 名字投递的 Running 缓冲为独立 feature | 差距一项（见 Phase 3） |
 | step 重试 | `retry.durable`（attempt/deadline 持久化，sweep 恢复） | ✅ 已实现（`RetryPolicy.durable` + STEP_RETRY_SCHEDULED 泊车/续驱，c1c7ddf） | 无 |
 | 补偿 | `ctx.compensate` + COMPENSATION_STARTED + 逆序 undo | ✅ 已实现（`ctx.compensate` 内存登记 + 重放重建 + 逆序 undo，c1c7ddf） | 无 |
 | checkpoint 导入/泊车 | reexecuteFrom / interimGoals（**上游已原生采纳**，run-workflow.ts:71-84） | ✅ 已实现（`reexecute_from` + `StepFinished.meta.imported_from` 溯源；`interim_goals` 泊车 a9a7424） | 无 |

@@ -499,11 +499,10 @@ impl RetryPolicy {
 
 /// Per-step configuration. `retry`/`timeout` match upstream `StepOptions`
 /// (upstream passes them as inline `step(id, fn, opts)`); `retry.durable`
-/// maps to upstream `StepRetryOptions.durable`. `label`/`resource` are local
-/// extensions. Everything here is orthogonal to the durable log.
+/// maps to upstream `StepRetryOptions.durable`. `resource` is a local
+/// extension. Everything here is orthogonal to the durable log.
 #[derive(Clone, Default)]
 pub struct StepOptions {
-    pub label: Option<String>,
     pub retry: Option<RetryPolicy>,
     pub timeout: Option<Duration>,
     /// Resource key this step contends on (e.g. `"gpu:0"`). Steps with the

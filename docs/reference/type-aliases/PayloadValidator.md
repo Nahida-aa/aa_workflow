@@ -5,7 +5,7 @@ title: PayloadValidator
 
 # Type Alias: PayloadValidator
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:547`](../../../packages/workflow_core/src/define/mod.rs#L547)
+Defined in: [`packages/workflow_core/src/define/mod.rs:546`](../../../packages/workflow_core/src/define/mod.rs#L546)
 
 恢复 payload 的形状校验器（对齐 TanStack `WaitForEventOptions.schema`，
 `types.ts:276-277`）。**代码而非数据**：不落进 `StepPaused` checkpoint，

@@ -1937,6 +1937,61 @@ mod tests {
         )));
     }
 
+    /// 早到信号 = 收件箱（Phase 3 评估的钉子，对齐 #19 bufferSignals 的核心
+    /// 行为）：宿主在 **run 尚未开始**时 `signal_run(step_id)` 直投——
+    /// `StepResume` 无条件 CAS 落盘（signal_run 不检查 run 是否在等待）；
+    /// handler 到达 wait 点时 `find_resume` 从日志短路拾取（不泊车）。
+    /// 「先持久化、等待点原子消费」在 core 层天然成立。
+    #[tokio::test]
+    async fn early_signal_run_acts_as_inbox() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let decided = Arc::new(Mutex::new(None::<serde_json::Value>));
+        let decided_in = decided.clone();
+        let wf = WorkflowDefinition::new("approval").handler(move |ctx: WorkflowCtx| {
+            let decided = decided_in.clone();
+            async move {
+                let d = ctx.approve("release", "Approve the release?").await?;
+                *decided.lock().unwrap() = Some(d.clone());
+                Ok(d)
+            }
+        });
+
+        // 信号先于 run 存在——它就是这条日志的第一个事件（先持久化）。
+        signal_run(
+            store.as_ref(),
+            "r1",
+            "release",
+            serde_json::json!({ "approved": true, "early": true }),
+        )
+        .unwrap();
+        let events = store.get_events("r1").unwrap();
+        assert!(
+            matches!(&events[0], WorkflowEvent::StepResume { step_id, .. } if step_id == "release"),
+            "StepResume 是日志第一条：早到信号已持久化"
+        );
+
+        // 驱动：到达 wait 点时 find_resume 短路拾取——不泊车、payload 过墙。
+        let out = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("r1"),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Finished, "早到信号在等待点被消费");
+        assert_eq!(
+            decided.lock().unwrap().as_ref(),
+            Some(&serde_json::json!({ "approved": true, "early": true })),
+            "payload 原样送达 handler"
+        );
+        assert_eq!(
+            count_events(&store, "r1", |e| matches!(e, WorkflowEvent::StepPaused { .. })),
+            0,
+            "全程无泊车：等待点被日志里的 StepResume 短路"
+        );
+    }
+
     #[tokio::test]
     async fn aborted_run_replays_pause_without_reappending() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
