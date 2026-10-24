@@ -14,10 +14,10 @@
 
 | 能力 | TS（taren 分支） | Rust（aa-workflow） | 差距 |
 | --- | --- | --- | --- |
-| runtime 四方法面 | startRun/deliverSignal/deliverApproval/sweep | ✅ 四方法同名，**入参逐字段比对过**（2026-10-15） | **一处**：`deliverSignal` 少 `meta`（见 §0.1） |
+| runtime 四方法面 | startRun/deliverSignal/deliverApproval/sweep | ✅ 四方法同名，**入参逐字段比对过**（2026-10-15） | 无（`deliverSignal` 的 `meta` 已补，见 §0.1） |
 | store 契约 | `WorkflowExecutionStore` 28 方法（PR#19 后：基类 7 + 扩展 21） | 28 方法（基类 7 + 扩展 21），**逐方法同名比对过** | **两处**：少 `completeTimer`、多 `supportsSignalInbox`（见 §0.2） |
 | 信号 | bufferSignals 收件箱（**runtime 层 opt-in**，早到持久化 + 原子消费 + signalId 去重；需 store `bufferSignal`/`consumeBufferedSignal`，`__timer` 双闸豁免） | ✅ 已对齐：`buffer_signals` 开关 + 三 adapter 收件箱 + 等待点消费落账；core 直投原语已过闸 | 无（Phase 3 已收官，剩余三项为有意设计分歧） |
-| step 重试 | `retry.durable`（attempt/deadline 持久化，sweep 恢复；`STEP_ATTEMPT_STARTED` 事件） | ✅ `RetryPolicy.durable` + `StepRetryScheduled` 泊车/续驱，`__retry:` timer 键同上游 | **一处**：无 `StepAttemptStarted` 事件（见 §0.3） |
+| step 重试 | `retry.durable`（attempt/deadline 持久化，sweep 恢复；`STEP_ATTEMPT_STARTED` 事件） | ✅ `RetryPolicy.durable` + `StepRetryScheduled` 泊车/续驱 + `StepAttemptStarted`，`__retry:` timer 键同上游 | 无 |
 | 补偿 | `ctx.compensate` + `COMPENSATION_REGISTERED` + `COMPENSATION_STARTED{error}` + 逆序 undo；重复 id 报错 | ✅ `ctx.compensate` + `CompensationRegistered/Started/Completed/Failed` + 逆序 undo + 重复 id 报错 | 无（仅一处键名分歧，见 §0.4） |
 | checkpoint 导入/泊车 | reexecuteFrom / interimGoals（**f2-lite 自有，上游未采纳**；`f2-lite` 分支 `run-workflow.ts:71-84`） | ✅ 已实现（`reexecute_from` + `StepFinished.meta.imported_from` 溯源；`interim_goals` 泊车 a9a7424） | 无 |
 
@@ -71,12 +71,17 @@ StepFinished{result, attempts}——耐久重试与补偿的持久化挂载点�
 | `sweep` | ✅ 全对齐（含 `limit` 一次性设三类上限） |
 | `deliverSignal` | ⚠️ **少 `meta`** |
 
-**差距：`deliverSignal` 少 `meta`。** 上游 `WorkflowRuntimeDeliverSignalArgs.meta?`
-（`runtime/src/types.ts:430`）会随投递进入 `SIGNAL_RESOLVED.meta`；Rust 的
-`SignalDelivery` 没这个字段，于是我们给 `SignalResolved` 加的 `meta` **永远是
-`None`**。影响面：宿主无法给信号投递附自由元数据（审批单链接、金额、影响面这
-类）。`StepPaused`/`ApprovalRequested` 侧有 `meta`（`exec_pause_with` 收），
-只有**投递方向**缺。
+**`deliverSignal` 的 `meta`（2026-10-15 已补）**：上游
+`WorkflowRuntimeDeliverSignalArgs.meta?`（`runtime/src/types.ts:430`）会随投递进入
+`SIGNAL_RESOLVED.meta`。Rust 原先的 `SignalDelivery` 没这个字段，于是给
+`SignalResolved` 加的 `meta` 是个恒为 `None` 的空壳——挂起方向（`exec_pause_with`）
+一直收 `meta`，只有投递方向缺。
+
+已补：`SignalDelivery.meta` + args 透传 + `signal_event` / `signal_run` 增加 `meta`
+参数 + 三个 adapter 的收件箱消费也带上（in_memory / file 取 `delivery.meta`，
+postgres 从 jsonb 取，注意 `SignalDelivery` 是 `rename_all = "camelCase"`，键是
+`meta`）。端到端测试 `delivered_signal_meta_reaches_the_resolved_event` 钉住「投递的
+meta 原样落进 `SignalResolved.meta`」。
 
 ## 0.2 store 契约：逐方法同名比对（2026-10-15）
 
@@ -96,10 +101,11 @@ PR#19 后基线是 **28 个方法**（基类 7 + 扩展 21）；Rust 也是 **28
 `attempts`）；`__retry:` timer 键同上游；`RetryPolicy.durable` 对应上游
 `StepRetryOptions.durable`。
 
-**差距：无 `StepAttemptStarted` 事件。** 上游在 `retryPolicy.durable` 时每次尝试
-前 emit `STEP_ATTEMPT_STARTED{stepId, attempt}`，Rust 没有这个事件类型（事件分类
-对照见 `docs/tanstack-alignment.md`）。影响面：日志里看不到"第几次尝试开始了"，
-只有失败后排的 `STEP_RETRY_SCHEDULED`。
+**`StepAttemptStarted` 事件（2026-10-15 已补）**：上游在 `retryPolicy.durable` 时
+每次尝试前 emit `STEP_ATTEMPT_STARTED{stepId, attempt}`。已加同名事件，在
+`exec_step` 的 attempt 循环开头、仅当该 step 的重试策略是 `durable` 时 append +
+publish（非耐久 attempt 仍只活在内存里，与上游一致）。
+`durable_retry_parks_then_succeeds` 断言两次驱动共两条。
 
 ## 0.4 补偿：语义比对（2026-10-15）
 

@@ -97,6 +97,14 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
   类型 tag（`#[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]`）。
   这正是 postgres 迁移里省略上游 `workflow_events_signal_id_idx` 的原因之一
   （见 `packages/workflow_store_sqlx_postgres/SCHEMA_MIGRATIONS.md`）。
+- **字段 casing 刻意不对齐上游，按 Rust 实践走**（2026-10-15 决定，别再当待办
+  翻出来）：上游事件字段是 camelCase（`signalId` / `stepId`），本仓是 snake_case
+  （`signal_id` / `step_id`）。理由是**本仓不是与 TS 互操作**——见上面
+  「aa-workflow 是要**替代** TS 引擎承载 LocalDub（纯 Rust），不是与它互操作」。
+  跨语言读日志要面对的是某个 store 实现的格式，对齐那是 store 作者的事。
+  代价说清楚：**逐字段对照上游源码时，键名对不上**，要知道是刻意的。
+  （唯一例外是 `SignalDelivery`：它在 runtime 侧且要过 jsonb，用了
+  `rename_all = "camelCase"`，与上游 `types.ts` 的 `SignalDelivery` 对齐。）
 
 判别约定不变：`exec_pause` 仍用保留名 `__approval` 区分两条路，`__timer` 仍是
 sleep 的保留信号名。
