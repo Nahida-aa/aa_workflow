@@ -100,6 +100,22 @@ pub fn run_store_contract(name: &str, create_store: impl Fn() -> Arc<dyn Workflo
             approval_delivery_is_idempotent,
         ),
         (
+            "buffers signals for runs that are not waiting yet",
+            buffer_signal_holds_early_deliveries,
+        ),
+        (
+            "rejects buffering for terminal runs",
+            buffer_signal_rejects_terminal_runs,
+        ),
+        (
+            "rejects buffering the internal timer signal",
+            buffer_signal_rejects_internal_timer,
+        ),
+        (
+            "consumes buffered signals exactly once",
+            consume_buffered_signal_is_one_shot,
+        ),
+        (
             "claims due schedule buckets deterministically",
             schedule_buckets_are_deterministic,
         ),
@@ -643,6 +659,230 @@ fn rejects_mismatched_signal(f: &StoreFactory) {
     assert!(
         matches!(missing, DeliverSignalResult::NotFound),
         "未知 run 应 NotFound，实际 {missing:?}"
+    );
+}
+
+// ============================================================
+// 信号收件箱（#19 bufferSignals）
+// ============================================================
+
+/// 早到信号：run 还没泊到那个名字上 → 进收件箱，**不**投递、不改 run 状态。
+fn buffer_signal_holds_early_deliveries(f: &StoreFactory) {
+    let store = f();
+    store
+        .save_run_state(SaveRunStateArgs {
+            state: paused_state("run-1", "signal-workflow").with_waiting_for("expected"),
+        })
+        .unwrap();
+
+    let buffered = store
+        .buffer_signal(DeliverSignalArgs {
+            run_id: "run-1".into(),
+            delivery: SignalDelivery {
+                signal_id: "early-1".into(),
+                step_id: None,
+                name: "not-yet".into(),
+                payload: serde_json::json!({ "v": 1 }),
+            },
+            now: 100,
+        })
+        .unwrap();
+    assert!(
+        matches!(buffered, BufferSignalResult::Buffered { .. }),
+        "没在等的信号应 Buffered，实际 {buffered:?}"
+    );
+
+    // run 状态不得被收件箱改动：它该等什么还在等什么。
+    let run = store.load_run("run-1").unwrap().unwrap();
+    assert_eq!(
+        run.status,
+        WorkflowExecutionStatus::Paused,
+        "缓冲不得改动 run 状态"
+    );
+    assert_eq!(
+        run.waiting_for.as_ref().map(|w| w.signal_name.as_str()),
+        Some("expected"),
+        "缓冲不得改动等待投影"
+    );
+
+    // 同 signalId 再缓冲 = 重复（幂等键是 signal_id）。
+    let duplicate = store
+        .buffer_signal(DeliverSignalArgs {
+            run_id: "run-1".into(),
+            delivery: SignalDelivery {
+                signal_id: "early-1".into(),
+                step_id: None,
+                name: "not-yet".into(),
+                payload: serde_json::json!({ "v": 1 }),
+            },
+            now: 101,
+        })
+        .unwrap();
+    assert!(
+        matches!(duplicate, BufferSignalResult::Duplicate { .. }),
+        "同 signalId 重复缓冲应识别为 Duplicate，实际 {duplicate:?}"
+    );
+
+    // 已投递过的 signalId 也不能再进收件箱。
+    let after_delivery = store
+        .deliver_signal(DeliverSignalArgs {
+            run_id: "run-1".into(),
+            delivery: SignalDelivery {
+                signal_id: "real-1".into(),
+                step_id: None,
+                name: "expected".into(),
+                payload: serde_json::json!({}),
+            },
+            now: 102,
+        })
+        .unwrap();
+    assert!(matches!(after_delivery, DeliverSignalResult::Delivered { .. }));
+    let reused = store
+        .buffer_signal(DeliverSignalArgs {
+            run_id: "run-1".into(),
+            delivery: SignalDelivery {
+                signal_id: "real-1".into(),
+                step_id: None,
+                name: "not-yet".into(),
+                payload: serde_json::json!({}),
+            },
+            now: 103,
+        })
+        .unwrap();
+    assert!(
+        matches!(reused, BufferSignalResult::Duplicate { .. }),
+        "已投递过的 signalId 再缓冲应 Duplicate，实际 {reused:?}"
+    );
+}
+
+/// 终态 run 不收信号：投出去也没人接（上游 `in-memory-store.ts:165`）。
+fn buffer_signal_rejects_terminal_runs(f: &StoreFactory) {
+    let store = f();
+    store
+        .save_run_state(SaveRunStateArgs {
+            state: paused_state("run-1", "signal-workflow"),
+        })
+        .unwrap();
+    store
+        .mark_run_finished(MarkRunFinishedArgs {
+            run_id: "run-1".into(),
+            output: serde_json::json!({ "done": true }),
+            now: 100,
+        })
+        .unwrap();
+
+    let rejected = store
+        .buffer_signal(DeliverSignalArgs {
+            run_id: "run-1".into(),
+            delivery: SignalDelivery {
+                signal_id: "late-1".into(),
+                step_id: None,
+                name: "anything".into(),
+                payload: serde_json::json!({}),
+            },
+            now: 101,
+        })
+        .unwrap();
+    assert!(
+        matches!(rejected, BufferSignalResult::NotWaiting { .. }),
+        "终态 run 应 NotWaiting，实际 {rejected:?}"
+    );
+    // 拒收即不得在收件箱里留条目。
+    assert!(
+        store
+            .consume_buffered_signal(ConsumeBufferedSignalArgs {
+                run_id: "run-1".into(),
+                name: "anything".into(),
+                step_id: "wait-step".into(),
+                expected_next_index: 0,
+                now: 102,
+            })
+            .unwrap()
+            .is_none(),
+        "被拒的信号不该进收件箱"
+    );
+}
+
+/// `__timer` 是内部保留信号，**不可缓冲**（上游 core 与 store 双闸）。
+fn buffer_signal_rejects_internal_timer(f: &StoreFactory) {
+    let store = f();
+    store
+        .save_run_state(SaveRunStateArgs {
+            state: paused_state("run-1", "signal-workflow").with_waiting_for("__timer"),
+        })
+        .unwrap();
+
+    let rejected = store
+        .buffer_signal(DeliverSignalArgs {
+            run_id: "run-1".into(),
+            delivery: SignalDelivery {
+                signal_id: "timer-1".into(),
+                step_id: None,
+                name: "__timer".into(),
+                payload: serde_json::json!({}),
+            },
+            now: 100,
+        })
+        .unwrap();
+    assert!(
+        matches!(rejected, BufferSignalResult::NotWaiting { .. }),
+        "__timer 不可缓冲，实际 {rejected:?}"
+    );
+}
+
+/// 消费是一次性的：取走即从收件箱移除，重复消费返回 None。
+fn consume_buffered_signal_is_one_shot(f: &StoreFactory) {
+    let store = f();
+    store
+        .save_run_state(SaveRunStateArgs {
+            state: paused_state("run-1", "signal-workflow").with_waiting_for("expected"),
+        })
+        .unwrap();
+    store
+        .buffer_signal(DeliverSignalArgs {
+            run_id: "run-1".into(),
+            delivery: SignalDelivery {
+                signal_id: "early-1".into(),
+                step_id: None,
+                name: "not-yet".into(),
+                payload: serde_json::json!({ "v": 42 }),
+            },
+            now: 100,
+        })
+        .unwrap();
+
+    let args = ConsumeBufferedSignalArgs {
+        run_id: "run-1".into(),
+        name: "not-yet".into(),
+        step_id: "wait-step".into(),
+        // 收件箱不影响日志长度，这里给当前真实长度。
+        expected_next_index: 0,
+        now: 101,
+    };
+    let first = store.consume_buffered_signal(args.clone()).unwrap();
+    match first {
+        Some(WorkflowEvent::SignalResolved { name, payload, .. }) => {
+            assert_eq!(name, "not-yet", "消费出的信号名应匹配");
+            assert_eq!(payload, serde_json::json!({ "v": 42 }), "payload 原样取出");
+        }
+        other => panic!("应消费出 SignalResolved，实际 {other:?}"),
+    }
+    let second = store.consume_buffered_signal(args).unwrap();
+    assert!(second.is_none(), "一次性：第二次消费应 None，实际 {second:?}");
+
+    // 名字对不上的消费也取不到东西（回落到日志扫描由调用方负责）。
+    let other_name = store
+        .consume_buffered_signal(ConsumeBufferedSignalArgs {
+            run_id: "run-1".into(),
+            name: "expected".into(),
+            step_id: "wait-step".into(),
+            expected_next_index: 0,
+            now: 102,
+        })
+        .unwrap();
+    assert!(
+        other_name.is_none(),
+        "名字对不上应 None，实际 {other_name:?}"
     );
 }
 
