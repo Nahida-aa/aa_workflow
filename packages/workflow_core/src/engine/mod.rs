@@ -547,6 +547,18 @@ where
             attempt,
         };
         let started_at = now_ms();
+        // 耐久重试才逐 attempt 落事件（对齐上游：`retryPolicy.durable` 时 emit
+        // `STEP_ATTEMPT_STARTED`）。非耐久 attempt 只活在内存里，不进日志。
+        if retry.as_ref().map(|p| p.durable).unwrap_or(false) {
+            let ev = WorkflowEvent::StepAttemptStarted {
+                ts: started_at,
+                run_id: inner.run_id.clone(),
+                step_id: step_id.to_string(),
+                attempt,
+            };
+            inner.append(&ev)?;
+            inner.publish(&ev);
+        }
         // 保留 `anyhow::Error` 而非提前字符串化，这样 attempt 能记下结构化的
         // `RunError`（attempts 会落进 STEP_FAILED，供重试与审计回看）。
         let run_fut = run.clone()(step_ctx);
@@ -1118,6 +1130,7 @@ pub fn signal_run(
     run_id: &str,
     step_id: &str,
     payload: serde_json::Value,
+    meta: Option<serde_json::Value>,
 ) -> Result<(), WorkflowError> {
     let events = store.get_events(run_id)?;
     let Some(name) = events.iter().rev().find_map(|ev| match ev {
@@ -1139,7 +1152,7 @@ pub fn signal_run(
             name: name.clone(),
             signal_id: None,
             payload: payload.clone(),
-            meta: None,
+            meta: meta.clone(),
         };
         match store.append_event(run_id, n, &ev) {
             Ok(()) => return Ok(()),
@@ -1209,6 +1222,7 @@ pub fn signal_event(
     event_name: &str,
     signal_id: Option<&str>,
     payload: serde_json::Value,
+    meta: Option<serde_json::Value>,
 ) -> Result<(), WorkflowError> {
     let events = store.get_events(run_id)?;
     let step_id = events.iter().rev().find_map(|ev| match ev {
@@ -1230,7 +1244,7 @@ pub fn signal_event(
                     name: name.clone(),
                     signal_id: signal_id.clone(),
                     payload: payload.clone(),
-                    meta: None,
+                    meta: meta.clone(),
                 };
                 match store.append_event(run_id, n, &ev) {
                     Ok(()) => return Ok(()),
@@ -2105,7 +2119,7 @@ mod tests {
     #[test]
     fn signal_run_rejects_when_nothing_is_parked() {
         let store = InMemoryStore::new();
-        let err = signal_run(&store, "r1", "gate", serde_json::json!({ "ok": true }))
+        let err = signal_run(&store, "r1", "gate", serde_json::json!({ "ok": true }), None)
             .unwrap_err();
         assert!(
             matches!(err, WorkflowError::SignalLost(_)),
@@ -2311,7 +2325,7 @@ mod tests {
         assert!(w.deadline.is_some(), "sleep 的 due_at 应投影为 deadline");
 
         // 外部投递（runtime sweep 在 deadline 到点后做的事）。
-        signal_run(store.as_ref(), "s1", "cooldown", serde_json::Value::Null).unwrap();
+        signal_run(store.as_ref(), "s1", "cooldown", serde_json::Value::Null, None).unwrap();
 
         // Drive #2：放行。
         let out = run_workflow(
@@ -2446,6 +2460,7 @@ mod tests {
             "review-approved",
             None,
             serde_json::json!({ "ok": true }),
+            None,
         )
         .unwrap();
         let out = run_workflow(
@@ -2481,7 +2496,7 @@ mod tests {
         .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Paused);
-        signal_event(store.as_ref(), "ne2", "go", None, serde_json::json!(42)).unwrap();
+        signal_event(store.as_ref(), "ne2", "go", None, serde_json::json!(42), None).unwrap();
         let out = run_workflow(
             RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
@@ -2542,7 +2557,7 @@ mod tests {
             "过期的 due_at 照实投影——由 sweep 判断「已到点」"
         );
 
-        signal_run(store.as_ref(), &out.run_id, "cooldown", serde_json::Value::Null).unwrap();
+        signal_run(store.as_ref(), &out.run_id, "cooldown", serde_json::Value::Null, None).unwrap();
         let out = run_workflow(
             RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
@@ -2585,7 +2600,7 @@ mod tests {
         assert_eq!(w.signal_name, "__timer");
         assert_eq!(w.deadline, Some(due), "deadline 应是调用方给的时间戳");
 
-        signal_run(store.as_ref(), "stu1", "cooldown", serde_json::Value::Null).unwrap();
+        signal_run(store.as_ref(), "stu1", "cooldown", serde_json::Value::Null, None).unwrap();
         let out = run_workflow(
             RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
@@ -2639,7 +2654,7 @@ mod tests {
     async fn signal_event_without_awaiter_errors() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let err =
-            signal_event(store.as_ref(), "nowhere", "ghost", None, serde_json::Value::Null).unwrap_err();
+            signal_event(store.as_ref(), "nowhere", "ghost", None, serde_json::Value::Null, None).unwrap_err();
         assert!(matches!(err, crate::error::WorkflowError::SignalLost(_)));
         assert!(
             store.get_events("nowhere").unwrap().is_empty(),
@@ -2958,7 +2973,7 @@ mod tests {
 
         // `Aborted` 是锁存终态：投递 resume 也唤不回来（上游 `resumeRun`
         // 对 aborted 直接 route 到 attach，`run-workflow.ts:275-282`）。
-        signal_run(store.as_ref(), "ca2", "hold", serde_json::Value::Null).unwrap();
+        signal_run(store.as_ref(), "ca2", "hold", serde_json::Value::Null, None).unwrap();
         let out3 = run_workflow(
             RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
@@ -3061,7 +3076,7 @@ mod tests {
         assert!(w.deadline.is_some(), "yield 的 target 应投影为 deadline");
 
         // host 重新唤起（延期预算）→ 投递 timer。
-        signal_run(store.as_ref(), "y1", "__yield-0", serde_json::Value::Null).unwrap();
+        signal_run(store.as_ref(), "y1", "__yield-0", serde_json::Value::Null, None).unwrap();
         let out = run_workflow(
             RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
@@ -3120,7 +3135,7 @@ mod tests {
             "yield_resume_at 应原样成为 deadline"
         );
 
-        signal_run(store.as_ref(), "y2", "__yield-0", serde_json::Value::Null).unwrap();
+        signal_run(store.as_ref(), "y2", "__yield-0", serde_json::Value::Null, None).unwrap();
         let out = run_workflow(
             RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
@@ -3497,7 +3512,7 @@ mod tests {
         assert_eq!(out.status, RunStatus::Paused);
 
         // 投递一个缺 `approved` 字段的 payload
-        signal_run(store.as_ref(), "sc1", "hold", serde_json::json!({ "ok": 1 })).unwrap();
+        signal_run(store.as_ref(), "sc1", "hold", serde_json::json!({ "ok": 1 }), None).unwrap();
         let out2 = run_workflow(
             RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
@@ -3539,6 +3554,7 @@ mod tests {
             "sc2",
             "hold",
             serde_json::json!({ "approved": true }),
+            None,
         )
         .unwrap();
         let out = run_workflow(

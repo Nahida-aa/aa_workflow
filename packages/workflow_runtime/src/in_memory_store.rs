@@ -422,7 +422,7 @@ impl WorkflowRunStoreAdapterStore for InMemoryExecutionStore {
             name: args.name,
             signal_id: Some(delivery.signal_id),
             payload: delivery.payload,
-            meta: None,
+            meta: delivery.meta,
         }))
     }
 }
@@ -1056,6 +1056,7 @@ mod in_memory_tests {
             step_id: None,
             name: "payment".into(),
             payload: serde_json::json!({ "id": "p1" }),
+            meta: None,
         };
 
         // NotWaiting：run 没在等
@@ -1375,6 +1376,7 @@ mod in_memory_tests {
                 step_id: None,
                 name: "payment".into(),
                 payload: serde_json::json!({}),
+                meta: None,
             },
             now: 1,
         })
@@ -1403,6 +1405,7 @@ mod in_memory_tests {
                     step_id: None,
                     name: "payment".into(),
                     payload: serde_json::json!({}),
+                meta: None,
             },
             now: 3,
         })

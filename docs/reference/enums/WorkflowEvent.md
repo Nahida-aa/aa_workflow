@@ -298,6 +298,21 @@ Checkpoint (persisted)：耐久重试（#19 `retry.durable`）——步骤失败
 sweep/重驱以此恢复。重放规则：本事件后该步骤视同未完成（attempts 随
 事件携带，耗尽前的 STEP_FAILED 不落日志）。
 
+
+***
+
+### StepAttemptStarted
+
+```rust
+{ .. }
+```
+
+Defined in: [`packages/workflow_core/src/event.rs:281`](../../../packages/workflow_core/src/event.rs#L281)
+
+Observability (persisted): a durable-retry step began attempt `attempt`.
+Aligns with upstream `STEP_ATTEMPT_STARTED` — only emitted when the
+step's retry policy is `durable` (non-durable attempts stay in-memory).
+
 ## Implementations
 
 ### step_id()
@@ -306,7 +321,7 @@ sweep/重驱以此恢复。重放规则：本事件后该步骤视同未完成�
 pub fn step_id(&self) -> Option<&str>
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:281`](../../../packages/workflow_core/src/event.rs#L281)
+Defined in: [`packages/workflow_core/src/event.rs:291`](../../../packages/workflow_core/src/event.rs#L291)
 
 #### Returns
 
@@ -321,7 +336,7 @@ Defined in: [`packages/workflow_core/src/event.rs:281`](../../../packages/workfl
 pub fn ts(&self) -> i64
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:306`](../../../packages/workflow_core/src/event.rs#L306)
+Defined in: [`packages/workflow_core/src/event.rs:317`](../../../packages/workflow_core/src/event.rs#L317)
 
 事件发生时间（每个变体都带 `ts`，对齐 TS 侧 `event.ts`）。
 
@@ -338,7 +353,7 @@ Defined in: [`packages/workflow_core/src/event.rs:306`](../../../packages/workfl
 pub fn type_name(&self) -> &'static str
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:331`](../../../packages/workflow_core/src/event.rs#L331)
+Defined in: [`packages/workflow_core/src/event.rs:343`](../../../packages/workflow_core/src/event.rs#L343)
 
 对齐 TS 侧 `event.type`）。
 

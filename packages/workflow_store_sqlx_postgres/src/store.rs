@@ -654,10 +654,12 @@ impl WorkflowRunStoreAdapterStore for SqlxPostgresStore {
                 .get("payload")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
+            // SignalDelivery 是 rename_all=camelCase，故 JSON 键是 signalId/meta。
             let signal_id = delivery
                 .get("signalId")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
+            let meta = delivery.get("meta").cloned();
             Ok(Some(WorkflowEvent::SignalResolved {
                 ts: args.now,
                 run_id: args.run_id,
@@ -665,7 +667,7 @@ impl WorkflowRunStoreAdapterStore for SqlxPostgresStore {
                 name: args.name,
                 signal_id,
                 payload,
-                meta: None,
+                meta,
             }))
         })
     }

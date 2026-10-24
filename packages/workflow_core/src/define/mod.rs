@@ -216,15 +216,24 @@ impl<TInput, TState, TCtxExt> BaseCtx<TInput, TState, TCtxExt> {
                 "compensation id \"{id}\" uses the reserved __compensation:/__retry: prefix"
             ));
         }
-        self.engine
-            .compensations
-            .lock()
-            .expect("compensations lock")
-            .push(crate::engine::Compensation {
+        // 重复 id 直接报错（对齐上游 `Duplicate compensation id "x"`）。否则同一
+        // 补偿会进名单两次，失败时逆序 undo 把它执行两遍——且第二次的撤销对象
+        // 可能已经被第一次消掉了。
+        {
+            let mut list = self
+                .engine
+                .compensations
+                .lock()
+                .expect("compensations lock");
+            if list.iter().any(|c| c.id == id) {
+                return Err(anyhow::anyhow!("Duplicate compensation id \"{id}\"."));
+            }
+            list.push(crate::engine::Compensation {
                 id,
                 undo: std::sync::Arc::new(undo),
                 retry,
             });
+        }
         Ok(())
     }
 

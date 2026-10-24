@@ -384,6 +384,10 @@ pub struct SignalDelivery {
     /// 等待中的信号名（与 `ctx.wait_for_event(name)` 传入的一致）。
     pub name: String,
     pub payload: serde_json::Value,
+    /// 自由元数据（审批单链接、金额、影响面等）。落进 `SIGNAL_RESOLVED.meta`
+    /// 与收件箱条目，对齐上游 `SignalDelivery.meta`（`runtime/src/types.ts:430`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

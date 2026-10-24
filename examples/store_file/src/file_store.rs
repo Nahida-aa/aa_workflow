@@ -457,7 +457,7 @@ impl WorkflowRunStoreAdapterStore for FileExecutionStore {
             name: args.name,
             signal_id: Some(delivery.signal_id),
             payload: delivery.payload,
-            meta: None,
+            meta: delivery.meta,
         }))
     }
 }

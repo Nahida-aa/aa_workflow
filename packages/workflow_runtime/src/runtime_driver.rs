@@ -261,6 +261,10 @@ pub struct WorkflowRuntimeDeliverSignalArgs {
     /// 信号名（与 `ctx.wait_for_event(name)` 一致）。
     pub name: String,
     pub payload: serde_json::Value,
+    /// 自由元数据（对齐上游 `DeliverSignalArgs.meta`）。落进 `SIGNAL_RESOLVED.meta`
+    /// 与收件箱条目。此前投递方向没这个字段，而挂起方向（`exec_pause_with`）一直
+    /// 收 `meta`——结果 `SignalResolved.meta` 恒为 `None`，是个空壳字段。
+    pub meta: Option<serde_json::Value>,
     pub now: Option<i64>,
     pub lease_owner: Option<LeaseOwner>,
     pub lease_ms: Option<i64>,
@@ -579,6 +583,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                     step_id: args.step_id.clone(),
                     name: args.name.clone(),
                     payload: args.payload.clone(),
+                    meta: args.meta.clone(),
                 },
                 now,
             })?;
@@ -660,6 +665,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                 step_id: args.step_id.clone(),
                 name: args.name.clone(),
                 payload: args.payload.clone(),
+                meta: args.meta.clone(),
             },
             now,
         })?;
@@ -676,6 +682,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                     &args.name,
                     Some(args.signal_id.as_str()),
                     args.payload.clone(),
+                    args.meta.clone(),
                 )?;
                 let workflow = self.load_workflow(&workflow_id)?;
                 return self
@@ -971,6 +978,8 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                     step_id: None,
                     name: "__timer".into(),
                     payload: serde_json::Value::Null,
+                    // timer 投递不附元数据（上游 SignalDelivery.meta 可空）。
+                    meta: None,
                     now: Some(now),
                     lease_owner: Some(lease_owner.clone()),
                     lease_ms: Some(lease_ms),
@@ -1711,6 +1720,72 @@ mod driver_tests {
 
     /// 信号投递：`deliver_signal` 自己认领 + 驱动到完成。
     ///
+    /// 投递方向的 `meta` 必须一路落到 `SignalResolved.meta`。
+    ///
+    /// 曾经只有挂起方向收 `meta`（`exec_pause_with`），投递方向没有——结果
+    /// `SignalResolved.meta` 是个恒为 `None` 的空壳字段。这条测试钉住两头：
+    /// 直接投递（Waiting 路径）与收件箱消费（Buffered 路径）都要带上。
+    #[tokio::test]
+    async fn delivered_signal_meta_reaches_the_resolved_event() {
+        let mem: Arc<InMemoryExecutionStore> = Arc::new(InMemoryExecutionStore::default());
+        let store: Arc<dyn WorkflowExecutionStore> = mem.clone();
+        let mut workflows = HashMap::new();
+        workflows.insert(
+            "waiter".to_string(),
+            WorkflowRegistration {
+                load: Arc::new(|| waiting_workflow().into()),
+                previous_versions: HashMap::new(),
+                version: None,
+                schedules: vec![],
+            },
+        );
+        let rt = Arc::new(define_workflow_runtime(WorkflowRuntimeConfig::new(store, workflows)).unwrap());
+
+        let started = rt
+            .start_run(WorkflowRuntimeStartRunArgs {
+                workflow_id: "waiter".into(),
+                run_id: "r1".into(),
+                input: serde_json::json!({}),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(started.kind, WorkflowRuntimeRunResultKind::Paused);
+
+        // 直接投递（run 正等在 `payment` 上）→ 应 Completed，且 meta 过墙。
+        let done = rt
+            .deliver_signal(WorkflowRuntimeDeliverSignalArgs {
+                run_id: "r1".into(),
+                signal_id: "pay-1".into(),
+                name: "payment".into(),
+                payload: serde_json::json!({ "paymentId": "p1" }),
+                meta: Some(serde_json::json!({ "ticket": "AP-42", "amount": 999 })),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(done.kind, WorkflowRuntimeRunResultKind::Completed);
+
+        let events = mem
+            .read_events(ReadEventsArgs {
+                run_id: "r1".into(),
+                from_index: None,
+            })
+            .unwrap();
+        let resolved_meta: Vec<_> = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                WorkflowEvent::SignalResolved { meta, .. } => meta.clone(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            resolved_meta,
+            vec![serde_json::json!({ "ticket": "AP-42", "amount": 999 })],
+            "投递的 meta 应原样落进 SignalResolved.meta"
+        );
+    }
+
     /// 早到信号 = 收件箱（#19 bufferSignals 的核心行为，端到端）：
     /// `buffer_signals` 开着，run 泊在 `payment` 上时投一个**别的名字**
     /// → 不驱动、只进收件箱；之后 run 自己走到那个名字的等待点时，

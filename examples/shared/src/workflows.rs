@@ -751,7 +751,7 @@ mod tests {
             )
             .unwrap();
         } else {
-            signal_run(store.as_ref(), &run_id, step_id, payload).unwrap();
+            signal_run(store.as_ref(), &run_id, step_id, payload, None).unwrap();
         }
         run_workflow(opts(wf.clone().into(), store.clone()))
             .outcome().await
@@ -799,6 +799,7 @@ mod tests {
                 &run_id,
                 w.step_id.as_deref().expect("timer 挂起应有 step_id"),
                 serde_json::Value::Null,
+                None,
             )
             .unwrap();
         }
@@ -1508,6 +1509,7 @@ mod tests {
             "price-settled",
             None,
             serde_json::json!({ "px": 62000 }),
+            None,
         )
         .unwrap();
         // Drive #2 起：`sleep_until(0)` 会挂起，由 timer 投递推进。
@@ -1554,6 +1556,7 @@ mod tests {
             "price-settled",
             None,
             serde_json::json!({ "px": 3000 }),
+            None,
         )
         .unwrap();
         // `sleep_until(0)` 也会挂起，由 timer 投递推进。

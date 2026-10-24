@@ -5,7 +5,7 @@ title: RetryPolicy
 
 # Struct: RetryPolicy
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:481`](../../../packages/workflow_core/src/define/mod.rs#L481)
+Defined in: [`packages/workflow_core/src/define/mod.rs:490`](../../../packages/workflow_core/src/define/mod.rs#L490)
 
 ## Fields
 
@@ -15,7 +15,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:481`](../../../packages/w
 max_attempts: usize
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:483`](../../../packages/workflow_core/src/define/mod.rs#L483)
+Defined in: [`packages/workflow_core/src/define/mod.rs:492`](../../../packages/workflow_core/src/define/mod.rs#L492)
 
 Total attempts, including the first. 1 == no retry.
 
@@ -28,7 +28,7 @@ Total attempts, including the first. 1 == no retry.
 backoff: Backoff
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:484`](../../../packages/workflow_core/src/define/mod.rs#L484)
+Defined in: [`packages/workflow_core/src/define/mod.rs:493`](../../../packages/workflow_core/src/define/mod.rs#L493)
 
 
 ***
@@ -39,7 +39,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:484`](../../../packages/w
 durable: bool
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:487`](../../../packages/workflow_core/src/define/mod.rs#L487)
+Defined in: [`packages/workflow_core/src/define/mod.rs:496`](../../../packages/workflow_core/src/define/mod.rs#L496)
 
 耐久重试（#19 `retry.durable`）：attempt/失败/下次截止时间持久化，
 重启后经 sweep 续跑。false = 内存级重试（现状）。
@@ -52,7 +52,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:487`](../../../packages/w
 pub fn new(max_attempts: usize, backoff: Backoff) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:491`](../../../packages/workflow_core/src/define/mod.rs#L491)
+Defined in: [`packages/workflow_core/src/define/mod.rs:500`](../../../packages/workflow_core/src/define/mod.rs#L500)
 
 #### Parameters
 

@@ -6,10 +6,10 @@ title: signal_event
 # Function: signal_event()
 
 ```rust
-pub fn signal_event(store: &dyn RunStore, run_id: &str, event_name: &str, signal_id: Option<&str>, payload: Value) -> Result<(), WorkflowError>
+pub fn signal_event(store: &dyn RunStore, run_id: &str, event_name: &str, signal_id: Option<&str>, payload: Value, meta: Option<Value>) -> Result<(), WorkflowError>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:1206`](../../../packages/workflow_core/src/engine/mod.rs#L1206)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:1219`](../../../packages/workflow_core/src/engine/mod.rs#L1219)
 
 Appends a `SignalResolved` for the run currently parked waiting for the
 event `event_name` — the external side of
@@ -43,6 +43,10 @@ recorded on the event **and** deduplicated by the store.
 ### payload
 
 `Value`
+
+### meta
+
+`Option<Value>`
 
 ## Returns
 

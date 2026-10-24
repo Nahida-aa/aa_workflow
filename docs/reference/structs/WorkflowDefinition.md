@@ -5,7 +5,7 @@ title: WorkflowDefinition
 
 # Struct: WorkflowDefinition
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:614`](../../../packages/workflow_core/src/define/mod.rs#L614)
+Defined in: [`packages/workflow_core/src/define/mod.rs:623`](../../../packages/workflow_core/src/define/mod.rs#L623)
 
 A declared workflow: id, optional version, the async handler, plus the
 builder-derived extras (`description`, `default_step_retry`, `middlewares`,
@@ -29,7 +29,7 @@ every run site see. See [`AnyWorkflowDefinition`](AnyWorkflowDefinition.md) for 
 id: String
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:620`](../../../packages/workflow_core/src/define/mod.rs#L620)
+Defined in: [`packages/workflow_core/src/define/mod.rs:629`](../../../packages/workflow_core/src/define/mod.rs#L629)
 
 
 ***
@@ -40,7 +40,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:620`](../../../packages/w
 version: Option<String>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:621`](../../../packages/workflow_core/src/define/mod.rs#L621)
+Defined in: [`packages/workflow_core/src/define/mod.rs:630`](../../../packages/workflow_core/src/define/mod.rs#L630)
 
 
 ***
@@ -51,7 +51,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:621`](../../../packages/w
 description: Option<String>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:622`](../../../packages/workflow_core/src/define/mod.rs#L622)
+Defined in: [`packages/workflow_core/src/define/mod.rs:631`](../../../packages/workflow_core/src/define/mod.rs#L631)
 
 
 ***
@@ -62,7 +62,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:622`](../../../packages/w
 default_step_retry: Option<RetryPolicy>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:625`](../../../packages/workflow_core/src/define/mod.rs#L625)
+Defined in: [`packages/workflow_core/src/define/mod.rs:634`](../../../packages/workflow_core/src/define/mod.rs#L634)
 
 Fallback retry policy for steps that declare none
 (TanStack `defaultStepRetry`). Per-step [`StepOptions::retry`](StepOptions.md) wins.
@@ -76,7 +76,7 @@ Fallback retry policy for steps that declare none
 middlewares: Vec<Middleware>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:628`](../../../packages/workflow_core/src/define/mod.rs#L628)
+Defined in: [`packages/workflow_core/src/define/mod.rs:637`](../../../packages/workflow_core/src/define/mod.rs#L637)
 
 Middleware list, in the order TanStack's `composeMiddlewares` chains
 them (first = outermost wrapping of the typed handler).
@@ -90,7 +90,7 @@ them (first = outermost wrapping of the typed handler).
 previous_versions: Vec<AnyWorkflowDefinition>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:632`](../../../packages/workflow_core/src/define/mod.rs#L632)
+Defined in: [`packages/workflow_core/src/define/mod.rs:641`](../../../packages/workflow_core/src/define/mod.rs#L641)
 
 Older versions of the same workflow. Resume routes by the persisted
 `workflow_version` to the matching entry (see
@@ -105,7 +105,7 @@ Older versions of the same workflow. Resume routes by the persisted
 handler: WorkflowHandler
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:633`](../../../packages/workflow_core/src/define/mod.rs#L633)
+Defined in: [`packages/workflow_core/src/define/mod.rs:642`](../../../packages/workflow_core/src/define/mod.rs#L642)
 
 
 ***
@@ -116,7 +116,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:633`](../../../packages/w
 initialize: Arc<dyn Fn(&Value) -> Result<Value> + Send + Sync>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:634`](../../../packages/workflow_core/src/define/mod.rs#L634)
+Defined in: [`packages/workflow_core/src/define/mod.rs:643`](../../../packages/workflow_core/src/define/mod.rs#L643)
 
 
 ***
@@ -127,7 +127,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:634`](../../../packages/w
 input_validator: Option<Arc<dyn Fn(&Value) -> Result<()> + Send + Sync>>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:640`](../../../packages/workflow_core/src/define/mod.rs#L640)
+Defined in: [`packages/workflow_core/src/define/mod.rs:649`](../../../packages/workflow_core/src/define/mod.rs#L649)
 
 Shape-check for the run input (`config.inputSchema` counterpart,
 installed by `CreateWorkflowConfig::input::<T>()`). Checked by the
@@ -144,7 +144,7 @@ generic handler error.
 state_validator: Option<Arc<dyn Fn(&Value) -> Result<()> + Send + Sync>>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:641`](../../../packages/workflow_core/src/define/mod.rs#L641)
+Defined in: [`packages/workflow_core/src/define/mod.rs:650`](../../../packages/workflow_core/src/define/mod.rs#L650)
 
 
 ***
@@ -155,7 +155,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:641`](../../../packages/w
 output_validator: Option<Arc<dyn Fn(&Value) -> Result<()> + Send + Sync>>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:643`](../../../packages/workflow_core/src/define/mod.rs#L643)
+Defined in: [`packages/workflow_core/src/define/mod.rs:652`](../../../packages/workflow_core/src/define/mod.rs#L652)
 
 Shape-check for the handler's `TOutput` value (config `output` schema).
 
@@ -169,7 +169,7 @@ _（存在非公开字段）_
 pub fn version<impl Into<String>: Into>(self, version: impl ?) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:808`](../../../packages/workflow_core/src/define/mod.rs#L808)
+Defined in: [`packages/workflow_core/src/define/mod.rs:817`](../../../packages/workflow_core/src/define/mod.rs#L817)
 
 #### Parameters
 
@@ -190,7 +190,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:808`](../../../packages/w
 pub fn description<impl Into<String>: Into>(self, description: impl ?) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:813`](../../../packages/workflow_core/src/define/mod.rs#L813)
+Defined in: [`packages/workflow_core/src/define/mod.rs:822`](../../../packages/workflow_core/src/define/mod.rs#L822)
 
 #### Parameters
 
@@ -211,7 +211,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:813`](../../../packages/w
 pub fn default_step_retry(self, retry: RetryPolicy) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:820`](../../../packages/workflow_core/src/define/mod.rs#L820)
+Defined in: [`packages/workflow_core/src/define/mod.rs:829`](../../../packages/workflow_core/src/define/mod.rs#L829)
 
 Fallback retry policy for steps that declare no
 [`StepOptions::retry`](StepOptions.md).
@@ -235,7 +235,7 @@ Fallback retry policy for steps that declare no
 pub fn previous_versions<impl Into<AnyWorkflowDefinition>: Into, impl IntoIterator<Item = impl Into<AnyWorkflowDefinition>>: IntoIterator>(self, v: impl ?) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:828`](../../../packages/workflow_core/src/define/mod.rs#L828)
+Defined in: [`packages/workflow_core/src/define/mod.rs:837`](../../../packages/workflow_core/src/define/mod.rs#L837)
 
 Same as
 [`WorkflowBuilder::previous_versions`](WorkflowBuilder.md) —
@@ -260,7 +260,7 @@ the direct-construction variant for engine-facing code.
 pub fn initialize<impl Fn(&serde_json::Value) -> anyhow::Result<serde_json::Value> + Send + Sync + 'static: Fn(&Value) -> Result<Value> + Send + Sync + 'static>(self, f: impl ? + ? + ? + ?) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:840`](../../../packages/workflow_core/src/define/mod.rs#L840)
+Defined in: [`packages/workflow_core/src/define/mod.rs:849`](../../../packages/workflow_core/src/define/mod.rs#L849)
 
 Declare the initial per-invocation state, derived from the frozen run
 input (TanStack `initialize`). Called on every invocation — start and
@@ -286,7 +286,7 @@ resume — and the handler re-runs from scratch, so mutations written
 pub fn state_schema<T: DeserializeOwned + Send + Sync + 'static>(self) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:853`](../../../packages/workflow_core/src/define/mod.rs#L853)
+Defined in: [`packages/workflow_core/src/define/mod.rs:862`](../../../packages/workflow_core/src/define/mod.rs#L862)
 
 Declare a typed state (serde `Deserialize` type = schema). The initial
 state built by [`initialize`](WorkflowDefinition.md) is shape-checked against
@@ -310,7 +310,7 @@ where
     Fut: Future + Send + 'static
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:863`](../../../packages/workflow_core/src/define/mod.rs#L863)
+Defined in: [`packages/workflow_core/src/define/mod.rs:872`](../../../packages/workflow_core/src/define/mod.rs#L872)
 
 Installs the orchestrating closure. Branching/parallelism/order are
 plain async code; only durable side effects go through `ctx.step`.

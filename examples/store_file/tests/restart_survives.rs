@@ -259,6 +259,7 @@ fn base_dir(tag: &str) -> PathBuf {
                 "invoice:r",
                 &step_id,
                 serde_json::Value::Null,
+                None,
             )
             .unwrap();
             out = Some(

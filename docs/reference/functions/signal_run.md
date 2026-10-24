@@ -6,10 +6,10 @@ title: signal_run
 # Function: signal_run()
 
 ```rust
-pub fn signal_run(store: &dyn RunStore, run_id: &str, step_id: &str, payload: Value) -> Result<(), WorkflowError>
+pub fn signal_run(store: &dyn RunStore, run_id: &str, step_id: &str, payload: Value, meta: Option<Value>) -> Result<(), WorkflowError>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:1116`](../../../packages/workflow_core/src/engine/mod.rs#L1116)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:1128`](../../../packages/workflow_core/src/engine/mod.rs#L1128)
 
 Appends a `SignalResolved` for a parked run — the external side of
 [`WorkflowCtx::approve`](../structs/BaseCtx.md). Safe to call
@@ -48,6 +48,10 @@ Appends a `SignalResolved` for `step_id` — the step_id-targeted form of
 ### payload
 
 `Value`
+
+### meta
+
+`Option<Value>`
 
 ## Returns
 

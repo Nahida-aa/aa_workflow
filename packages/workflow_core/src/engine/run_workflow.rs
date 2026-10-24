@@ -1924,6 +1924,7 @@ mod tests {
         .outcome().await
         .unwrap();
         assert_eq!(second.status, RunStatus::Finished);
+
         let l = log.lock().unwrap();
         assert_eq!(l.runs["a"], 1, "上游短路：已完成的不重跑");
         assert_eq!(l.runs["b"], 1);
@@ -2125,6 +2126,62 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// 重复补偿 id 直接报错（对齐上游 \`Duplicate compensation id "x"\`）。
+    ///
+    /// 不检查的后果不只是"名单里多一项"：失败时逆序 undo 会把它执行两遍，
+    /// 而第二次的撤销对象可能已被第一次消掉。
+    #[tokio::test]
+    async fn duplicate_compensation_id_is_rejected() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let undo_log = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let undo_in = undo_log.clone();
+
+        let wf = WorkflowDefinition::new("dup").handler(move |ctx: WorkflowCtx| {
+            let undo_in = undo_in.clone();
+            async move {
+                ctx.compensate(
+                    "same-id",
+                    move |_sc: StepCtx| {
+                        let undo_in = undo_in.clone();
+                        Box::pin(async move {
+                            undo_in.lock().unwrap().push("same-id".into());
+                            Ok(())
+                        })
+                    },
+                    RetryPolicy::new(1, Backoff::Fixed { base_ms: 1 }),
+                )?;
+                // 同 id 第二次登记应报错，且错误信息可读。
+                let dup = ctx.compensate(
+                    "same-id",
+                    move |_sc: StepCtx| Box::pin(async move { Ok(()) }),
+                    RetryPolicy::new(1, Backoff::Fixed { base_ms: 1 }),
+                );
+                assert!(
+                    dup.is_err(),
+                    "重复 id 应报错，实际 {:?}",
+                    dup.as_ref().err().map(|e| e.to_string())
+                );
+                Err::<serde_json::Value, _>(anyhow::anyhow!("boom"))
+            }
+        });
+
+        let out = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("dup:1"),
+        )
+        .outcome().await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Errored);
+
+        // 名单里只有一项 ⇒ undo 只跑一次。
+        assert_eq!(
+            undo_log.lock().unwrap().as_slice(),
+            &["same-id".to_string()],
+            "重复登记被拒后，逆序 undo 只应执行一次"
+        );
     }
 
     #[tokio::test]
@@ -2377,6 +2434,9 @@ mod tests {
             .filter(|e| matches!(e, WorkflowEvent::StepRetryScheduled { step_id, .. } if step_id == "flaky"))
             .count();
         assert_eq!(scheduled, 1, "STEP_RETRY_SCHEDULED 应持久化");
+        // 耐久重试逐 attempt 落 STEP_ATTEMPT_STARTED（对齐上游）：两次驱动
+        // 共两次 attempt（第一次失败、第二次成功），应各有一条。
+        eprintln!("DEBUG events={:?}", store.get_events("durable:1").unwrap().iter().map(|e| (e.type_name().to_string(), e.step_id().map(str::to_string))).collect::<Vec<_>>());
 
         // 第二次驱动（deadline 已过）：attempt 2 成功 → Finished
         let second = run_workflow(
@@ -2402,6 +2462,22 @@ mod tests {
             .filter(|e| matches!(e, WorkflowEvent::StepFailed { step_id, .. } if step_id == "flaky"))
             .count();
         assert_eq!(failed, 0, "耐久路径耗尽前不落 STEP_FAILED");
+
+        // 耐久重试逐 attempt 落 STEP_ATTEMPT_STARTED（对齐上游）：两次驱动
+        // 共两次 attempt（第一次失败、第二次成功），应各有一条。
+        let attempt_starts = store
+            .get_events("durable:1")
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(
+                e,
+                WorkflowEvent::StepAttemptStarted { step_id, .. } if step_id == "flaky"
+            ))
+            .count();
+        assert_eq!(
+            attempt_starts, 2,
+            "每次 attempt 前都应落 STEP_ATTEMPT_STARTED，实际 {attempt_starts}"
+        );
     }
 
     #[tokio::test]

@@ -5,7 +5,7 @@ title: WaitForEventOptions
 
 # Struct: WaitForEventOptions
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:579`](../../../packages/workflow_core/src/define/mod.rs#L579)
+Defined in: [`packages/workflow_core/src/define/mod.rs:588`](../../../packages/workflow_core/src/define/mod.rs#L588)
 
 [`BaseCtx::wait_for_event_with`](BaseCtx.md) 的选项（对齐 TanStack
 `WaitForEventOptions`，`types.ts:268-279`）。
@@ -18,7 +18,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:579`](../../../packages/w
 deadline: Option<i64>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:582`](../../../packages/workflow_core/src/define/mod.rs#L582)
+Defined in: [`packages/workflow_core/src/define/mod.rs:591`](../../../packages/workflow_core/src/define/mod.rs#L591)
 
 绝对 UTC ms 唤醒期限。落进 `SignalAwaited.due_at` 和
 `RunState.waiting_for.deadline`，供 host 建时间索引的 worker job。
@@ -32,7 +32,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:582`](../../../packages/w
 meta: Option<Value>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:584`](../../../packages/workflow_core/src/define/mod.rs#L584)
+Defined in: [`packages/workflow_core/src/define/mod.rs:593`](../../../packages/workflow_core/src/define/mod.rs#L593)
 
 自由元数据，落进 `SignalAwaited.meta` 与 `RunState` 的三处 await 投影。
 
@@ -45,7 +45,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:584`](../../../packages/w
 schema: Option<PayloadSchema>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:586`](../../../packages/workflow_core/src/define/mod.rs#L586)
+Defined in: [`packages/workflow_core/src/define/mod.rs:595`](../../../packages/workflow_core/src/define/mod.rs#L595)
 
 恢复时对投递 payload 的形状校验（`schema`）。校验失败 → run 报错。
 

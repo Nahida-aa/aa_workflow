@@ -5,7 +5,7 @@ title: Backoff
 
 # Enum: Backoff
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:461`](../../../packages/workflow_core/src/define/mod.rs#L461)
+Defined in: [`packages/workflow_core/src/define/mod.rs:470`](../../../packages/workflow_core/src/define/mod.rs#L470)
 
 Fixed | exponential | custom backoff. `attempt` is 1-based: after attempt
 #N fails, we wait `delay_ms(N)` before attempt N+1 (exponential: base * 2^(N-1)).
@@ -18,7 +18,7 @@ Fixed | exponential | custom backoff. `attempt` is 1-based: after attempt
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:462`](../../../packages/workflow_core/src/define/mod.rs#L462)
+Defined in: [`packages/workflow_core/src/define/mod.rs:471`](../../../packages/workflow_core/src/define/mod.rs#L471)
 
 
 ***
@@ -29,7 +29,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:462`](../../../packages/w
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:463`](../../../packages/workflow_core/src/define/mod.rs#L463)
+Defined in: [`packages/workflow_core/src/define/mod.rs:472`](../../../packages/workflow_core/src/define/mod.rs#L472)
 
 
 ***
@@ -40,7 +40,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:463`](../../../packages/w
 (Arc<dyn Fn(usize) -> u64 + Send + Sync>)
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:464`](../../../packages/workflow_core/src/define/mod.rs#L464)
+Defined in: [`packages/workflow_core/src/define/mod.rs:473`](../../../packages/workflow_core/src/define/mod.rs#L473)
 
 ## Implementations
 
@@ -50,7 +50,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:464`](../../../packages/w
 pub fn delay_ms(&self, attempt: usize) -> u64
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:468`](../../../packages/workflow_core/src/define/mod.rs#L468)
+Defined in: [`packages/workflow_core/src/define/mod.rs:477`](../../../packages/workflow_core/src/define/mod.rs#L477)
 
 #### Parameters
 

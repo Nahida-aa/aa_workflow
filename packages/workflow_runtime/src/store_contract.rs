@@ -580,6 +580,7 @@ fn signal_delivery_is_idempotent(f: &StoreFactory) {
                 step_id: None,
                 name: "approval-received".into(),
                 payload: serde_json::json!({ "approved": true }),
+                meta: None,
             },
             now: 100,
         })
@@ -593,6 +594,7 @@ fn signal_delivery_is_idempotent(f: &StoreFactory) {
                 step_id: None,
                 name: "approval-received".into(),
                 payload: serde_json::json!({ "approved": true }),
+                meta: None,
             },
             now: 101,
         })
@@ -634,6 +636,7 @@ fn rejects_mismatched_signal(f: &StoreFactory) {
                 step_id: None,
                 name: "wrong".into(),
                 payload: serde_json::json!({}),
+                meta: None,
             },
             now: 100,
         })
@@ -652,6 +655,7 @@ fn rejects_mismatched_signal(f: &StoreFactory) {
                 step_id: None,
                 name: "wrong".into(),
                 payload: serde_json::json!({}),
+                meta: None,
             },
             now: 100,
         })
@@ -683,6 +687,7 @@ fn buffer_signal_holds_early_deliveries(f: &StoreFactory) {
                 step_id: None,
                 name: "not-yet".into(),
                 payload: serde_json::json!({ "v": 1 }),
+                meta: None,
             },
             now: 100,
         })
@@ -714,6 +719,7 @@ fn buffer_signal_holds_early_deliveries(f: &StoreFactory) {
                 step_id: None,
                 name: "not-yet".into(),
                 payload: serde_json::json!({ "v": 1 }),
+                meta: None,
             },
             now: 101,
         })
@@ -732,6 +738,7 @@ fn buffer_signal_holds_early_deliveries(f: &StoreFactory) {
                 step_id: None,
                 name: "expected".into(),
                 payload: serde_json::json!({}),
+                meta: None,
             },
             now: 102,
         })
@@ -745,6 +752,7 @@ fn buffer_signal_holds_early_deliveries(f: &StoreFactory) {
                 step_id: None,
                 name: "not-yet".into(),
                 payload: serde_json::json!({}),
+                meta: None,
             },
             now: 103,
         })
@@ -779,6 +787,7 @@ fn buffer_signal_rejects_terminal_runs(f: &StoreFactory) {
                 step_id: None,
                 name: "anything".into(),
                 payload: serde_json::json!({}),
+                meta: None,
             },
             now: 101,
         })
@@ -820,6 +829,7 @@ fn buffer_signal_rejects_internal_timer(f: &StoreFactory) {
                 step_id: None,
                 name: "__timer".into(),
                 payload: serde_json::json!({}),
+                meta: None,
             },
             now: 100,
         })
@@ -846,6 +856,7 @@ fn consume_buffered_signal_is_one_shot(f: &StoreFactory) {
                 step_id: None,
                 name: "not-yet".into(),
                 payload: serde_json::json!({ "v": 42 }),
+                meta: None,
             },
             now: 100,
         })

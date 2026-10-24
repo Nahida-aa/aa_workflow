@@ -275,6 +275,16 @@ pub enum WorkflowEvent {
         error: RunError,
         attempts: Vec<StepAttempt>,
     },
+    /// Observability (persisted): a durable-retry step began attempt `attempt`.
+    /// Aligns with upstream `STEP_ATTEMPT_STARTED` — only emitted when the
+    /// step's retry policy is `durable` (non-durable attempts stay in-memory).
+    StepAttemptStarted {
+        ts: i64,
+        run_id: String,
+        step_id: String,
+        /// 1-based attempt number about to run.
+        attempt: usize,
+    },
 }
 
 impl WorkflowEvent {
@@ -289,6 +299,7 @@ impl WorkflowEvent {
             | WorkflowEvent::CompensationCompleted { .. }
             | WorkflowEvent::CompensationFailed { .. } => None,
             WorkflowEvent::StepRetryScheduled { step_id, .. }
+            | WorkflowEvent::StepAttemptStarted { step_id, .. }
             | WorkflowEvent::StepStarted { step_id, .. }
             | WorkflowEvent::StepFinished { step_id, .. }
             | WorkflowEvent::StepFailed { step_id, .. }
@@ -323,7 +334,8 @@ impl WorkflowEvent {
             | WorkflowEvent::CompensationStarted { ts, .. }
             | WorkflowEvent::CompensationCompleted { ts, .. }
             | WorkflowEvent::CompensationFailed { ts, .. }
-            | WorkflowEvent::StepRetryScheduled { ts, .. } => *ts,
+            | WorkflowEvent::StepRetryScheduled { ts, .. }
+            | WorkflowEvent::StepAttemptStarted { ts, .. } => *ts,
         }
     }
 
@@ -349,6 +361,7 @@ impl WorkflowEvent {
             WorkflowEvent::CompensationCompleted { .. } => "COMPENSATION_COMPLETED",
             WorkflowEvent::CompensationFailed { .. } => "COMPENSATION_FAILED",
             WorkflowEvent::StepRetryScheduled { .. } => "STEP_RETRY_SCHEDULED",
+            WorkflowEvent::StepAttemptStarted { .. } => "STEP_ATTEMPT_STARTED",
         };
         debug_assert_eq!(
             serde_json::to_value(self).unwrap()["type"],
