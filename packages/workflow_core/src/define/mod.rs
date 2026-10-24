@@ -239,9 +239,9 @@ impl<TInput, TState, TCtxExt> BaseCtx<TInput, TState, TCtxExt> {
     }
 
     /// Durable approval wait: pauses the run until [`signal_run`](crate::engine::signal_run)
-    /// delivers a decision for `key`. `reason` is persisted in the `StepPaused`
+    /// delivers a decision for `key`. `reason` is persisted in the `SignalAwaited`
     /// checkpoint for approvers. Resolves to the signal's payload on success;
-    /// on replay the already-recorded `StepResume` is served from the log.
+    /// on replay the already-recorded `SignalResolved` is served from the log.
     pub async fn approve(
         &self,
         key: impl Into<String>,
@@ -541,7 +541,7 @@ type InitializeFn =
 type StateValidatorFn = Arc<dyn Fn(&serde_json::Value) -> anyhow::Result<()> + Send + Sync>;
 
 /// 恢复 payload 的形状校验器（对齐 TanStack `WaitForEventOptions.schema`，
-/// `types.ts:276-277`）。**代码而非数据**：不落进 `StepPaused` checkpoint，
+/// `types.ts:276-277`）。**代码而非数据**：不落进 `SignalAwaited` checkpoint，
 /// replay 时同一个 `wait_for_event_with(..)` 调用点重新装上同一个校验器。
 pub type PayloadValidator = Arc<dyn Fn(&serde_json::Value) -> anyhow::Result<()> + Send + Sync>;
 
@@ -577,10 +577,10 @@ impl std::fmt::Debug for PayloadSchema {
 /// `WaitForEventOptions`，`types.ts:268-279`）。
 #[derive(Default, Clone, Debug)]
 pub struct WaitForEventOptions {
-    /// 绝对 UTC ms 唤醒期限。落进 `StepPaused.due_at` 和
+    /// 绝对 UTC ms 唤醒期限。落进 `SignalAwaited.due_at` 和
     /// `RunState.waiting_for.deadline`，供 host 建时间索引的 worker job。
     pub deadline: Option<i64>,
-    /// 自由元数据，落进 `StepPaused.meta` 与 `RunState` 的三处 await 投影。
+    /// 自由元数据，落进 `SignalAwaited.meta` 与 `RunState` 的三处 await 投影。
     pub meta: Option<serde_json::Value>,
     /// 恢复时对投递 payload 的形状校验（`schema`）。校验失败 → run 报错。
     pub schema: Option<PayloadSchema>,

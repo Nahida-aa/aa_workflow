@@ -65,7 +65,31 @@ cargo test -p aa_workflow_store_sqlx_postgres
 
 ## 与上游 schema 的差异
 
-**目前无差异**：`migrations/0000_workflow_store.sql` 逐列对齐上游
+**一处有意差异**（`0001_signal_inbox`）：上游该迁移里还有一条
+
+```sql
+create index "workflow_events_signal_id_idx"
+  on "workflow_events" (run_id, (event->>'signalId'))
+  where event_type = 'SIGNAL_RESOLVED';
+```
+
+**我们没有建**，两个理由叠在一起：
+
+1. **字段大小写不匹配**：`WorkflowEvent` 的 `rename_all` 只作用于**类型 tag**
+   （`#[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]`），字段名没改——
+   我们序列化出来是 `signal_id`，所以 `event->>'signalId'` 恒为 `NULL`。
+2. **我们的查询用不到它**：投递去重走 `workflow_signal_deliveries` 表
+   （`deliver_signal` 的 `Duplicate` 判定），没有任何 SQL 在 `workflow_events`
+   上按 `signalId` 查。
+
+> 注：事件分类已与上游对齐（`SIGNAL_RESOLVED` 等四个类型，见
+> `docs/tanstack-alignment.md` 的事件分类对照），所以这条不再是「我们没有这个
+> 事件类型」——是上面两个更具体的原因。若将来给字段也加 `camelCase` 重命名、
+> 或新增按 signalId 查日志的路径，这条索引就该补上。
+
+除此之外：
+
+**无差异**：`migrations/0000_workflow_store.sql` 逐列对齐上游
 `workflow-store-drizzle-postgres/migrations/0000_workflow_store.sql`
 （9 张表：`workflow_schema_migrations` / `workflow_runs` / `workflow_run_states` /
 `workflow_event_locks` / `workflow_events` / `workflow_timers` /

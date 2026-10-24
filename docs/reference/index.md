@@ -66,6 +66,7 @@ title: aa_workflow_core
 - [run_workflow](functions/run_workflow.md)
 - [run_workflow_sync](functions/run_workflow_sync.md)
 - [select_workflow_version](functions/select_workflow_version.md)
+- [signal_approval](functions/signal_approval.md)
 - [signal_event](functions/signal_event.md)
 - [signal_run](functions/signal_run.md)
 - [snapshot_state](functions/snapshot_state.md)

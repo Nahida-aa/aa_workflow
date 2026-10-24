@@ -45,8 +45,8 @@ Defined in: [`packages/workflow_core/src/event.rs:30`](../../../packages/workflo
 
 Defined in: [`packages/workflow_core/src/event.rs:33`](../../../packages/workflow_core/src/event.rs#L33)
 
-Derived from a `StepPaused` checkpoint: the step is parked at a durable
-wait (approval / sleep) until a matching `StepResume` arrives.
+Derived from a `SignalAwaited` checkpoint: the step is parked at a durable
+wait (approval / sleep) until a matching `SignalResolved` arrives.
 
 ## Trait Implementations
 

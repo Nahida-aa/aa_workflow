@@ -437,6 +437,41 @@ pub enum DeliverApprovalResult {
     Delivered { run: WorkflowExecution },
 }
 
+/// 缓冲一个「现在还投不出去」的信号的返回值。对齐上游 `BufferSignalResult`
+/// （`workflow-runtime/src/types.ts:315`）。
+///
+/// 与 [`DeliverSignalResult`] 同构，只把 `Delivered` 换成 `Buffered`：后者
+/// **只入收件箱**，没有投递给 run——run 该等什么还在等什么，等它真的等到时
+/// 再由等待点从收件箱消费。
+///
+/// `NotWaiting` 在这里的含义是「不该缓冲」：run 处于终态，或信号是内部保留
+/// 名 `__timer`（上游 `in-memory-store.ts:165` 两处拒收）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum BufferSignalResult {
+    NotFound,
+    Buffered { run: WorkflowExecution },
+    Duplicate { run: WorkflowExecution },
+    NotWaiting { run: WorkflowExecution },
+}
+
+/// 从收件箱消费的参数。对齐上游 `ConsumeBufferedSignalArgs`
+/// （`workflow-core/src/types.ts:611`——注意上游定义在 **core**，因为它要被
+/// core 的等待点调用）。
+///
+/// `expected_next_index` 是并发闸门：与当前日志长度不符说明有人并发追加过
+/// 事件，store 应拒绝本次消费（上游抛 `LogConflictError`），由驱动重试。
+#[derive(Debug, Clone)]
+pub struct ConsumeBufferedSignalArgs {
+    pub run_id: String,
+    /// 等待中的信号名（与 `ctx.wait_for_event(name)` 传入的一致）。
+    pub name: String,
+    /// 泊车在这一信号上的 step（上游是必填 `string`）。
+    pub step_id: String,
+    pub expected_next_index: u64,
+    pub now: i64,
+}
+
 // ── 查询 ────────────────────────────────────────────────────
 
 /// 对齐 `types.ts:261`。`cursor` 是不透明分页游标（in-memory 实现用 offset）。

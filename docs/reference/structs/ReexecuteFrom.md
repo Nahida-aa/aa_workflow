@@ -5,7 +5,7 @@ title: ReexecuteFrom
 
 # Struct: ReexecuteFrom
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:97`](../../../packages/workflow_core/src/engine/run_workflow.rs#L97)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:98`](../../../packages/workflow_core/src/engine/run_workflow.rs#L98)
 
 `run_workflow` / `run_workflow_sync` 的全部入参（对齐上游
 `runWorkflow(options)` 的**按值**收法，见 `engine/run-workflow.ts:34-72`）。
@@ -41,10 +41,11 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:97`](../../../pa
 newtype 内部持 `Arc<WorkflowDefinition>`：`previous_versions` 是 `Vec`、另有
 若干 `Arc`，按值持有会让每次 run 都 deep-copy 一遍；`Arc` 让 clone 变引用计数自增，
 也避免给结构体引入生命周期参数（那会让 builder 链很难写）。
-re-execute 计划（INVALIDATE 侧，上游 `reexecuteFrom`，`run-workflow.ts:71-84`）：
-以**全新 run** 启动，把源 run 幸存的 checkpoint 导入本 run 的日志——每条
-stepId 不在 `Self::unsafe_invalidate` 名单里的 `STEP_FINISHED`（失败的
-step 不导入、按设计重跑）。溯源写进事件的 `meta.imported_from`。
+re-execute 计划（INVALIDATE 侧，`reexecuteFrom`——**f2-lite 自有，上游未采纳**；
+引用自 `f2-lite` 分支 `run-workflow.ts:71-84`。以**全新 run** 启动，把源 run 幸存
+的 checkpoint 导入本 run 的日志——每条 stepId 不在 `Self::unsafe_invalidate`
+名单里的 `STEP_FINISHED`（失败的 step 不导入、按设计重跑）。溯源写进事件的
+`meta.imported_from`。
 
 引擎没有图：无法校验名单对依赖方向封闭——**保留被失效 step 的消费者是
 调用者的不变量**（`unsafe` 之名由此而来：b 消费 a 的结果而你只失效 a，
@@ -59,7 +60,7 @@ step 不导入、按设计重跑）。溯源写进事件的 `meta.imported_from`
 source_run_id: String
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:99`](../../../packages/workflow_core/src/engine/run_workflow.rs#L99)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:100`](../../../packages/workflow_core/src/engine/run_workflow.rs#L100)
 
 checkpoint 的来源 run。
 
@@ -72,7 +73,7 @@ checkpoint 的来源 run。
 unsafe_invalidate: Vec<String>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:102`](../../../packages/workflow_core/src/engine/run_workflow.rs#L102)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:103`](../../../packages/workflow_core/src/engine/run_workflow.rs#L103)
 
 强制重跑的 stepId 名单（引擎透传、不校验封闭性）。空 = 全部导入、
 零重跑（对齐上游 `unsafeInvalidate?` 缺省）。
@@ -85,7 +86,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:102`](../../../p
 pub fn new<impl Into<String>: Into>(source_run_id: impl ?) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:106`](../../../packages/workflow_core/src/engine/run_workflow.rs#L106)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:107`](../../../packages/workflow_core/src/engine/run_workflow.rs#L107)
 
 #### Parameters
 
@@ -106,7 +107,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:106`](../../../p
 pub fn with_invalidate(self, steps: Vec<String>) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:113`](../../../packages/workflow_core/src/engine/run_workflow.rs#L113)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:114`](../../../packages/workflow_core/src/engine/run_workflow.rs#L114)
 
 #### Parameters
 

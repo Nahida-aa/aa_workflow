@@ -128,7 +128,7 @@ fn base_dir(tag: &str) -> PathBuf {
         for _ in 0..2000 {
             let evs = store.get_events("approve:r").unwrap();
             if evs.iter().any(
-                |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "review"),
+                |e| matches!(e, WorkflowEvent::SignalAwaited { step_id, .. } | WorkflowEvent::ApprovalRequested { step_id, .. } if step_id == "review"),
             ) {
                 break;
             }
@@ -157,7 +157,7 @@ fn base_dir(tag: &str) -> PathBuf {
         for _ in 0..2000 {
             let evs = store2.get_events("approve:r").unwrap();
             if evs.iter().any(
-                |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "review"),
+                |e| matches!(e, WorkflowEvent::SignalAwaited { step_id, .. } | WorkflowEvent::ApprovalRequested { step_id, .. } if step_id == "review"),
             ) {
                 break;
             }
@@ -169,37 +169,35 @@ fn base_dir(tag: &str) -> PathBuf {
                 .unwrap()
                 .iter()
                 .filter(
-                    |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "review")
+                    |e| matches!(e, WorkflowEvent::SignalAwaited { step_id, .. } | WorkflowEvent::ApprovalRequested { step_id, .. } if step_id == "review")
                 )
                 .count(),
             1,
-            "进程 B 不能重复 append StepPaused"
+            "进程 B 不能重复 append SignalAwaited"
         );
 
-        aa_workflow_core::signal_run(
-            store2.as_ref(),
-            "approve:r",
-            "review",
-            serde_json::json!({ "ok": true }),
-        )
-        .unwrap();
+        aa_workflow_core::signal_approval(store2.as_ref(), "approve:r", "review", true, None)
+            .unwrap();
         let (out, store2b) = t2.await.unwrap().unwrap();
         assert_eq!(out.status, RunStatus::Finished);
-        assert_eq!(out.output, Some(serde_json::json!({ "ok": true })));
+        assert_eq!(
+            out.output,
+            Some(serde_json::json!({ "approved": true, "feedback": null }))
+        );
         let events = store2b.get_events("approve:r").unwrap();
         let pauses = events
             .iter()
             .filter(
-                |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "review"),
+                |e| matches!(e, WorkflowEvent::SignalAwaited { step_id, .. } | WorkflowEvent::ApprovalRequested { step_id, .. } if step_id == "review"),
             )
             .count();
         let resumes = events
             .iter()
             .filter(
-                |e| matches!(e, WorkflowEvent::StepResume { step_id, .. } if step_id == "review"),
+                |e| matches!(e, WorkflowEvent::SignalResolved { step_id, .. } | WorkflowEvent::ApprovalResolved { step_id, .. } if step_id == "review"),
             )
             .count();
-        assert_eq!(pauses, 1, "整个生命周期只应有一个 StepPaused");
+        assert_eq!(pauses, 1, "整个生命周期只应有一个 SignalAwaited");
         assert_eq!(resumes, 1);
 
         let _ = std::fs::remove_dir_all(&base);
@@ -286,11 +284,11 @@ fn base_dir(tag: &str) -> PathBuf {
             events
                 .iter()
                 .filter(|e| {
-                    matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "settle-due-1")
+                    matches!(e, WorkflowEvent::SignalAwaited { step_id, .. } | WorkflowEvent::ApprovalRequested { step_id, .. } if step_id == "settle-due-1")
                 })
                 .count(),
             1,
-            "进程 B 不重复 append 第一个 sleep 的 StepPaused"
+            "进程 B 不重复 append 第一个 sleep 的 SignalAwaited"
         );
         assert_eq!(finished_count(&events, "settle-invoice"), 1);
 

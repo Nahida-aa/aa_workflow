@@ -12,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use aa_workflow_core::{DeleteReason, RunState, StoreError};
+use aa_workflow_core::{DeleteReason, RunState, StoreError, WorkflowEvent};
 use aa_workflow_runtime::run_store_adapter::{WorkflowExecutionStore, WorkflowRunStoreAdapterStore};
 use aa_workflow_runtime::types::*;
 
@@ -226,6 +226,11 @@ impl FileExecutionStore {
     fn deliveries_path(&self) -> PathBuf {
         self.base.join("deliveries.json")
     }
+    /// 收件箱（早到信号暂存）。对齐上游的 durable inbox：条目留到 run 删除或
+    /// 等待点消费走。
+    fn signal_inbox_path(&self) -> PathBuf {
+        self.base.join("signal_inbox.json")
+    }
     fn schedules_path(&self) -> PathBuf {
         self.base.join("schedules.json")
     }
@@ -283,6 +288,11 @@ impl FileExecutionStore {
 
     fn read_deliveries(&self) -> Result<Vec<String>, StoreError> {
         Ok(read_json(&self.deliveries_path())?.unwrap_or_default())
+    }
+
+    /// 读收件箱；文件缺失视为空。键是 `"{run_id}:{signal_id}"`。
+    fn read_signal_inbox(&self) -> Result<HashMap<String, SignalDelivery>, StoreError> {
+        Ok(read_json(&self.signal_inbox_path())?.unwrap_or_default())
     }
 
     fn read_timers(&self) -> Result<HashMap<String, TimerRecord>, StoreError> {
@@ -408,6 +418,48 @@ impl WorkflowRunStoreAdapterStore for FileExecutionStore {
 
     // subscribe_events：文件介质做实时推送意义不大（要轮询），用 trait 的默认
     // 实现返回 None。与 -sqlx-postgres 一致。
+
+    fn consume_buffered_signal(
+        &self,
+        args: ConsumeBufferedSignalArgs,
+    ) -> anyhow::Result<Option<WorkflowEvent>> {
+        let _guard = self.block();
+        // 并发闸门：与内存实现同一条（上游 `in-memory-store.ts:175`）。
+        let log_len = self.read_events_raw(&args.run_id)?.len() as u64;
+        if log_len != args.expected_next_index {
+            anyhow::bail!(
+                "log conflict on run `{}`: expected next index {}, actual {}",
+                args.run_id,
+                args.expected_next_index,
+                log_len
+            );
+        }
+        let prefix = format!("{}:", args.run_id);
+        let mut inbox = self.read_signal_inbox()?;
+        let hit = inbox
+            .iter()
+            .find(|(key, delivery)| {
+                key.starts_with(&prefix)
+                    && delivery.name == args.name
+                    && (delivery.step_id.is_none()
+                        || delivery.step_id.as_deref() == Some(args.step_id.as_str()))
+            })
+            .map(|(key, delivery)| (key.clone(), delivery.clone()));
+        let Some((key, delivery)) = hit else {
+            return Ok(None);
+        };
+        inbox.remove(&key);
+        write_json(&self.signal_inbox_path(), &inbox)?;
+        Ok(Some(WorkflowEvent::SignalResolved {
+            ts: args.now,
+            run_id: args.run_id,
+            step_id: args.step_id,
+            name: args.name,
+            signal_id: Some(delivery.signal_id),
+            payload: delivery.payload,
+            meta: None,
+        }))
+    }
 }
 
 // ============================================================
@@ -698,6 +750,26 @@ impl WorkflowExecutionStore for FileExecutionStore {
         Ok(DeliverSignalResult::Delivered {
             run: updated.expect("read_exec 之后必然存在"),
         })
+    }
+
+    fn buffer_signal(&self, args: DeliverSignalArgs) -> anyhow::Result<BufferSignalResult> {
+        let _g = self.block();
+        let Some(run) = self.read_exec(&args.run_id)? else {
+            return Ok(BufferSignalResult::NotFound);
+        };
+        let key = Self::signal_key(&args.run_id, &args.delivery.signal_id);
+        let already_delivered = self.read_deliveries()?.contains(&key);
+        let mut inbox = self.read_signal_inbox()?;
+        if already_delivered || inbox.contains_key(&key) {
+            return Ok(BufferSignalResult::Duplicate { run });
+        }
+        // 拒收两类：run 已终态、内部保留名 `__timer`（与内存实现同一条）。
+        if run.status.is_terminal() || args.delivery.name == "__timer" {
+            return Ok(BufferSignalResult::NotWaiting { run });
+        }
+        inbox.insert(key, args.delivery);
+        write_json(&self.signal_inbox_path(), &inbox)?;
+        Ok(BufferSignalResult::Buffered { run })
     }
 
     fn deliver_approval(

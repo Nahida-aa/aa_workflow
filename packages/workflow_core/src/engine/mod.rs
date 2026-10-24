@@ -467,7 +467,7 @@ where
             )
             .await;
             // 泊车路径必返回 WorkflowParked；resume 载荷不可能在此出现
-            // （本步骤没有 StepResume——它的续跑就是这次重试本身）。
+            // （本步骤没有 SignalResolved——它的续跑就是这次重试本身）。
             return Err(park.err().expect("retry park")).map_err(|e| e);
         }
     }
@@ -782,14 +782,14 @@ pub fn exec_uuid(inner: &Arc<EngineRuntime>) -> anyhow::Result<String> {
 /// `deadline` is an **absolute** UTC ms timestamp, stored verbatim (it is what
 /// a timer sweep indexes on) — `None` for waits with no time bound.
 ///
-/// Replay fast path: a `StepResume` already in the log resolves immediately,
+/// Replay fast path: a `SignalResolved` already in the log resolves immediately,
 /// so a crashed-paused run re-waits exactly once and never re-appends its
-/// `StepPaused`. Otherwise the pause checkpoint is persisted (idempotently)
+/// `SignalAwaited`. Otherwise the pause checkpoint is persisted (idempotently)
 /// and the run state flips to `Paused` + `waiting_for` / `pending_approval`.
 ///
 /// **Then it parks**: the function returns [`WorkflowParked`] immediately — it
 /// does NOT block. The drive ends `Paused`, the process is free to exit, and an
-/// external driver is what delivers the wake-up (a `StepResume` via
+/// external driver is what delivers the wake-up (a `SignalResolved` via
 /// [`signal_run`] / [`signal_event`], or a timer sweep noticing `deadline`).
 /// Mirrors TanStack, where the awaited primitive throws `WorkflowPaused` and
 /// the drive returns (`run-workflow.ts:970` / `:529`).
@@ -812,7 +812,7 @@ pub async fn exec_pause(
     .await
 }
 
-/// [`exec_pause`] 的完整形态：额外带 `meta`（落进 `StepPaused` checkpoint 与
+/// [`exec_pause`] 的完整形态：额外带 `meta`（落进 `SignalAwaited` checkpoint 与
 /// `RunState` 的三处投影）和 `validator`（恢复时校验 payload 形状）。
 ///
 /// `meta` 落进 checkpoint 是有意的：观察者只读 `RunState` 就能渲染，不必回放
@@ -851,19 +851,36 @@ pub async fn exec_pause_with(
 
     let already_paused = {
         let events = inner.store.get_events(&inner.run_id)?;
-        events
-            .iter()
-            .any(|ev| matches!(ev, WorkflowEvent::StepPaused { step_id: id, .. } if id == step_id))
+        events.iter().any(
+            |ev| match ev {
+                WorkflowEvent::SignalAwaited { step_id: id, .. }
+                | WorkflowEvent::ApprovalRequested { step_id: id, .. } => id == step_id,
+                _ => false,
+            },
+        )
     };
     if !already_paused {
-        let ev = WorkflowEvent::StepPaused {
-            ts: now_ms(),
-            run_id: inner.run_id.clone(),
-            step_id: step_id.to_string(),
-            signal_name: signal_name.to_string(),
-            due_at: deadline,
-            reason: reason.to_string(),
-            meta: meta.clone(),
+        // 审批与信号分成两个事件类型（对齐上游 `APPROVAL_REQUESTED` /
+        // `SIGNAL_AWAITED`）；判别沿用保留名 `__approval`。
+        let ev = if signal_name == "__approval" {
+            WorkflowEvent::ApprovalRequested {
+                ts: now_ms(),
+                run_id: inner.run_id.clone(),
+                step_id: step_id.to_string(),
+                approval_id: step_id.to_string(),
+                title: reason.to_string(),
+                description: None,
+                meta: meta.clone(),
+            }
+        } else {
+            WorkflowEvent::SignalAwaited {
+                ts: now_ms(),
+                run_id: inner.run_id.clone(),
+                step_id: step_id.to_string(),
+                name: signal_name.to_string(),
+                deadline,
+                meta: meta.clone(),
+            }
         };
         inner.append(&ev)?;
         inner.publish(&ev);
@@ -895,7 +912,11 @@ pub async fn exec_pause_with(
     Err(WorkflowParked.into())
 }
 
-/// Last delivered signal payload for `step_id`, if any.
+/// Last delivered signal/approval result for `step_id`, if any.
+///
+/// 恢复事件已按类型拆开（对齐上游 `SIGNAL_RESOLVED` / `APPROVAL_RESOLVED`）：
+/// 信号返回其 `payload`；审批返回结构化的 `{approved, feedback}`（上游审批
+/// 事件没有 payload 字段）。
 fn find_resume(
     store: &Arc<dyn RunStore>,
     run_id: &str,
@@ -903,11 +924,20 @@ fn find_resume(
 ) -> Option<serde_json::Value> {
     let events = store.get_events(run_id).ok()?;
     events.iter().find_map(|ev| match ev {
-        WorkflowEvent::StepResume {
+        WorkflowEvent::SignalResolved {
             step_id: id,
             payload,
             ..
-        } if id == step_id => Some(payload.clone().unwrap_or(serde_json::Value::Null)),
+        } if id == step_id => Some(payload.clone()),
+        WorkflowEvent::ApprovalResolved {
+            step_id: id,
+            approved,
+            feedback,
+            ..
+        } if id == step_id => Some(serde_json::json!({
+            "approved": approved,
+            "feedback": feedback,
+        })),
         _ => None,
     })
 }
@@ -1021,28 +1051,52 @@ fn project_run_wait(store: &Arc<dyn RunStore>, run_id: &str, kind: WaitKind) {
     }
 }
 
-/// Appends a `StepResume` for a parked run — the external side of
+/// Appends a `SignalResolved` for a parked run — the external side of
 /// [`WorkflowCtx::approve`](crate::define::WorkflowCtx::approve). Safe to call
 /// any time: nothing is parked *watching* the log (the drive already returned),
 /// so this takes effect on the **next** `run_workflow` invocation, which
-/// resolves the wait from the log and never re-appends its `StepPaused`.
+/// resolves the wait from the log and never re-appends its `SignalAwaited`.
 /// Delivering the resume is the caller's job — that is the runtime driver's
 /// whole reason to exist (see `aa_workflow_runtime`'s `deliver_signal`). The first
 /// append per `(run_id, step_id)` wins; duplicates drop via the store's CAS
 /// append. `payload` is what `approve` returns on the resumed drive.
+/// Appends a `SignalResolved` for `step_id` — the step_id-targeted form of
+/// [`signal_event`].
+///
+/// **过闸**：只在该 step 确实泊在信号等待上时才落盘；否则报
+/// [`WorkflowError::SignalLost`]。对齐上游默认语义（没在等就 `not-waiting`，
+/// 不静默写日志）。「早到信号」由 runtime 的可选收件箱承接
+/// （`buffer_signal` + `buffer_signals` 开关），**不是**靠这里无条件 append。
+///
+/// 上游的幂等令牌不在这条路上：`signal_id` 记为 `None`，去重由 store 负责
+/// （`signal_deliveries`）。要把它记进日志，走带名的 [`signal_event`]。
 pub fn signal_run(
     store: &dyn RunStore,
     run_id: &str,
     step_id: &str,
     payload: serde_json::Value,
 ) -> Result<(), WorkflowError> {
+    let events = store.get_events(run_id)?;
+    let Some(name) = events.iter().rev().find_map(|ev| match ev {
+        WorkflowEvent::SignalAwaited { step_id: id, name, .. } if id == step_id => {
+            Some(name.clone())
+        }
+        _ => None,
+    }) else {
+        return Err(WorkflowError::SignalLost(format!(
+            "no step in run `{run_id}` is parked on a signal at step `{step_id}`"
+        )));
+    };
     loop {
         let n = store.get_events(run_id)?.len();
-        let ev = WorkflowEvent::StepResume {
+        let ev = WorkflowEvent::SignalResolved {
             ts: now_ms(),
             run_id: run_id.to_string(),
             step_id: step_id.to_string(),
-            payload: Some(payload.clone()),
+            name: name.clone(),
+            signal_id: None,
+            payload: payload.clone(),
+            meta: None,
         };
         match store.append_event(run_id, n, &ev) {
             Ok(()) => return Ok(()),
@@ -1052,31 +1106,98 @@ pub fn signal_run(
     }
 }
 
-/// Appends a `StepResume` for the run currently parked waiting for the event
-/// `event_name` — the external side of
+/// Appends an `ApprovalResolved` for the run parked on approval `approval_id`
+/// — the external side of
+/// [`WorkflowCtx::approve`](crate::define::WorkflowCtx::approve).
+///
+/// **过闸**：只在该审批确实泊着时才落盘；否则报
+/// [`WorkflowError::SignalLost`]（上游对应 `approval_lost`：run 没在等这个
+/// 审批）。事件形状逐字对齐上游 `APPROVAL_RESOLVED`——**没有 payload**，审批是
+/// 结构化决定（`approved` + `feedback`）。
+pub fn signal_approval(
+    store: &dyn RunStore,
+    run_id: &str,
+    approval_id: &str,
+    approved: bool,
+    feedback: Option<&str>,
+) -> Result<(), WorkflowError> {
+    let events = store.get_events(run_id)?;
+    let parked = events.iter().rev().any(|ev| matches!(
+        ev,
+        WorkflowEvent::ApprovalRequested { approval_id: id, .. } if id == approval_id
+    ));
+    if !parked {
+        return Err(WorkflowError::SignalLost(format!(
+            "run `{run_id}` is not parked on approval `{approval_id}`"
+        )));
+    }
+    loop {
+        let n = store.get_events(run_id)?.len();
+        let ev = WorkflowEvent::ApprovalResolved {
+            ts: now_ms(),
+            run_id: run_id.to_string(),
+            step_id: approval_id.to_string(),
+            approval_id: approval_id.to_string(),
+            approved,
+            feedback: feedback.map(str::to_string),
+            meta: None,
+        };
+        match store.append_event(run_id, n, &ev) {
+            Ok(()) => return Ok(()),
+            Err(StoreError::Conflict { .. }) => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+/// Appends a `SignalResolved` for the run currently parked waiting for the
+/// event `event_name` — the external side of
 /// [`WorkflowCtx::wait_for_event`](crate::define::WorkflowCtx::wait_for_event).
-/// Locates the paused step via its `signal_name` (the channel, not the pause
-/// key), so a host needs only the event name. Fails with
+/// Locates the paused step via its channel `name` (not the pause key), so a
+/// host needs only the event name. Fails with
 /// [`WorkflowError::SignalLost`] when nothing is parked on that name.
+///
+/// `signal_id` is the host-supplied idempotency token (upstream's rule: same
+/// id at the same step is a no-op, a different one is a lost race). It is
+/// recorded on the event **and** deduplicated by the store.
 pub fn signal_event(
     store: &dyn RunStore,
     run_id: &str,
     event_name: &str,
+    signal_id: Option<&str>,
     payload: serde_json::Value,
 ) -> Result<(), WorkflowError> {
     let events = store.get_events(run_id)?;
     let step_id = events.iter().rev().find_map(|ev| match ev {
-        WorkflowEvent::StepPaused {
-            step_id,
-            signal_name,
-            ..
-        } if signal_name == event_name => Some(step_id.clone()),
+        WorkflowEvent::SignalAwaited { step_id, name, .. } if name == event_name => {
+            Some(step_id.clone())
+        }
         _ => None,
     });
     match step_id {
-        Some(step_id) => signal_run(store, run_id, &step_id, payload),
+        Some(step_id) => {
+            let name = event_name.to_string();
+            let signal_id = signal_id.map(str::to_string);
+            loop {
+                let n = store.get_events(run_id)?.len();
+                let ev = WorkflowEvent::SignalResolved {
+                    ts: now_ms(),
+                    run_id: run_id.to_string(),
+                    step_id: step_id.clone(),
+                    name: name.clone(),
+                    signal_id: signal_id.clone(),
+                    payload: payload.clone(),
+                    meta: None,
+                };
+                match store.append_event(run_id, n, &ev) {
+                    Ok(()) => return Ok(()),
+                    Err(StoreError::Conflict { .. }) => continue,
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
         None => Err(WorkflowError::SignalLost(format!(
-            "no step in run `{run_id}` is paused waiting on event `{event_name}`"
+            "no step in run `{run_id}` is parked on event `{event_name}`"
         ))),
     }
 }
@@ -1890,13 +2011,7 @@ mod tests {
         assert!(decided.lock().unwrap().is_none(), "挂起时 handler 未继续");
 
         // 外部投递（这是 runtime 的 `deliver_approval` 做的事）。
-        signal_run(
-            store.as_ref(),
-            "r1",
-            "release",
-            serde_json::json!({ "approved": true }),
-        )
-        .unwrap();
+        signal_approval(store.as_ref(), "r1", "release", true, None).unwrap();
 
         // Drive #2 —— 从日志短路 `charge`，pause 有 resume 直接放行。
         let out = run_workflow(
@@ -1907,7 +2022,11 @@ mod tests {
         .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
-        assert_eq!(out.output, Some(serde_json::json!({ "approved": true })));
+        assert_eq!(
+            out.output,
+            Some(serde_json::json!({ "approved": true, "feedback": null })),
+            "审批恢复是结构化的 approved/feedback，不是任意 payload"
+        );
         let st = store.get_run_state("r1").unwrap().unwrap();
         assert!(
             st.waiting_for.is_none() && st.pending_approval.is_none(),
@@ -1915,19 +2034,19 @@ mod tests {
         );
         assert_eq!(
             decided.lock().unwrap().as_ref(),
-            Some(&serde_json::json!({ "approved": true }))
+            Some(&serde_json::json!({ "approved": true, "feedback": null }))
         );
         assert_eq!(
             count_events(&store, "r1", |e| matches!(
                 e,
-                WorkflowEvent::StepPaused { step_id, .. } if step_id == "release"
+                WorkflowEvent::SignalAwaited { step_id, .. } | WorkflowEvent::ApprovalRequested { step_id, .. } if step_id == "release"
             )),
             1
         );
         assert_eq!(
             count_events(&store, "r1", |e| matches!(
                 e,
-                WorkflowEvent::StepResume { step_id, .. } if step_id == "release"
+                WorkflowEvent::SignalResolved { step_id, .. } | WorkflowEvent::ApprovalResolved { step_id, .. } if step_id == "release"
             )),
             1
         );
@@ -1937,13 +2056,30 @@ mod tests {
         )));
     }
 
-    /// 早到信号 = 收件箱（Phase 3 评估的钉子，对齐 #19 bufferSignals 的核心
-    /// 行为）：宿主在 **run 尚未开始**时 `signal_run(step_id)` 直投——
-    /// `StepResume` 无条件 CAS 落盘（signal_run 不检查 run 是否在等待）；
-    /// handler 到达 wait 点时 `find_resume` 从日志短路拾取（不泊车）。
-    /// 「先持久化、等待点原子消费」在 core 层天然成立。
+    /// `signal_run` **过闸**（对齐上游默认 `not-waiting`）：没泊在信号上就
+    /// 拒绝，不静默写日志。早到信号由 runtime 的可选收件箱承接
+    /// （`buffer_signal` + `buffer_signals`），不是靠 core 无条件 append。
+    #[test]
+    fn signal_run_rejects_when_nothing_is_parked() {
+        let store = InMemoryStore::new();
+        let err = signal_run(&store, "r1", "gate", serde_json::json!({ "ok": true }))
+            .unwrap_err();
+        assert!(
+            matches!(err, WorkflowError::SignalLost(_)),
+            "没在等应报 SignalLost，实际 {err:?}"
+        );
+        assert!(
+            store.get_events("r1").unwrap().is_empty(),
+            "被拒的投递不得在日志里留任何东西"
+        );
+    }
+
+    /// 日志里**先于** pause 存在的 `SignalResolved`，仍会被等待点的
+    /// `find_resume` 短路拾取（机械性质：恢复事件与位置无关）。core 自己不再
+    /// 生产这种早到事件（见上一个测试的闸），但 store 里已有的必须读得动——
+    /// 这正是 runtime 收件箱消费后要落成的形状。
     #[tokio::test]
-    async fn early_signal_run_acts_as_inbox() {
+    async fn pre_existing_resume_is_picked_up_at_the_wait_point() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let decided = Arc::new(Mutex::new(None::<serde_json::Value>));
         let decided_in = decided.clone();
@@ -1956,39 +2092,43 @@ mod tests {
             }
         });
 
-        // 信号先于 run 存在——它就是这条日志的第一个事件（先持久化）。
-        signal_run(
-            store.as_ref(),
-            "r1",
-            "release",
-            serde_json::json!({ "approved": true, "early": true }),
-        )
-        .unwrap();
-        let events = store.get_events("r1").unwrap();
+        // 直接往 store 写一条早于 pause 的 SignalResolved（模拟收件箱消费的
+        // 产物），不走 signal_run —— 那条路现在过闸。
+        store
+            .append_event(
+                "r1",
+                0,
+                &WorkflowEvent::SignalResolved {
+                    ts: now_ms(),
+                    run_id: "r1".into(),
+                    step_id: "release".into(),
+                    name: "release".into(),
+                    signal_id: None,
+                    payload: serde_json::json!({ "early": true }),
+                    meta: None,
+                },
+            )
+            .unwrap();
         assert!(
-            matches!(&events[0], WorkflowEvent::StepResume { step_id, .. } if step_id == "release"),
-            "StepResume 是日志第一条：早到信号已持久化"
+            matches!(
+                &store.get_events("r1").unwrap()[0],
+                WorkflowEvent::SignalResolved { .. }
+            ),
+            "SignalResolved 是日志第一条"
         );
 
-        // 驱动：到达 wait 点时 find_resume 短路拾取——不泊车、payload 过墙。
         let out = run_workflow(
             RunWorkflowOptions::new(Arc::new(wf), store.clone())
                 .input(serde_json::json!({}))
                 .run_id("r1"),
         )
-        .outcome()
-        .await
+        .outcome().await
         .unwrap();
-        assert_eq!(out.status, RunStatus::Finished, "早到信号在等待点被消费");
+        assert_eq!(out.status, RunStatus::Finished, "等待点被日志里的 resume 短路");
         assert_eq!(
             decided.lock().unwrap().as_ref(),
-            Some(&serde_json::json!({ "approved": true, "early": true })),
+            Some(&serde_json::json!({ "early": true })),
             "payload 原样送达 handler"
-        );
-        assert_eq!(
-            count_events(&store, "r1", |e| matches!(e, WorkflowEvent::StepPaused { .. })),
-            0,
-            "全程无泊车：等待点被日志里的 StepResume 短路"
         );
     }
 
@@ -2024,14 +2164,14 @@ mod tests {
         wait_until(
             &store,
             "r2",
-            |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "release"),
+            |e| matches!(e, WorkflowEvent::SignalAwaited { step_id, .. } | WorkflowEvent::ApprovalRequested { step_id, .. } if step_id == "release"),
         )
         .await;
         t1.abort();
         let _ = t1.await;
 
         // Run 2 (same run_id): succeeded checkpoint short-circuits, the pause
-        // re-waits but must NOT append a second StepPaused.
+        // re-waits but must NOT append a second SignalAwaited.
         let store3 = store.clone();
         let wf3 = wf.clone();
         let t2 = tokio::spawn(async move {
@@ -2045,28 +2185,26 @@ mod tests {
         wait_until(
             &store,
             "r2",
-            |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "release"),
+            |e| matches!(e, WorkflowEvent::SignalAwaited { step_id, .. } | WorkflowEvent::ApprovalRequested { step_id, .. } if step_id == "release"),
         )
         .await;
         assert_eq!(
             count_events(&store, "r2", |e| matches!(
                 e,
-                WorkflowEvent::StepPaused { step_id, .. } if step_id == "release"
+                WorkflowEvent::SignalAwaited { step_id, .. } | WorkflowEvent::ApprovalRequested { step_id, .. } if step_id == "release"
             )),
             1,
             "replay must not re-append the pause checkpoint"
         );
 
-        signal_run(
-            store.as_ref(),
-            "r2",
-            "release",
-            serde_json::json!({ "approved": true }),
-        )
-        .unwrap();
+        signal_approval(store.as_ref(), "r2", "release", true, None).unwrap();
         let out = t2.await.unwrap().unwrap();
         assert_eq!(out.status, RunStatus::Finished);
-        assert_eq!(out.output, Some(serde_json::json!({ "approved": true })));
+        assert_eq!(
+            out.output,
+            Some(serde_json::json!({ "approved": true, "feedback": null })),
+            "审批恢复是结构化的 approved/feedback，不是任意 payload"
+        );
         assert_eq!(
             count_events(&store, "r2", |e| matches!(
                 e,
@@ -2078,14 +2216,14 @@ mod tests {
         assert_eq!(
             count_events(&store, "r2", |e| matches!(
                 e,
-                WorkflowEvent::StepResume { step_id, .. } if step_id == "release"
+                WorkflowEvent::SignalResolved { step_id, .. } | WorkflowEvent::ApprovalResolved { step_id, .. } if step_id == "release"
             )),
             1
         );
     }
 
     /// sleep 挂起后**返回**，由外部（runtime 的 timer sweep）在 `due_at` 投递
-    /// `StepResume` 唤醒。core 自己不投递——这是 D3 定案。
+    /// `SignalResolved` 唤醒。core 自己不投递——这是 D3 定案。
     #[tokio::test]
     async fn sleep_parks_then_external_timer_resumes() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
@@ -2149,9 +2287,9 @@ mod tests {
 
         let evs = store.get_events("s1").unwrap();
         let resume = evs.iter().find_map(|e| match e {
-            WorkflowEvent::StepResume {
+            WorkflowEvent::SignalResolved {
                 step_id, payload, ..
-            } if step_id == "cooldown" => payload.clone(),
+            } if step_id == "cooldown" => Some(payload.clone()),
             _ => None,
         });
         assert_eq!(resume, Some(serde_json::Value::Null));
@@ -2182,13 +2320,7 @@ mod tests {
         .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Paused);
-        signal_run(
-            store.as_ref(),
-            "r3",
-            "gate",
-            serde_json::json!({ "yes": 1 }),
-        )
-        .unwrap();
+        signal_approval(store.as_ref(), "r3", "gate", true, None).unwrap();
         let out = run_workflow(
             RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
@@ -2197,9 +2329,12 @@ mod tests {
         .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
-        assert_eq!(out.output, Some(serde_json::json!({ "yes": 1 })));
+        assert_eq!(
+            out.output,
+            Some(serde_json::json!({ "approved": true, "feedback": null }))
+        );
 
-        // Run 2, same run_id: the StepResume is already in the log, so
+        // Run 2, same run_id: the ApprovalResolved is already in the log, so
         // approve resolves from the log — no new checkpoints appended.
         let out2 = run_workflow(
             RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
@@ -2209,18 +2344,21 @@ mod tests {
         .outcome().await
         .unwrap();
         assert_eq!(out2.status, RunStatus::Finished);
-        assert_eq!(out2.output, Some(serde_json::json!({ "yes": 1 })));
+        assert_eq!(
+            out2.output,
+            Some(serde_json::json!({ "approved": true, "feedback": null }))
+        );
         assert_eq!(
             count_events(&store, "r3", |e| matches!(
                 e,
-                WorkflowEvent::StepPaused { step_id, .. } if step_id == "gate"
+                WorkflowEvent::SignalAwaited { step_id, .. } | WorkflowEvent::ApprovalRequested { step_id, .. } if step_id == "gate"
             )),
             1
         );
         assert_eq!(
             count_events(&store, "r3", |e| matches!(
                 e,
-                WorkflowEvent::StepResume { step_id, .. } if step_id == "gate"
+                WorkflowEvent::SignalResolved { step_id, .. } | WorkflowEvent::ApprovalResolved { step_id, .. } if step_id == "gate"
             )),
             1
         );
@@ -2263,6 +2401,7 @@ mod tests {
             store.as_ref(),
             "ne1",
             "review-approved",
+            None,
             serde_json::json!({ "ok": true }),
         )
         .unwrap();
@@ -2299,7 +2438,7 @@ mod tests {
         .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Paused);
-        signal_event(store.as_ref(), "ne2", "go", serde_json::json!(42)).unwrap();
+        signal_event(store.as_ref(), "ne2", "go", None, serde_json::json!(42)).unwrap();
         let out = run_workflow(
             RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
@@ -2310,7 +2449,7 @@ mod tests {
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output, Some(serde_json::json!(42)));
 
-        // 同名 run 重跑：StepResume 已在日志，replay 从日志取，不重新等待或加 checkpoint
+        // 同名 run 重跑：SignalResolved 已在日志，replay 从日志取，不重新等待或加 checkpoint
         let store3 = store.clone();
         let wf3 = wf.clone();
         let out2 = run_workflow(
@@ -2325,7 +2464,7 @@ mod tests {
         assert_eq!(
             count_events(&store, "ne2", |e| matches!(
                 e,
-                WorkflowEvent::StepPaused { signal_name, .. } if signal_name == "go"
+                WorkflowEvent::SignalAwaited { name: signal_name, .. } if signal_name == "go"
             )),
             1
         );
@@ -2376,7 +2515,7 @@ mod tests {
         )));
         assert!(evs.iter().any(|e| matches!(
             e,
-            WorkflowEvent::StepResume { step_id, .. } if step_id == "cooldown"
+            WorkflowEvent::SignalResolved { step_id, .. } | WorkflowEvent::ApprovalResolved { step_id, .. } if step_id == "cooldown"
         )));
     }
 
@@ -2457,11 +2596,11 @@ mod tests {
     async fn signal_event_without_awaiter_errors() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
         let err =
-            signal_event(store.as_ref(), "nowhere", "ghost", serde_json::Value::Null).unwrap_err();
+            signal_event(store.as_ref(), "nowhere", "ghost", None, serde_json::Value::Null).unwrap_err();
         assert!(matches!(err, crate::error::WorkflowError::SignalLost(_)));
         assert!(
             store.get_events("nowhere").unwrap().is_empty(),
-            "失败时不 append StepResume"
+            "失败时不 append SignalResolved"
         );
     }
 
@@ -2486,7 +2625,7 @@ mod tests {
         .outcome().await
         .unwrap();
         assert_eq!(out.status, RunStatus::Paused);
-        signal_run(store.as_ref(), "det1", "gate", serde_json::json!(true)).unwrap();
+        signal_approval(store.as_ref(), "det1", "gate", true, None).unwrap();
         // Drive #2：`__now-0` / `__uuid-0` 从日志缓存取（deterministic replay）。
         let out = run_workflow(
             RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
@@ -2892,7 +3031,7 @@ mod tests {
             |e| matches!(e, WorkflowEvent::StepFinished { step_id, .. } if step_id == "after")
         ));
 
-        // replay：yield 的 StepResume 已在日志 → 短路径立即放行，不新增 checkpoint
+        // replay：yield 的 SignalResolved 已在日志 → 短路径立即放行，不新增 checkpoint
         let out2 = run_workflow(
             RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({}))
@@ -2904,7 +3043,7 @@ mod tests {
         assert_eq!(
             count_events(&store, "y1", |e| matches!(
                 e,
-                WorkflowEvent::StepPaused { .. }
+                WorkflowEvent::SignalAwaited { .. } | WorkflowEvent::ApprovalRequested { .. }
             )),
             1,
             "replay 不重复 yield 的 pause"
@@ -3227,15 +3366,15 @@ mod tests {
         assert_eq!(w.meta.as_ref().unwrap()["ui"], "warn");
         assert!(st.pending_approval.is_none(), "signal 等待不该有 approval 镜像");
 
-        // meta 同时落进 StepPaused checkpoint（观察者只读日志也能拿到）
+        // meta 同时落进 SignalAwaited checkpoint（观察者只读日志也能拿到）
         let evs = store.get_events("aw1").unwrap();
         let paused = evs
             .iter()
             .find_map(|e| match e {
-                WorkflowEvent::StepPaused { meta, .. } => Some(meta.clone()),
+                WorkflowEvent::SignalAwaited { meta, .. } => Some(meta.clone()),
                 _ => None,
             })
-            .expect("应有 StepPaused");
+            .expect("应有 SignalAwaited");
         assert_eq!(paused.as_ref().unwrap()["ui"], "warn");
     }
 

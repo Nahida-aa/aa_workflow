@@ -72,6 +72,35 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
 结论：文档原先那句「同构」是错的，已纠正。事件类型名对齐保留（有用，是 grep
 日志和对照源码时看的东西）；其余不动。
 
+#### 事件分类对照（2026-10-15 拆分后）
+
+原先 `SignalAwaited` / `SignalResolved` 各合并了上游的两个类型，已按上游拆开。
+**拆分理由**：本仓要**替代** TS 引擎而非与它互操作，但事件名是 grep 日志与对照
+源码时唯一便宜的映射——合并省下的两个变体，换来的是每次读日志都要在脑子里做
+一次翻译。且拆分还顺带拿到了上游审批事件的结构字段（`approvalId` / `title` /
+`approved` / `feedback`），这些原先被塞进 `signal_name` / `reason` / `payload`。
+
+| 上游（基线 `0971b4c`） | 本仓 | 字段对应 |
+| --- | --- | --- |
+| `SIGNAL_AWAITED` | `SignalAwaited` | `stepId`→`step_id`、`name`、`deadline`、`meta` |
+| `APPROVAL_REQUESTED` | `ApprovalRequested` | `approvalId`→`approval_id`、`title`、`description`、`meta` |
+| `SIGNAL_RESOLVED` | `SignalResolved` | `name`、`signalId`→`signal_id`、`payload`、`meta` |
+| `APPROVAL_RESOLVED` | `ApprovalResolved` | `approvalId`→`approval_id`、`approved`、`feedback`、`meta` |
+
+**有意保留的差异**（都是本仓独有，上游没有）：
+
+- `ApprovalResolved` **不带 `payload`**——与上游一致：审批是结构化决定
+  （`approved` + `feedback`），任意 payload 只属于 `SignalResolved`。
+- `StepProgress`（可观测进度）、`CompensationCompleted` / `CompensationFailed`
+  （补偿结果）是本仓独有事件，上游无对应物，保留并在本表标注。
+- 序列化的**字段名是 snake_case**：`WorkflowEvent` 的 `rename_all` 只作用于
+  类型 tag（`#[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]`）。
+  这正是 postgres 迁移里省略上游 `workflow_events_signal_id_idx` 的原因之一
+  （见 `packages/workflow_store_sqlx_postgres/SCHEMA_MIGRATIONS.md`）。
+
+判别约定不变：`exec_pause` 仍用保留名 `__approval` 区分两条路，`__timer` 仍是
+sleep 的保留信号名。
+
 ### 执行模型（第二轮才采纳）：handler 代码重放
 
 与 TanStack 一致：handler 每次从头跑一遍代码，引擎靠 checkpoint 按 `stepId`
@@ -136,9 +165,9 @@ grep 日志、对照 TS 源码读事件序列时是直接对应的。
    式给、引擎透传，Phase 4）。
 5. **signals / pause**：TanStack 用 `ctx.approve` + `__timer`（sleep）内建；
    我们按同一语义落地：`ctx.approve(key, reason)` / `ctx.sleep(key, dur)` 在
-   handler 内挂起，引擎持久化 `STEP_PAUSED` checkpoint（`deadline` 是**绝对
+   handler 内挂起，引擎持久化 `SIGNAL_AWAITED` checkpoint（`deadline` 是**绝对
    时间戳**，供 timer 驱动器索引），外部 `signal_run(run_id, step_id, payload)`
-   追加 `STEP_RESUME` 唤醒；重放时已交付的 `STEP_RESUME` 从日志短路，挂起点
+   追加 `SIGNAL_RESOLVED` 唤醒；重放时已交付的 `SIGNAL_RESOLVED` 从日志短路，挂起点
    幂等（绝无重复 append）。
    **挂起即返回**：写到挂起点就抛 `WorkflowParked`，drive 以 `Paused` 收尾，
    不阻塞——与上游 `throw new WorkflowPaused()` / `if (engine.paused) return`
@@ -248,7 +277,7 @@ pendingApproval: undefined,                                          // 清另�
 
 - 老 `RunState` JSON 没有 `awaiting` 键 → 读成空数组（`run_store/mod.rs` 的
   `legacy_run_state_without_awaiting_still_deserializes` 钉住）
-- 老 `StepPaused` checkpoint 没有 `meta` → 读成 `None`（事件日志是 append-only，
+- 老 `SignalAwaited` checkpoint 没有 `meta` → 读成 `None`（事件日志是 append-only，
   **加字段不能让历史日志无法重放**，同文件 `legacy_step_paused_without_meta_still_deserializes`）
 - 空 `awaiting` 用 `skip_serializing_if` 省略 —— 绝大多数 run 从不挂起，不该给它们
   凭空加个 `awaiting: []`
@@ -267,7 +296,7 @@ pendingApproval: undefined,                                          // 清另�
 ```
 ctx.sleep("a", 100ms) 与 ctx.sleep("b", 600s) 并发，park 用 ? 传播
 → status = Paused
-→ StepPaused 事件数 = 1（只有 "a"）
+→ 挂起事件数 = 1（只有 "a"）
 → RunState.waiting_for = Some(WaitForState { step_id: "a", .. })
 ```
 
@@ -277,11 +306,11 @@ ctx.sleep("a", 100ms) 与 ctx.sleep("b", 600s) 并发，park 用 ? 传播
 
 ⚠️ 顺带一个真实的坑：**`WorkflowParked` 必须用 `?` 传播**。探针里写成
 `let _ = try_join!(..)` 会把 park 错误吞掉，run 变成 `Finished`，而日志里留着一条
-`STEP_PAUSED` checkpoint——状态与日志分叉。`let _ =` / `.ok()` / `if let Ok(..)`
+`SIGNAL_AWAITED` checkpoint——状态与日志分叉。`let _ =` / `.ok()` / `if let Ok(..)`
 都会踩。
 
 `signal_run` / `signal_event`（`engine/mod.rs:752` / `:780`）**读事件日志、不读
-`waiting_for`**（后者扫日志找最后一个 `signal_name` 匹配的 `StepPaused`），所以
+`waiting_for`**（后者扫日志找最后一个 `name` 匹配的 `SignalAwaited`），所以
 信号投递也不依赖那个单槽。
 
 ## 驱动入口：`RunWorkflowOptions` 的字段对照
@@ -305,7 +334,7 @@ RunWorkflowOptions::new(workflow, run_store)   // 必填两项由 new() 强制
 | `input` / `runId` | ✅ 同名 | |
 | `deadline` / `minYieldRemainingMs` / `yieldResumeAt` | ✅ 同名 | |
 | `publish` | ✅ `publish` | 位置从参数移进结构体；回调签名 `(run_id, event)` 与上游逐参一致 |
-| `signalDelivery` / `approval` | — | 形态差异：上游「带投递再跑一次」是一个调用；本仓先 `signal_run` / `signal_event` 落盘（`STEP_RESUME`），再单独 drive（D3） |
+| `signalDelivery` / `approval` | — | 形态差异：上游「带投递再跑一次」是一个调用；本仓先 `signal_run` / `signal_event` 落盘（`SIGNAL_RESOLVED`），再单独 drive（D3） |
 | `recover` | ❌ 暂无 | 「认领过期 lease 后重放中断的 run」。本仓有 `claim_stale_runs`（认领）但没有对应的恢复入口——**真缺口**，补它要连着 runtime 闭环 |
 | `attach` | ❌ 暂无 | 只读订阅已有 run（不驱动）。本仓 `subscribe` 只能 tail 事件，拿不到 RunState 快照 |
 | `signal`（AbortSignal） | ❌ 暂无 | 本仓有 `cancel_run`（写 Aborted 终局），不是 drive 参数 |
@@ -374,7 +403,7 @@ RFC 把分工写成了明文（`research/WORKFLOW_STORE_RUNTIME_CONTRACT.md`）�
 
 | 方案 | 内容 | 否掉的原因 |
 | --- | --- | --- |
-| A. `publish ⊃ append` | 日志仍幂等，但每次挂起都 `publish` 一遍 `StepPaused` | 流会撒谎：把「本次没写日志」报成「本次写了」。且 `log IS the transport` 的前提被破坏 |
+| A. `publish ⊃ append` | 日志仍幂等，但每次挂起都 `publish` 一遍 `SignalAwaited` | 流会撒谎：把「本次没写日志」报成「本次写了」。且 `log IS the transport` 的前提被破坏 |
 | B. 精确上游 + 收尾时回落 store | 流只放新事件，关通道时读一次 `RunState` 定终态 | 结论对但机制绕：既然状态本来就该来自 store，就该显式承认，而不是藏在「关通道」这个副作用里 |
 
 ### 落地形状

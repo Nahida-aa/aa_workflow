@@ -517,24 +517,56 @@ mod tests {
         assert_eq!(st.waiting_for.as_ref().unwrap().signal_name, "payment");
     }
 
-    /// 旧 `StepPaused` checkpoint（无 `meta`）也要读得动 —— 事件日志是 append-only，
-    /// 加字段不能让历史日志无法重放。
+    /// 缺可选字段的 checkpoint 也要读得动 —— 事件日志是 append-only，
+    /// 加字段（`meta` / `deadline` / `signal_id`）不能让历史日志无法重放。
     #[test]
-    fn legacy_step_paused_without_meta_still_deserializes() {
-        let legacy = serde_json::json!({
-            "type": "STEP_PAUSED",
+    fn checkpoint_without_optional_fields_still_deserializes() {
+        // 信号挂起：无 `deadline`、无 `meta`。
+        let signal = serde_json::json!({
+            "type": "SIGNAL_AWAITED",
             "ts": 1,
             "run_id": "r",
             "step_id": "gate",
-            "signal_name": "__approval",
-            "due_at": null,
-            "reason": "放行？"
+            "name": "go"
         });
-        let ev: crate::event::WorkflowEvent = serde_json::from_value(legacy).unwrap();
-        let crate::event::WorkflowEvent::StepPaused { step_id, meta, .. } = &ev else {
-            panic!("应解析为 StepPaused，实际 {ev:?}");
+        let ev: crate::event::WorkflowEvent = serde_json::from_value(signal).unwrap();
+        let crate::event::WorkflowEvent::SignalAwaited { step_id, deadline, meta, .. } = &ev else {
+            panic!("应解析为 SignalAwaited，实际 {ev:?}");
         };
         assert_eq!(step_id, "gate");
+        assert_eq!(*deadline, None);
+        assert_eq!(*meta, None);
+
+        // 审批挂起：无 `description`、无 `meta`。
+        let approval = serde_json::json!({
+            "type": "APPROVAL_REQUESTED",
+            "ts": 2,
+            "run_id": "r",
+            "step_id": "release",
+            "approval_id": "release",
+            "title": "放行？"
+        });
+        let ev: crate::event::WorkflowEvent = serde_json::from_value(approval).unwrap();
+        let crate::event::WorkflowEvent::ApprovalRequested { description, meta, .. } = &ev else {
+            panic!("应解析为 ApprovalRequested，实际 {ev:?}");
+        };
+        assert_eq!(*description, None);
+        assert_eq!(*meta, None);
+
+        // 信号恢复：无 `signal_id`、无 `meta`。
+        let resolved = serde_json::json!({
+            "type": "SIGNAL_RESOLVED",
+            "ts": 3,
+            "run_id": "r",
+            "step_id": "gate",
+            "name": "go",
+            "payload": { "ok": true }
+        });
+        let ev: crate::event::WorkflowEvent = serde_json::from_value(resolved).unwrap();
+        let crate::event::WorkflowEvent::SignalResolved { signal_id, meta, .. } = &ev else {
+            panic!("应解析为 SignalResolved，实际 {ev:?}");
+        };
+        assert_eq!(*signal_id, None);
         assert_eq!(*meta, None);
     }
 

@@ -53,7 +53,7 @@ pub use define::{AnyWorkflowDefinition, ApproveOptions, Backoff, BaseCtx, Create
 pub use engine::{Operation, diff_state, snapshot_state};
 pub use engine::{
     PublisherFn, ReexecuteFrom, RunId, RunOutcome, RunWorkflowOptions, cancel_run, run_workflow,
-    run_workflow_sync, select_workflow_version, signal_event, signal_run,
+    run_workflow_sync, select_workflow_version, signal_approval, signal_event, signal_run,
 };
 pub use error::{RunError, RunErrorCode, StoreError, WorkflowError};
 pub use event::{

@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres, Row, Transaction};
-use aa_workflow_core::{DeleteReason, RunState, StoreError, WaitForState};
+use aa_workflow_core::{DeleteReason, RunState, StoreError, WaitForState, WorkflowEvent};
 use aa_workflow_runtime::run_store_adapter::{WorkflowExecutionStore, WorkflowRunStoreAdapterStore};
 use aa_workflow_runtime::types::*;
 
@@ -602,6 +602,73 @@ impl WorkflowRunStoreAdapterStore for SqlxPostgresStore {
 
     // subscribe_events：sqlx 无内建 pub/sub，用 trait 的默认实现（返回 None），
     // 调用方退化为轮询 read_events。与上游 drizzle 版一致（它也没有 subscribeEvents）。
+
+    fn consume_buffered_signal(
+        &self,
+        args: ConsumeBufferedSignalArgs,
+    ) -> anyhow::Result<Option<WorkflowEvent>> {
+        self.block(async move {
+            let mut tx = self.pool.begin().await?;
+            // 并发闸门：日志长度与调用方预期不符说明有人并发追加过，拒绝消费
+            // （上游 `in-memory-store.ts:175` 抛 `LogConflictError`）。
+            let log_len: i64 =
+                sqlx::query_scalar("select count(*) from workflow_events where run_id = $1")
+                    .bind(&args.run_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if log_len as u64 != args.expected_next_index {
+                tx.commit().await?;
+                anyhow::bail!(
+                    "log conflict on run `{}`: expected next index {}, actual {}",
+                    args.run_id,
+                    args.expected_next_index,
+                    log_len
+                );
+            }
+
+            // 按 sequence 取最早的一条（上游遍历 inbox 取首个匹配，顺序同理）。
+            let hit: Option<(String, serde_json::Value)> = sqlx::query_as(
+                "select signal_id, delivery from workflow_signal_inbox \
+                 where run_id = $1 and name = $2 and (step_id is null or step_id = $3) \
+                 order by sequence asc limit 1",
+            )
+            .bind(&args.run_id)
+            .bind(&args.name)
+            .bind(&args.step_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some((signal_id, delivery)) = hit else {
+                // 收件箱里没有——调用方回落到既有路径（find_resume 全日志扫描）。
+                tx.commit().await?;
+                return Ok(None);
+            };
+            // 消费是一次性的：取走即删。
+            sqlx::query("delete from workflow_signal_inbox where run_id = $1 and signal_id = $2")
+                .bind(&args.run_id)
+                .bind(&signal_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+
+            let payload = delivery
+                .get("payload")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let signal_id = delivery
+                .get("signalId")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            Ok(Some(WorkflowEvent::SignalResolved {
+                ts: args.now,
+                run_id: args.run_id,
+                step_id: args.step_id,
+                name: args.name,
+                signal_id,
+                payload,
+                meta: None,
+            }))
+        })
+    }
 }
 
 /// 当前毫秒时间戳（对齐上游 `Date.now()`）。
@@ -936,6 +1003,58 @@ impl WorkflowExecutionStore for SqlxPostgresStore {
             }
             tx.commit().await?;
             Ok(due)
+        })
+    }
+
+    fn buffer_signal(&self, args: DeliverSignalArgs) -> anyhow::Result<BufferSignalResult> {
+        self.block(async move {
+            let mut tx = self.pool.begin().await?;
+            let Some(run) = Self::lock_run_row(&mut tx, &args.run_id).await? else {
+                tx.commit().await?;
+                return Ok(BufferSignalResult::NotFound);
+            };
+            // 去重键是 signal_id：已投递过、或已在收件箱里，都算重复。
+            let delivered: Option<String> = sqlx::query_scalar(
+                "select signal_id from workflow_signal_deliveries \
+                 where run_id = $1 and signal_id = $2",
+            )
+            .bind(&args.run_id)
+            .bind(&args.delivery.signal_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let boxed: Option<String> = sqlx::query_scalar(
+                "select signal_id from workflow_signal_inbox \
+                 where run_id = $1 and signal_id = $2",
+            )
+            .bind(&args.run_id)
+            .bind(&args.delivery.signal_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if delivered.is_some() || boxed.is_some() {
+                tx.commit().await?;
+                return Ok(BufferSignalResult::Duplicate { run });
+            }
+            // 拒收两类：run 已终态、内部保留名 `__timer`。
+            if run.status.is_terminal() || args.delivery.name == "__timer" {
+                tx.commit().await?;
+                return Ok(BufferSignalResult::NotWaiting { run });
+            }
+            let delivery_json = serde_json::to_value(&args.delivery)?;
+            sqlx::query(
+                "insert into workflow_signal_inbox \
+                 (run_id, signal_id, name, step_id, delivery, created_at) \
+                 values ($1,$2,$3,$4,$5,$6)",
+            )
+            .bind(&args.run_id)
+            .bind(&args.delivery.signal_id)
+            .bind(&args.delivery.name)
+            .bind(&args.delivery.step_id)
+            .bind(&delivery_json)
+            .bind(args.now)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            Ok(BufferSignalResult::Buffered { run })
         })
     }
 

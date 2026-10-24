@@ -46,6 +46,9 @@ struct Inner {
     logs: Mutex<HashMap<RunId, Vec<StoredWorkflowEvent>>>,
     timers: Mutex<HashMap<String, TimerRecord>>,
     signal_deliveries: Mutex<HashSet<String>>,
+    /// 收件箱（对齐上游 `inbox`）：键是 `"{run_id}:{signal_id}"`，条目留到 run
+    /// 被删除或等待点消费走。
+    signal_inbox: Mutex<HashMap<String, SignalDelivery>>,
     schedules: Mutex<HashMap<ScheduleId, ScheduleRecord>>,
     schedule_buckets: Mutex<HashMap<String, ScheduleBucketRecord>>,
     subscribers: Mutex<HashMap<RunId, Vec<Subscriber>>>,
@@ -370,6 +373,58 @@ impl WorkflowRunStoreAdapterStore for InMemoryExecutionStore {
             }
         }))
     }
+
+    fn consume_buffered_signal(
+        &self,
+        args: ConsumeBufferedSignalArgs,
+    ) -> anyhow::Result<Option<WorkflowEvent>> {
+        // 并发闸门：日志长度与调用方预期不符说明有人并发追加过，拒绝消费
+        // （上游 `in-memory-store.ts:175` 抛 `LogConflictError`），由驱动重试。
+        let log_len = self
+            .inner
+            .logs
+            .lock()
+            .unwrap()
+            .get(&args.run_id)
+            .map(|l| l.len() as u64)
+            .unwrap_or(0);
+        if log_len != args.expected_next_index {
+            anyhow::bail!(
+                "log conflict on run `{}`: expected next index {}, actual {}",
+                args.run_id,
+                args.expected_next_index,
+                log_len
+            );
+        }
+
+        let prefix = format!("{}:", args.run_id);
+        let mut inbox = self.inner.signal_inbox.lock().unwrap();
+        let hit = inbox
+            .iter()
+            .find(|(key, delivery)| {
+                key.starts_with(&prefix)
+                    && delivery.name == args.name
+                    && (delivery.step_id.is_none()
+                        || delivery.step_id.as_deref() == Some(args.step_id.as_str()))
+            })
+            .map(|(key, delivery)| (key.clone(), delivery.clone()));
+        let Some((key, delivery)) = hit else {
+            // 没有匹配条目——调用方回落到既有路径（Rust 是 find_resume 全日志扫描）。
+            return Ok(None);
+        };
+        inbox.remove(&key);
+        drop(inbox);
+
+        Ok(Some(WorkflowEvent::SignalResolved {
+            ts: args.now,
+            run_id: args.run_id,
+            step_id: args.step_id,
+            name: args.name,
+            signal_id: Some(delivery.signal_id),
+            payload: delivery.payload,
+            meta: None,
+        }))
+    }
 }
 
 impl WorkflowExecutionStore for InMemoryExecutionStore {
@@ -634,6 +689,27 @@ impl WorkflowExecutionStore for InMemoryExecutionStore {
         Ok(DeliverApprovalResult::Delivered {
             run: updated.expect("get_run 之后必然存在"),
         })
+    }
+
+    fn buffer_signal(&self, args: DeliverSignalArgs) -> anyhow::Result<BufferSignalResult> {
+        let Some(run) = self.get_run(&args.run_id) else {
+            return Ok(BufferSignalResult::NotFound);
+        };
+        let key = signal_key(&args.run_id, &args.delivery.signal_id);
+        // 去重键是 signal_id：已投递过或已在收件箱里都算重复（上游
+        // `in-memory-store.ts:161-167` 两处同查）。
+        let already_delivered = self.inner.signal_deliveries.lock().unwrap().contains(&key);
+        let mut inbox = self.inner.signal_inbox.lock().unwrap();
+        if already_delivered || inbox.contains_key(&key) {
+            return Ok(BufferSignalResult::Duplicate { run });
+        }
+        // 拒收两类：run 已终态（投出去也没人接）、内部保留名 `__timer`
+        // （上游 `in-memory-store.ts:165`，`__timer` 不进收件箱）。
+        if run.status.is_terminal() || args.delivery.name == "__timer" {
+            return Ok(BufferSignalResult::NotWaiting { run });
+        }
+        inbox.insert(key, args.delivery);
+        Ok(BufferSignalResult::Buffered { run })
     }
 
     fn upsert_schedule(&self, args: UpsertScheduleArgs) -> anyhow::Result<()> {

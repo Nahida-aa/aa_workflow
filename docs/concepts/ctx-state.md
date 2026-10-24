@@ -205,7 +205,7 @@ step 闭包**不是**严格意义上的纯函数 —— 上游自己的例子就
 
 | 落盘 | 仅 `publish`（emit-only） |
 | --- | --- |
-| `STEP_FINISHED` / `STEP_FAILED` / `STEP_PAUSED` | `RUN_STARTED` / `STEP_STARTED` |
+| `STEP_FINISHED` / `STEP_FAILED` / `SIGNAL_AWAITED` | `RUN_STARTED` / `STEP_STARTED` |
 | `NOW_RECORDED` / `UUID_RECORDED` | `STEP_PROGRESS` / `CUSTOM` / `STATE_DELTA` |
 | `RUN_FINISHED` / `RUN_ERRORED` | |
 

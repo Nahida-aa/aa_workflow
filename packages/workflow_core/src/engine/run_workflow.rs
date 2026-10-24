@@ -84,10 +84,11 @@ pub type PublisherFn =
 /// newtype 内部持 `Arc<WorkflowDefinition>`：`previous_versions` 是 `Vec`、另有
 /// 若干 `Arc`，按值持有会让每次 run 都 deep-copy 一遍；`Arc` 让 clone 变引用计数自增，
 /// 也避免给结构体引入生命周期参数（那会让 builder 链很难写）。
-/// re-execute 计划（INVALIDATE 侧，上游 `reexecuteFrom`，`run-workflow.ts:71-84`）：
-/// 以**全新 run** 启动，把源 run 幸存的 checkpoint 导入本 run 的日志——每条
-/// stepId 不在 [`Self::unsafe_invalidate`] 名单里的 `STEP_FINISHED`（失败的
-/// step 不导入、按设计重跑）。溯源写进事件的 `meta.imported_from`。
+/// re-execute 计划（INVALIDATE 侧，`reexecuteFrom`——**f2-lite 自有，上游未采纳**；
+/// 引用自 `f2-lite` 分支 `run-workflow.ts:71-84`。以**全新 run** 启动，把源 run 幸存
+/// 的 checkpoint 导入本 run 的日志——每条 stepId 不在 [`Self::unsafe_invalidate`]
+/// 名单里的 `STEP_FINISHED`（失败的 step 不导入、按设计重跑）。溯源写进事件的
+/// `meta.imported_from`。
 ///
 /// 引擎没有图：无法校验名单对依赖方向封闭——**保留被失效 step 的消费者是
 /// 调用者的不变量**（`unsafe` 之名由此而来：b 消费 a 的结果而你只失效 a，
@@ -134,7 +135,7 @@ pub struct RunWorkflowOptions {
     pub input: serde_json::Value,
     /// 命中即停（本地扩展；上游用 handler 内 early `return`）。
     pub interim_goals: Option<Vec<String>>,
-    /// re-execute 计划（INVALIDATE 侧，上游 `reexecuteFrom`）。只在**全新
+    /// re-execute 计划（INVALIDATE 侧，`reexecuteFrom`，f2-lite 自有）。只在**全新
     /// run 的 start 路径**生效：resume 驱动忽略它（重放短路已覆盖旧
     /// checkpoint，重复导入会双写）；`source_run_id == run_id`、或源 run
     /// 不存在时报错（`run_lost`）。语义见 [`ReexecuteFrom`]。
@@ -803,7 +804,7 @@ async fn drive(
         return Err(error_persisted(&store, run_state, &run_id, &e, RunErrorCode::Validation));
     }
 
-    // F2-lite re-execute 计划（INVALIDATE 侧，上游 run-workflow.ts:269-295）：
+    // F2-lite re-execute 计划（INVALIDATE 侧，f2-lite 分支 run-workflow.ts:269-295）：
     // 首驱前把源 run 幸存的 checkpoint 导入本 run 的日志——只导
     // `STEP_FINISHED`，且 stepId 不在失效名单里（失败的 step 不导入、按设
     // 计重跑）。溯源 `meta.imported_from` 的 `index` 以**源 run 的持久化日
@@ -1982,7 +1983,7 @@ mod tests {
         // 第一次 drive：真的挂起，写下 STEP_PAUSED。
         let first = run_workflow(opts(store.clone())).collect().await;
         assert!(
-            first.iter().any(|e| matches!(e, WorkflowEvent::StepPaused { .. })),
+            first.iter().any(|e| matches!(e, WorkflowEvent::SignalAwaited { .. } | WorkflowEvent::ApprovalRequested { .. })),
             "首次挂起应写 STEP_PAUSED，实际 {:?}",
             first.iter().map(|e| e.type_name()).collect::<Vec<_>>()
         );
@@ -1994,7 +1995,7 @@ mod tests {
         // 第二次 drive：primitive 短路 → **零条新事件**（连 STEP_PAUSED 都不重写）。
         let second = run_workflow(opts(store.clone())).collect().await;
         assert!(
-            !second.iter().any(|e| matches!(e, WorkflowEvent::StepPaused { .. })),
+            !second.iter().any(|e| matches!(e, WorkflowEvent::SignalAwaited { .. } | WorkflowEvent::ApprovalRequested { .. })),
             "重挂起不该重复 append STEP_PAUSED（日志幂等），实际 {:?}",
             second.iter().map(|e| e.type_name()).collect::<Vec<_>>()
         );
@@ -2678,7 +2679,7 @@ mod tests {
     }
 
     // ========================================================
-    // reexecuteFrom（INVALIDATE 侧）——镜像上游 engine.rerun.test.ts 的
+    // reexecuteFrom（INVALIDATE 侧）——镜像 f2-lite engine.rerun.test.ts 的
     // 两个场景 + 本仓补的源缺失用例
     // ========================================================
 

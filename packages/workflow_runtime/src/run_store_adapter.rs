@@ -153,6 +153,25 @@ pub trait WorkflowRunStoreAdapterStore: Send + Sync {
         let _ = (run_id, from_index);
         None
     }
+
+    /// 从收件箱**取走**一个早到信号。对齐上游 `consumeBufferedSignal`
+    /// （`workflow-runtime/src/types.ts:295`）。
+    ///
+    /// 上游把它放在**基类**而不是扩展层——因为调用方是 core 的等待点
+    /// （`run-workflow.ts:1095` 的 `engine.runStore.consumeBufferedSignal`），
+    /// core 只认基类这个形状。我们同样放基类。
+    ///
+    /// `None` = 收件箱里没有匹配的条目。调用方应**回落到既有路径**——Rust 是
+    /// `find_resume` 全日志扫描（`engine/mod.rs:899`），它按下标无关的方式找
+    /// `SignalResolved`；这条回落路径正是我们「信号即事件」的既有语义，收件箱只是
+    /// 在它之上补了去重与开关。
+    ///
+    /// 消费是**一次性的**：命中的条目必须从收件箱移除，重复消费同一信号应返回
+    /// `None`。
+    fn consume_buffered_signal(
+        &self,
+        args: crate::types::ConsumeBufferedSignalArgs,
+    ) -> anyhow::Result<Option<WorkflowEvent>>;
 }
 
 /// 运行时的执行存储契约。
@@ -313,6 +332,23 @@ pub trait WorkflowExecutionStore: WorkflowRunStoreAdapterStore {
         &self,
         args: crate::types::DeliverApprovalArgs,
     ) -> anyhow::Result<crate::types::DeliverApprovalResult>;
+
+    /// 把一个「现在还投不出去」的信号放进**收件箱**。对齐上游 `bufferSignal`
+    /// （`workflow-runtime/src/types.ts:321`，扩展层——调用方是 runtime 的
+    /// 投递路径 `runtime-driver.ts:230`，不是 core）。
+    ///
+    /// 与 [`deliver_signal`](Self::deliver_signal) 的分工：`deliver_signal` 要求
+    /// run **此刻正在等**这个信号，否则 `NotWaiting`；本方法收下那些「run 还没
+    /// 走到等待点」的早到信号，等它走到时由
+    /// [`consume_buffered_signal`](WorkflowRunStoreAdapterStore::consume_buffered_signal)
+    /// 取走。
+    ///
+    /// 去重键是 `signal_id`（上游 `in-memory-store.ts:165`），条目一直留到 run
+    /// 被删除。
+    fn buffer_signal(
+        &self,
+        args: crate::types::DeliverSignalArgs,
+    ) -> anyhow::Result<crate::types::BufferSignalResult>;
 
     // ── schedule ────────────────────────────────────────────
 

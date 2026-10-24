@@ -184,7 +184,7 @@ step 结果。
 选择，core 不认识它。换 Postgres 或自己写的 store，事件长什么样由那个 store
 决定。理由见 [`docs/tanstack-alignment.md`](docs/tanstack-alignment.md)。
 
-- **checkpoint（进日志，参与 replay）**：`StepFinished` / `StepFailed` / `StepPaused` / `StepResume`
+- **checkpoint（进日志，参与 replay）**：`StepFinished` / `StepFailed` / `SignalAwaited` / `ApprovalRequested` / `SignalResolved` / `ApprovalResolved`
   / `RunFinished` / `RunErrored` / `NowRecorded` / `UuidRecorded`
 - **observability（只投 publisher）**：`RunStarted` / `StepStarted` / `StepProgress` / `Custom`
 
@@ -261,7 +261,7 @@ store 必须报 `StoreError::Io`，不许静默 no-op。
 - schema 即 serde 类型，没有 zod schema 实例对象。
 - 本地一等公民（TS 没有）：`continue_from`、`target_step`、`resource` 门、`up_to_date`。
 - 挂起是**「写到挂起点就返回 `Paused`」**，引擎不阻塞等待（对齐上游）。唤醒由
-  外部投递：`signal_run` / `signal_event` 追加 `StepResume`，或 timer 驱动器
+  外部投递：`signal_run` / `signal_event` 追加 `SignalResolved`，或 timer 驱动器
   认领 `waiting_for.deadline`。见 `docs/runtime-design.md` D3。
 
 ## 仓库结构

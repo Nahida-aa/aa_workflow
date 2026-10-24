@@ -12,8 +12,8 @@ pub enum RunStatus {
     Finished,
     Errored,
     Aborted,
-    /// The run is parked at a durable wait point (`StepPaused`), e.g. an
-    /// approval or a sleep; it resumes when a `StepResume` arrives.
+    /// The run is parked at a durable wait point (`SignalAwaited`), e.g. an
+    /// approval or a sleep; it resumes when a `SignalResolved` arrives.
     Paused,
 }
 
@@ -28,8 +28,8 @@ pub enum StepStatus {
     Running,
     Success,
     Failed,
-    /// Derived from a `StepPaused` checkpoint: the step is parked at a durable
-    /// wait (approval / sleep) until a matching `StepResume` arrives.
+    /// Derived from a `SignalAwaited` checkpoint: the step is parked at a durable
+    /// wait (approval / sleep) until a matching `SignalResolved` arrives.
     Paused,
 }
 
@@ -122,34 +122,75 @@ pub enum WorkflowEvent {
         error: RunError,
         attempts: Vec<StepAttempt>,
     },
-    /// Checkpoint (persisted): the run parked at a durable wait point
-    /// (`ctx.approve` / `ctx.sleep` / `ctx.sleep_until` / `ctx.wait_for_event`).
-    /// `step_id` is the deterministic pause key (== the signal id
-    /// [`signal_run`](crate::engine::signal_run) / [`signal_event`](crate::engine::signal_event)
-    /// targets); `signal_name` is the channel the run is parked on
-    /// (`"__timer"` for sleeps, `"__approval"` for approvals, a user event
-    /// name for named waits). `due_at` is `Some` (wall-clock ms) for sleep-like
-    /// waits so a timer host could auto-deliver, `None` for waits that need an
-    /// external decision.
-    StepPaused {
+    /// Checkpoint (persisted): the run parked on a **named signal** wait
+    /// (`ctx.wait_for_event` / `ctx.sleep*`). Aligns with upstream
+    /// `SIGNAL_AWAITED` (`types.ts`, 字段逐字对应)。
+    ///
+    /// `name` is the channel the run is parked on — `"__timer"` for sleeps,
+    /// a user event name for named waits. `deadline` is `Some` (wall-clock
+    /// ms) for sleep-like waits so a timer host could auto-deliver.
+    SignalAwaited {
         ts: i64,
         run_id: String,
         step_id: String,
-        signal_name: String,
-        due_at: Option<i64>,
-        reason: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deadline: Option<i64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         meta: Option<serde_json::Value>,
     },
-    /// Checkpoint (persisted): a signal was delivered for a paused run
-    /// (see [`signal_run`](crate::engine::signal_run)). Resolves the pending
-    /// `StepPaused` with the same `step_id`; `payload` is what the
-    /// `approve`/`sleep` call returns.
-    StepResume {
+    /// Checkpoint (persisted): the run parked on an **approval** wait
+    /// (`ctx.approve`). Aligns with upstream `APPROVAL_REQUESTED`.
+    ///
+    /// `approval_id` is the deterministic pause key (== the approval id the
+    /// host delivers a decision for); `title` is what approvers see.
+    ApprovalRequested {
         ts: i64,
         run_id: String,
         step_id: String,
-        payload: Option<serde_json::Value>,
+        approval_id: String,
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<serde_json::Value>,
+    },
+    /// Checkpoint (persisted): a signal resolved the matching
+    /// [`SignalAwaited`](WorkflowEvent::SignalAwaited). Aligns with upstream
+    /// `SIGNAL_RESOLVED`.
+    ///
+    /// `signal_id` is the host-supplied idempotency token — upstream's rule:
+    /// same `signal_id` at the same `step_id` is a no-op (idempotent retry),
+    /// a different one is a lost race. `payload` is what the
+    /// `wait_for_event` call returns.
+    SignalResolved {
+        ts: i64,
+        run_id: String,
+        step_id: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signal_id: Option<String>,
+        payload: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<serde_json::Value>,
+    },
+    /// Checkpoint (persisted): an approval decision resolved the matching
+    /// [`ApprovalRequested`](WorkflowEvent::ApprovalRequested). Aligns with
+    /// upstream `APPROVAL_RESOLVED`.
+    ///
+    /// 上游这里**没有** payload 字段——审批是结构化决定（`approved` +
+    /// `feedback`），任意 payload 只属于 [`SignalResolved`]。见
+    /// `docs/tanstack-alignment.md` 的事件分类对照。
+    ApprovalResolved {
+        ts: i64,
+        run_id: String,
+        step_id: String,
+        approval_id: String,
+        approved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feedback: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<serde_json::Value>,
     },
     /// Observability only (not persisted): 0.0..=1.0 progress signal.
     StepProgress {
@@ -251,8 +292,10 @@ impl WorkflowEvent {
             | WorkflowEvent::StepStarted { step_id, .. }
             | WorkflowEvent::StepFinished { step_id, .. }
             | WorkflowEvent::StepFailed { step_id, .. }
-            | WorkflowEvent::StepPaused { step_id, .. }
-            | WorkflowEvent::StepResume { step_id, .. }
+            | WorkflowEvent::SignalAwaited { step_id, .. }
+            | WorkflowEvent::ApprovalRequested { step_id, .. }
+            | WorkflowEvent::SignalResolved { step_id, .. }
+            | WorkflowEvent::ApprovalResolved { step_id, .. }
             | WorkflowEvent::StepProgress { step_id, .. }
             | WorkflowEvent::NowRecorded { step_id, .. }
             | WorkflowEvent::UuidRecorded { step_id, .. } => Some(step_id),
@@ -268,8 +311,10 @@ impl WorkflowEvent {
             | WorkflowEvent::StepStarted { ts, .. }
             | WorkflowEvent::StepFinished { ts, .. }
             | WorkflowEvent::StepFailed { ts, .. }
-            | WorkflowEvent::StepPaused { ts, .. }
-            | WorkflowEvent::StepResume { ts, .. }
+            | WorkflowEvent::SignalAwaited { ts, .. }
+            | WorkflowEvent::ApprovalRequested { ts, .. }
+            | WorkflowEvent::SignalResolved { ts, .. }
+            | WorkflowEvent::ApprovalResolved { ts, .. }
             | WorkflowEvent::StepProgress { ts, .. }
             | WorkflowEvent::Custom { ts, .. }
             | WorkflowEvent::NowRecorded { ts, .. }
@@ -291,8 +336,10 @@ impl WorkflowEvent {
             WorkflowEvent::StepStarted { .. } => "STEP_STARTED",
             WorkflowEvent::StepFinished { .. } => "STEP_FINISHED",
             WorkflowEvent::StepFailed { .. } => "STEP_FAILED",
-            WorkflowEvent::StepPaused { .. } => "STEP_PAUSED",
-            WorkflowEvent::StepResume { .. } => "STEP_RESUME",
+            WorkflowEvent::SignalAwaited { .. } => "SIGNAL_AWAITED",
+            WorkflowEvent::ApprovalRequested { .. } => "APPROVAL_REQUESTED",
+            WorkflowEvent::SignalResolved { .. } => "SIGNAL_RESOLVED",
+            WorkflowEvent::ApprovalResolved { .. } => "APPROVAL_RESOLVED",
             WorkflowEvent::StepProgress { .. } => "STEP_PROGRESS",
             WorkflowEvent::Custom { .. } => "CUSTOM",
             WorkflowEvent::NowRecorded { .. } => "NOW_RECORDED",
@@ -357,11 +404,8 @@ pub fn fold_step_states(events: &[WorkflowEvent]) -> HashMap<String, StepState> 
                 st.error = Some(error.clone());
                 st.finished_at = Some(*ts);
             }
-            WorkflowEvent::StepPaused {
-                step_id,
-                ts,
-                due_at,
-                ..
+            WorkflowEvent::SignalAwaited {
+                step_id, ts, ..
             } => {
                 let st = states.entry(step_id.clone()).or_default();
                 // 泊车不降级已完成/已失败的步骤：interim-goal 的泊车
@@ -371,15 +415,38 @@ pub fn fold_step_states(events: &[WorkflowEvent]) -> HashMap<String, StepState> 
                     st.status = StepStatus::Paused;
                 }
                 st.started_at = st.started_at.or(Some(*ts));
-                st.finished_at = due_at.or(st.finished_at);
+                if let WorkflowEvent::SignalAwaited { deadline: Some(d), .. } = ev {
+                    st.finished_at = Some(*d);
+                }
             }
-            WorkflowEvent::StepResume {
+            WorkflowEvent::ApprovalRequested { step_id, ts, .. } => {
+                let st = states.entry(step_id.clone()).or_default();
+                if st.status != StepStatus::Success && st.status != StepStatus::Failed {
+                    st.status = StepStatus::Paused;
+                }
+                st.started_at = st.started_at.or(Some(*ts));
+            }
+            WorkflowEvent::SignalResolved {
                 step_id, payload, ..
             } => {
                 // A delivered signal exposes its payload as the paused step's
                 // derived result; the step stays `Paused` in the projection.
                 let st = states.entry(step_id.clone()).or_default();
-                st.result = payload.clone();
+                st.result = Some(payload.clone());
+            }
+            WorkflowEvent::ApprovalResolved {
+                step_id,
+                approved,
+                feedback,
+                ..
+            } => {
+                // 审批决定是结构化的（对齐上游 `APPROVAL_RESOLVED`：无 payload）。
+                // 投影成 `{approved, feedback}` 供观察者与 schema 校验使用。
+                let st = states.entry(step_id.clone()).or_default();
+                st.result = Some(serde_json::json!({
+                    "approved": approved,
+                    "feedback": feedback,
+                }));
             }
             _ => {}
         }

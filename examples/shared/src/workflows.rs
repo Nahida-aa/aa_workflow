@@ -380,7 +380,7 @@ pub fn approval_order() -> WorkflowDefinition<ApprovalOrderInput, serde_json::Va
                     .approve("review", "amount exceeds no-approval threshold")
                     .await?;
                 let approved = decision
-                    .get("ok")
+                    .get("approved")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 if !approved {
@@ -521,7 +521,7 @@ pub fn refund() -> WorkflowDefinition<RefundInput, serde_json::Value> {
                 .approve("refund-policy", "refund needs manager approval")
                 .await?;
             let approved = decision
-                .get("ok")
+                .get("approved")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             if !approved {
@@ -673,7 +673,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, LazyLock};
     use std::time::Duration;
-    use aa_workflow_core::{InMemoryStore, RunStatus, RunStore, RunWorkflowOptions, WorkflowDefinition, WorkflowEvent, run_workflow, signal_event, signal_run};
+    use aa_workflow_core::{InMemoryStore, RunStatus, RunStore, RunWorkflowOptions, WorkflowDefinition, WorkflowEvent, run_workflow, signal_approval, signal_event, signal_run};
 
     /// 序列化共享全局网关状态的测试（tokio 各 test 默认并行跑）。
     static GATEWAY_TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
@@ -726,7 +726,33 @@ mod tests {
             .run_id
             .clone()
             .expect("测试应显式指定 run_id");
-        signal_run(store.as_ref(), &run_id, step_id, payload).unwrap();
+        // 按挂起类型分派：审批走 signal_approval（结构化决定，无 payload），
+        // 信号走 signal_run。两条路都过闸——没泊在该 step 上就报错。
+        let is_approval = store.get_events(&run_id).unwrap().iter().any(|e| {
+            matches!(e, WorkflowEvent::ApprovalRequested { step_id: id, .. } if id == step_id)
+        });
+        if is_approval {
+            // 测试 payload 用 \`ok\` 表示批准与否；也认对齐后的 \`approved\`。
+            let approved = payload
+                .get("approved")
+                .or_else(|| payload.get("ok"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            let feedback = payload
+                .get("feedback")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            signal_approval(
+                store.as_ref(),
+                &run_id,
+                step_id,
+                approved,
+                feedback.as_deref(),
+            )
+            .unwrap();
+        } else {
+            signal_run(store.as_ref(), &run_id, step_id, payload).unwrap();
+        }
         run_workflow(opts(wf.clone().into(), store.clone()))
             .outcome().await
             .unwrap()
@@ -839,7 +865,10 @@ mod tests {
         )
         .await;
         assert_eq!(out.status, RunStatus::Finished);
-        assert_eq!(out.output, Some(serde_json::json!({ "ok": true })));
+        assert_eq!(
+            out.output,
+            Some(serde_json::json!({ "approved": true, "feedback": null }))
+        );
 
         let evs = store.get_events("approve:r").unwrap();
         assert_eq!(finished_count(&evs, "draft"), 1);
@@ -847,7 +876,7 @@ mod tests {
         assert_eq!(
             evs.iter()
                 .filter(
-                    |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "review")
+                    |e| matches!(e, WorkflowEvent::SignalAwaited { step_id, .. } | WorkflowEvent::ApprovalRequested { step_id, .. } if step_id == "review")
                 )
                 .count(),
             1
@@ -855,7 +884,7 @@ mod tests {
         assert_eq!(
             evs.iter()
                 .filter(
-                    |e| matches!(e, WorkflowEvent::StepResume { step_id, .. } if step_id == "review")
+                    |e| matches!(e, WorkflowEvent::SignalResolved { step_id, .. } | WorkflowEvent::ApprovalResolved { step_id, .. } if step_id == "review")
                 )
                 .count(),
             1
@@ -893,7 +922,7 @@ mod tests {
         let ready_sleep = events
             .iter()
             .filter(
-                |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "ready"),
+                |e| matches!(e, WorkflowEvent::SignalAwaited { step_id, .. } | WorkflowEvent::ApprovalRequested { step_id, .. } if step_id == "ready"),
             )
             .count();
         assert_eq!(ready_sleep, 1, "readyAt 定时闸门睡过一次");
@@ -928,7 +957,7 @@ mod tests {
         assert!(
             !events
                 .iter()
-                .any(|e| matches!(e, WorkflowEvent::StepPaused { .. })),
+                .any(|e| matches!(e, WorkflowEvent::SignalAwaited { .. } | WorkflowEvent::ApprovalRequested { .. })),
             "未超阈值不应有暂停"
         );
     }
@@ -981,13 +1010,13 @@ mod tests {
             let paused = events
                 .iter()
                 .filter(
-                    |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == step),
+                    |e| matches!(e, WorkflowEvent::SignalAwaited { step_id, .. } | WorkflowEvent::ApprovalRequested { step_id, .. } if step_id == step),
                 )
                 .count();
             let resumed = events
                 .iter()
                 .filter(
-                    |e| matches!(e, WorkflowEvent::StepResume { step_id, .. } if step_id == step),
+                    |e| matches!(e, WorkflowEvent::SignalResolved { step_id, .. } | WorkflowEvent::ApprovalResolved { step_id, .. } if step_id == step),
                 )
                 .count();
             assert_eq!(paused, 1, "{step} 暂停一次");
@@ -1082,7 +1111,7 @@ mod tests {
             .run_id("refund:q")
         };
 
-        // 两次 approve → 最后一次 sleep 由 `drive_through_timers` 自动投递。
+        // 两次 approve → 中间的 sleep 由 `drive_through_timers` 自动投递。
         let out = drive_to_pause(&store, &wf, opts).await;
         assert_eq!(out, RunStatus::Paused);
         let out = drive_after_signal(
@@ -1094,13 +1123,12 @@ mod tests {
         )
         .await;
         assert_eq!(out.status, RunStatus::Paused);
-        signal_run(
-            store.as_ref(),
-            "refund:q",
-            "refund-policy",
-            serde_json::json!({ "ok": true }),
-        )
-        .unwrap();
+        // 此刻泊在 `refund-wait`（sleep）上——审批还没轮到，**不能提前投**
+        // （core 的 signal_approval 过闸：没泊在该审批上就报错）。先把 timer
+        // 驱动到泊上 `refund-policy`。
+        let out = drive_through_timers(&store, &wf, opts).await;
+        assert_eq!(out.status, RunStatus::Paused, "timer 后应泊在 refund-policy");
+        signal_approval(store.as_ref(), "refund:q", "refund-policy", true, None).unwrap();
         let out = drive_through_timers(&store, &wf, opts).await;
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(out.output.clone().unwrap()["status"], "refunded");
@@ -1110,7 +1138,7 @@ mod tests {
         let timer_sleep = events
             .iter()
             .filter(
-                |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "refund-wait"),
+                |e| matches!(e, WorkflowEvent::SignalAwaited { step_id, .. } | WorkflowEvent::ApprovalRequested { step_id, .. } if step_id == "refund-wait"),
             )
             .count();
         assert_eq!(timer_sleep, 1, "定时闸门睡过一次");
@@ -1419,13 +1447,7 @@ mod tests {
 
         // 进程 B：同 run_id 重跑 → state 从 initialize 重建为 5，`bump-inside`
         // 已被 checkpoint 记录 → 闭包跳过（+1 丢失），只剩闭包之外的 mutation。
-        signal_run(
-            store.as_ref(),
-            "state:edge",
-            "gate",
-            serde_json::json!({ "ok": true }),
-        )
-        .unwrap();
+        signal_approval(store.as_ref(), "state:edge", "gate", true, None).unwrap();
         let out = run_workflow(
             RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
                 .input(serde_json::json!({ "amount": 5 }))
@@ -1484,6 +1506,7 @@ mod tests {
             store.as_ref(),
             "event:gate",
             "price-settled",
+            None,
             serde_json::json!({ "px": 62000 }),
         )
         .unwrap();
@@ -1514,7 +1537,7 @@ mod tests {
     }
 
     /// wait_for_event 挂起（等价于崩溃——挂起时进程确实没在跑）→ 投递后同
-    /// run_id 重跑：StepResume 已在日志，按名信号重放即可完成，不重新挂起。
+    /// run_id 重跑：SignalResolved 已在日志，按名信号重放即可完成，不重新挂起。
     #[tokio::test]
     async fn event_gate_named_signal_replays_after_crash() {
         let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
@@ -1529,6 +1552,7 @@ mod tests {
             store.as_ref(),
             "event:crash",
             "price-settled",
+            None,
             serde_json::json!({ "px": 3000 }),
         )
         .unwrap();
@@ -1545,7 +1569,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .filter(
-                    |e| matches!(e, WorkflowEvent::StepPaused { step_id, .. } if step_id == "price-wait")
+                    |e| matches!(e, WorkflowEvent::SignalAwaited { step_id, .. } | WorkflowEvent::ApprovalRequested { step_id, .. } if step_id == "price-wait")
                 )
                 .count(),
             1,

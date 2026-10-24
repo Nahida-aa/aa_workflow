@@ -9,9 +9,9 @@
 //! （25ms，见 `engine::exec_pause`），同一次 drive 内自动恢复——因此：
 //!
 //! - 本 driver 的 `deliver_signal` / `deliver_timer` 仍按上游做四态 bookkeeping
-//!   并追加 `StepResume`，然后**尝试认领并驱动**；若原 drive 仍存活（持有
+//!   并追加 `SignalResolved`，然后**尝试认领并驱动**；若原 drive 仍存活（持有
 //!   lease），认领会得到 `NotClaimable`——而存活的 drive 会在 25ms 内拾取
-//!   `StepResume` 继续跑。两种形态殊途同归：信号最终被处理。
+//!   `SignalResolved` 继续跑。两种形态殊途同归：信号最终被处理。
 //! - serverless（drive 已死）时认领成功，由本次 drive 完成剩余工作。
 //!
 //! # 与上游的另两处差异
@@ -197,14 +197,14 @@ pub struct WorkflowRuntimeStartRunArgs {
     pub workflow_id: WorkflowId,
     pub run_id: RunId,
     pub input: serde_json::Value,
-    /// 临时目标名单（上游 types.ts:425 `interimGoals`）：名单内 step 全部
+    /// 临时目标名单（f2-lite 自有，上游未采纳；f2-lite `runtime/types.ts:430`）：名单内 step 全部
     /// checkpoint 后经保留信号 `__interim-goal` 泊车（`kind: Paused`）。
     /// **续驱走 `deliver_signal("__interim-goal")`**——重复 `start_run` 对
     /// 非 Queued 的 run 返回 NotClaimable 不驱动（幂等边界）；续驱不带新
-    /// 名单（上游 deliverSignal args 亦无此字段），要扩展泊车边界走 core
+    /// 名单（上游无 interimGoals 概念，deliverSignal args 自然没有），要扩展泊车边界走 core
     /// 直驱（名单是 per-drive 的，core 层有专测）。
     pub interim_goals: Option<Vec<String>>,
-    /// redo 计划（上游 types.ts:425 `reexecuteFrom`，INVALIDATE 侧）：全新
+    /// redo 计划（f2-lite 自有，上游未采纳；f2-lite `runtime/types.ts:425`，INVALIDATE 侧）：全新
     /// run 首驱前导入源 run 幸存 checkpoint，失效名单重跑。语义见
     /// [`aa_workflow_core::ReexecuteFrom`]；resume 驱动被 core 忽略（fresh-only）。
     pub reexecute_from: Option<aa_workflow_core::ReexecuteFrom>,
@@ -527,7 +527,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         .await
     }
 
-    /// 投递外部信号：四态 bookkeeping → 追加 `StepResume` → 尝试驱动。
+    /// 投递外部信号：四态 bookkeeping → 追加 `SignalResolved` → 尝试驱动。
     pub async fn deliver_signal(
         &self,
         args: WorkflowRuntimeDeliverSignalArgs,
@@ -548,7 +548,8 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
             now,
         })?;
 
-        // 桥给 core：signal_event 按 pause 点的 signal_name 追加 StepResume。
+        // 桥给 core：signal_event 按 pause 点的 name 追加 SignalResolved，
+        // 并把投递的 signal_id 一并记进事件（上游幂等令牌）。
         let run_store = create_run_store_adapter(Arc::clone(&self.config.store));
         match &delivered {
             DeliverSignalResult::Delivered { run } => {
@@ -557,6 +558,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                     run_store.as_ref(),
                     &args.run_id,
                     &args.name,
+                    Some(args.signal_id.as_str()),
                     args.payload.clone(),
                 )?;
                 let workflow = self.load_workflow(&workflow_id)?;
@@ -614,7 +616,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         }
     }
 
-    /// 投递审批决定：四态 bookkeeping → 追加 `StepResume`（pause key =
+    /// 投递审批决定：四态 bookkeeping → 追加 `SignalResolved`（pause key =
     /// approval_id）→ 尝试驱动。
     pub async fn deliver_approval(
         &self,
@@ -663,13 +665,15 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         };
 
         let run_store = create_run_store_adapter(Arc::clone(&self.config.store));
-        // 我们的 core：approve 的 pause key 即 approval_id，payload 是 approve
-        // 调用的返回值（决定内容）。
-        aa_workflow_core::signal_run(
+        // 我们的 core：approve 的 pause key 即 approval_id。产出
+        // `ApprovalResolved`（对齐上游 `APPROVAL_RESOLVED`，无 payload）——
+        // 由 core 过闸：没泊在这个审批上就报 SignalLost（上游 approval_lost）。
+        aa_workflow_core::signal_approval(
             run_store.as_ref(),
             &args.run_id,
             &args.approval.approval_id,
-            serde_json::to_value(&args.approval)?,
+            args.approval.approved,
+            args.approval.feedback.as_deref(),
         )?;
 
         let workflow = self.load_workflow(&workflow_id)?;
@@ -978,7 +982,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         );
 
         // 驱动（core）。signal / approval 的恢复在进入 drive 前已经以
-        // StepResume 落盘，重放时由 exec_pause 拾取。
+        // SignalResolved 落盘，重放时由 exec_pause 拾取。
         let mut opts = RunWorkflowOptions::new(
             Arc::new(args.workflow.clone()),
             run_store_for_core(&self.config),
@@ -996,7 +1000,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         // 所以 threadId 只要在这一处转发就够（上游三个 args 各带一个，
         // runtime-driver.ts:115/182/248 同样都往 driveClaimedRun 传）。
         opts = opts.thread_id(args.thread_id.clone());
-        // startRun 的两个 f2-lite 参数（上游 types.ts:425）：名单透传给 core，
+        // startRun 的两个 f2-lite 参数（f2-lite `runtime/types.ts:425/430`）：名单透传给 core，
         // 语义（fresh-only / 转移检查 / 封闭性归调用者）全部在 core。
         if let Some(goals) = &args.interim_goals {
             opts = opts.interim_goals(goals.clone());
@@ -1071,7 +1075,7 @@ struct DriveArgs<'a> {
     /// 全新启动时的 input；resume 时为 `None`（input 已在 store 里）。
     input: Option<serde_json::Value>,
     /// 临时目标名单——start_run 透传；deliver_* / sweep 恒 `None`（它们的
-    /// 续驱名单走重复 `start_run`，上游 deliverSignal args 不带 interimGoals）。
+    /// 续驱名单走重复 `start_run`，上游无 interimGoals、deliverSignal args 自然不带）。
     interim_goals: Option<Vec<String>>,
     /// redo 计划——start_run 透传；其余入口恒 `None`（core 对 resume 驱动
     /// 本来就忽略 reexecute_from，fresh-only）。
@@ -1583,7 +1587,7 @@ mod driver_tests {
     /// 信号投递：`deliver_signal` 自己认领 + 驱动到完成。
     ///
     /// D3 之后挂起会**释放** lease（drive 已返回），所以 deliver 能直接 claim，
-    /// 不用再等一个存活的自轮询 drive 来拾取 StepResume。
+    /// 不用再等一个存活的自轮询 drive 来拾取 SignalResolved。
     #[tokio::test]
     async fn deliver_signal_resumes_paused_run() {
         let fx = runtime_with("waiter", waiting_workflow());
@@ -2005,7 +2009,7 @@ mod driver_tests {
     /// 重放完成。这是 serverless 形态的核心路径。
     ///
     /// 「持有者已死」用**直接构造状态**模拟（create + 存 Paused 信封 + 落
-    /// StepPaused 事件 + 登记 timer），不通过 abort 真实 drive——因为 abort
+    /// SignalAwaited 事件 + 登记 timer），不通过 abort 真实 drive——因为 abort
     /// 父任务不会杀死其内部 spawn 的心跳任务，心跳会永远续租（上游 serverless
     /// 无此问题：进程死 = 一切皆死）。该约束记录在 driver 模块文档。
     #[tokio::test]
@@ -2016,7 +2020,7 @@ mod driver_tests {
         // 直接构造「死进程遗留」的挂起状态：
         // 1. execution（runtime 视角：Paused + __timer 等待）
         // 2. RunState 信封（core 视角）
-        // 3. 事件日志：before-sleep 完成 + sleep 挂起（StepPaused）
+        // 3. 事件日志：before-sleep 完成 + sleep 挂起（SignalAwaited）
         // 4. 到期 timer
         fx.mem
             .create_run(CreateRunArgs {
@@ -2068,13 +2072,12 @@ mod driver_tests {
                         attempts: vec![],
                         meta: None,
                     },
-                    WorkflowEvent::StepPaused {
+                    WorkflowEvent::SignalAwaited {
                         ts: now,
                         run_id: "sleep:1".into(),
                         step_id: "hold".into(),
-                        signal_name: "__timer".into(),
-                        due_at: Some(now + 30),
-                        reason: "sleep".into(),
+                        name: "__timer".into(),
+                        deadline: Some(now + 30),
                         meta: None,
                     },
                 ],
@@ -2102,7 +2105,7 @@ mod driver_tests {
             .unwrap();
         assert_eq!(sweep.timers.len(), 1, "应投递一个到期 timer");
 
-        // 恢复后 run 完成（重放短路 before-sleep，sleep 因 StepResume 立即过）。
+        // 恢复后 run 完成（重放短路 before-sleep，sleep 因 SignalResolved 立即过）。
         let run = fx.mem.load_run("sleep:1").unwrap().unwrap();
         assert_eq!(run.status, WorkflowExecutionStatus::Finished);
         let before_runs = fx
@@ -2174,7 +2177,7 @@ mod driver_tests {
         assert!(!sweep.deadline_reached);
     }
 
-    /// startRun 的两个 f2-lite 参数（上游 types.ts:425）经 runtime 透传到 core：
+    /// startRun 的两个 f2-lite 参数（f2-lite `runtime/types.ts:425/430`）经 runtime 透传到 core：
     /// interimGoals 泊车 + 重复 start_run 续驱；reexecuteFrom redo。名单语义
     /// 本身（fresh-only / 转移检查 / 封闭性归调用者）在 core 有专测，这里只证
     /// 「runtime 门带得动参数」。

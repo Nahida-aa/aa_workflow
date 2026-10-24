@@ -5,7 +5,7 @@ title: RunWorkflowOptions
 
 # Struct: RunWorkflowOptions
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:120`](../../../packages/workflow_core/src/engine/run_workflow.rs#L120)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:121`](../../../packages/workflow_core/src/engine/run_workflow.rs#L121)
 
 ## Fields
 
@@ -15,7 +15,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:120`](../../../p
 workflow: AnyWorkflowDefinition
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:127`](../../../packages/workflow_core/src/engine/run_workflow.rs#L127)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:128`](../../../packages/workflow_core/src/engine/run_workflow.rs#L128)
 
 要驱动的 workflow。**必填**（由 [`Self::new`](RunWorkflowOptions.md) 保证）。
 
@@ -33,7 +33,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:127`](../../../p
 run_store: Arc<dyn RunStore>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:129`](../../../packages/workflow_core/src/engine/run_workflow.rs#L129)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:130`](../../../packages/workflow_core/src/engine/run_workflow.rs#L130)
 
 事件日志 / run 元数据的落盘位置。**必填**（由 [`Self::new`](RunWorkflowOptions.md) 保证）。
 
@@ -46,7 +46,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:129`](../../../p
 run_id: Option<RunId>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:132`](../../../packages/workflow_core/src/engine/run_workflow.rs#L132)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:133`](../../../packages/workflow_core/src/engine/run_workflow.rs#L133)
 
 复用该 run_id ⇒ resume（成功 step 短路、失败 rethrow）。
 
@@ -59,7 +59,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:132`](../../../p
 input: Value
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:134`](../../../packages/workflow_core/src/engine/run_workflow.rs#L134)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:135`](../../../packages/workflow_core/src/engine/run_workflow.rs#L135)
 
 run 输入。默认 `Value::Null`。
 
@@ -72,7 +72,7 @@ run 输入。默认 `Value::Null`。
 interim_goals: Option<Vec<String>>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:136`](../../../packages/workflow_core/src/engine/run_workflow.rs#L136)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:137`](../../../packages/workflow_core/src/engine/run_workflow.rs#L137)
 
 命中即停（本地扩展；上游用 handler 内 early `return`）。
 
@@ -85,9 +85,9 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:136`](../../../p
 reexecute_from: Option<ReexecuteFrom>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:141`](../../../packages/workflow_core/src/engine/run_workflow.rs#L141)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:142`](../../../packages/workflow_core/src/engine/run_workflow.rs#L142)
 
-re-execute 计划（INVALIDATE 侧，上游 `reexecuteFrom`）。只在**全新
+re-execute 计划（INVALIDATE 侧，`reexecuteFrom`，f2-lite 自有）。只在**全新
 run 的 start 路径**生效：resume 驱动忽略它（重放短路已覆盖旧
 checkpoint，重复导入会双写）；`source_run_id == run_id`、或源 run
 不存在时报错（`run_lost`）。语义见 [`ReexecuteFrom`](ReexecuteFrom.md)。
@@ -101,7 +101,7 @@ checkpoint，重复导入会双写）；`source_run_id == run_id`、或源 run
 attach: bool
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:153`](../../../packages/workflow_core/src/engine/run_workflow.rs#L153)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:154`](../../../packages/workflow_core/src/engine/run_workflow.rs#L154)
 
 只读回放一个已存在的 run（上游 `attach`，`run-workflow.ts:48` / `:371`）。
 
@@ -124,7 +124,7 @@ start 和 resume——照抄会把每次 resume 都变成 attach；另外重驱�
 deadline: Option<i64>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:157`](../../../packages/workflow_core/src/engine/run_workflow.rs#L157)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:158`](../../../packages/workflow_core/src/engine/run_workflow.rs#L158)
 
 本次 drive 的绝对 UTC ms 预算（上游 `deadline`）。设了之后
 `time_remaining()` / `should_yield()` / `ctx.yield_()` 才生效；
@@ -139,7 +139,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:157`](../../../p
 min_yield_remaining_ms: Option<u64>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:159`](../../../packages/workflow_core/src/engine/run_workflow.rs#L159)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:160`](../../../packages/workflow_core/src/engine/run_workflow.rs#L160)
 
 剩余预算低于此值时 `should_yield()` 翻真（上游 `minYieldRemainingMs`，默认 1000）。
 
@@ -152,7 +152,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:159`](../../../p
 yield_resume_at: Option<i64>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:161`](../../../packages/workflow_core/src/engine/run_workflow.rs#L161)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:162`](../../../packages/workflow_core/src/engine/run_workflow.rs#L162)
 
 `ctx.yield_()` 的重新唤醒时刻（上游 `yieldResumeAt`；默认每次调用「now+1ms」）。
 
@@ -165,7 +165,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:161`](../../../p
 thread_id: Option<String>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:166`](../../../packages/workflow_core/src/engine/run_workflow.rs#L166)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:167`](../../../packages/workflow_core/src/engine/run_workflow.rs#L167)
 
 客户端关联用的线程标识（上游 `threadId`，`run-workflow.ts:52`）。
 
@@ -181,7 +181,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:166`](../../../p
 publish: Option<PublisherFn>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:227`](../../../packages/workflow_core/src/engine/run_workflow.rs#L227)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:228`](../../../packages/workflow_core/src/engine/run_workflow.rs#L228)
 
 每个事件都会回调（上游 `publish`）——host 可以接到 Redis / Durable Streams
 之类的扇出通道，让别的节点能 tail 这个 run。
@@ -252,7 +252,7 @@ the run — swallow and continue."*，`run-workflow.ts:128-134`）：宿主代�
 pub fn new<impl Into<AnyWorkflowDefinition>: Into>(workflow: impl ?, run_store: Arc<dyn RunStore>) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:235`](../../../packages/workflow_core/src/engine/run_workflow.rs#L235)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:236`](../../../packages/workflow_core/src/engine/run_workflow.rs#L236)
 
 **必填项在这里**：`workflow` + `run_store`。构造完这两个就一定齐了。
 `workflow` 收 `impl Into<AnyWorkflowDefinition>`，所以三种写法都直接可用：
@@ -282,7 +282,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:235`](../../../p
 pub fn thread_id(self, v: Option<String>) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:256`](../../../packages/workflow_core/src/engine/run_workflow.rs#L256)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:257`](../../../packages/workflow_core/src/engine/run_workflow.rs#L257)
 
 客户端关联标识（上游 `threadId`），只写进 `RUN_STARTED`。
 
@@ -305,7 +305,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:256`](../../../p
 pub fn input(self, v: Value) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:262`](../../../packages/workflow_core/src/engine/run_workflow.rs#L262)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:263`](../../../packages/workflow_core/src/engine/run_workflow.rs#L263)
 
 run 输入。
 
@@ -328,7 +328,7 @@ run 输入。
 pub fn run_id<impl Into<String>: Into>(self, v: impl ?) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:268`](../../../packages/workflow_core/src/engine/run_workflow.rs#L268)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:269`](../../../packages/workflow_core/src/engine/run_workflow.rs#L269)
 
 复用该 run_id ⇒ resume。
 
@@ -351,7 +351,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:268`](../../../p
 pub fn interim_goals(self, v: Vec<String>) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:274`](../../../packages/workflow_core/src/engine/run_workflow.rs#L274)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:275`](../../../packages/workflow_core/src/engine/run_workflow.rs#L275)
 
 命中即停。
 
@@ -374,7 +374,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:274`](../../../p
 pub fn reexecute_from(self, rf: ReexecuteFrom) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:281`](../../../packages/workflow_core/src/engine/run_workflow.rs#L281)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:282`](../../../packages/workflow_core/src/engine/run_workflow.rs#L282)
 
 re-execute 计划（INVALIDATE 侧）：新 run 起步时导入源 run 幸存的
 checkpoint。语义见 [`ReexecuteFrom`](ReexecuteFrom.md)；只在全新 run 的 start 路径生效。
@@ -398,7 +398,7 @@ checkpoint。语义见 [`ReexecuteFrom`](ReexecuteFrom.md)；只在全新 run �
 pub fn attach(self) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:287`](../../../packages/workflow_core/src/engine/run_workflow.rs#L287)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:288`](../../../packages/workflow_core/src/engine/run_workflow.rs#L288)
 
 只读回放已存在的 run（上游 `attach`）。见 [`RunWorkflowOptions::attach`](RunWorkflowOptions.md)。
 
@@ -415,7 +415,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:287`](../../../p
 pub fn deadline(self, v: i64) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:293`](../../../packages/workflow_core/src/engine/run_workflow.rs#L293)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:294`](../../../packages/workflow_core/src/engine/run_workflow.rs#L294)
 
 设置本次 drive 的绝对 UTC ms 预算。
 
@@ -438,7 +438,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:293`](../../../p
 pub fn min_yield_remaining(self, v: u64) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:299`](../../../packages/workflow_core/src/engine/run_workflow.rs#L299)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:300`](../../../packages/workflow_core/src/engine/run_workflow.rs#L300)
 
 剩余预算低于此值时允许让出（上游 `minYieldRemainingMs`）。
 
@@ -461,7 +461,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:299`](../../../p
 pub fn yield_resume_at(self, v: i64) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:305`](../../../packages/workflow_core/src/engine/run_workflow.rs#L305)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:306`](../../../packages/workflow_core/src/engine/run_workflow.rs#L306)
 
 `ctx.yield_()` 的重新唤醒时刻。
 
@@ -484,7 +484,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:305`](../../../p
 pub fn publish(self, v: Option<Arc<dyn Fn(&RunId, WorkflowEvent) + Send + Sync>>) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:319`](../../../packages/workflow_core/src/engine/run_workflow.rs#L319)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:320`](../../../packages/workflow_core/src/engine/run_workflow.rs#L320)
 
 事件回调（上游 `publish`）。收 `Option`，便于直接对接旧的四参数签名。
 
@@ -518,7 +518,7 @@ where
     Fut: Future + Send + 'static
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:343`](../../../packages/workflow_core/src/engine/run_workflow.rs#L343)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:344`](../../../packages/workflow_core/src/engine/run_workflow.rs#L344)
 
 异步事件回调（上游 `publish` 的 `Promise<void>` 那一支）。
 
@@ -554,7 +554,7 @@ Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:343`](../../../p
 pub fn no_publish(self) -> Self
 ```
 
-Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:355`](../../../packages/workflow_core/src/engine/run_workflow.rs#L355)
+Defined in: [`packages/workflow_core/src/engine/run_workflow.rs:356`](../../../packages/workflow_core/src/engine/run_workflow.rs#L356)
 
 清掉事件回调。
 

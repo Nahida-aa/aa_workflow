@@ -43,8 +43,8 @@ Defined in: [`packages/workflow_core/src/event.rs:14`](../../../packages/workflo
 
 Defined in: [`packages/workflow_core/src/event.rs:17`](../../../packages/workflow_core/src/event.rs#L17)
 
-The run is parked at a durable wait point (`StepPaused`), e.g. an
-approval or a sleep; it resumes when a `StepResume` arrives.
+The run is parked at a durable wait point (`SignalAwaited`), e.g. an
+approval or a sleep; it resumes when a `SignalResolved` arrives.
 
 ## Trait Implementations
 

@@ -16,11 +16,41 @@
 | --- | --- | --- | --- |
 | runtime 四方法面 | startRun/deliverSignal/deliverApproval/sweep | ✅ 已对齐（runtime_driver.rs 同名四方法） | 无 |
 | store 契约 | WorkflowExecutionStore 19 方法 | 23 方法（store_contract.rs） | 形态差异已对齐 |
-| 信号 | bufferSignals 收件箱（早到持久化+原子消费） | core `signal_run` 收件箱 ✅（早到信号测试钉死）；runtime 名字投递的 Running 缓冲为独立 feature | 差距一项（见 Phase 3） |
+| 信号 | bufferSignals 收件箱（**runtime 层 opt-in**，早到持久化 + 原子消费 + signalId 去重；需 store `bufferSignal`/`consumeBufferedSignal`，`__timer` 双闸豁免） | core 层收件箱 ✅（零新机制——信号即事件，`early_signal_run_acts_as_inbox` 钉死）；runtime 层与上游同构且更严（未等待即 `NotWaiting`） | 差距三项（core 层恒开不可关 / 只积累不去重 / 无 `__timer` 豁免，见 Phase 3 含层对应表） |
 | step 重试 | `retry.durable`（attempt/deadline 持久化，sweep 恢复） | ✅ 已实现（`RetryPolicy.durable` + STEP_RETRY_SCHEDULED 泊车/续驱，c1c7ddf） | 无 |
 | 补偿 | `ctx.compensate` + COMPENSATION_STARTED + 逆序 undo | ✅ 已实现（`ctx.compensate` 内存登记 + 重放重建 + 逆序 undo，c1c7ddf） | 无 |
-| checkpoint 导入/泊车 | reexecuteFrom / interimGoals（**上游已原生采纳**，run-workflow.ts:71-84） | ✅ 已实现（`reexecute_from` + `StepFinished.meta.imported_from` 溯源；`interim_goals` 泊车 a9a7424） | 无 |
+| checkpoint 导入/泊车 | reexecuteFrom / interimGoals（**f2-lite 自有，上游未采纳**；`f2-lite` 分支 `run-workflow.ts:71-84`） | ✅ 已实现（`reexecute_from` + `StepFinished.meta.imported_from` 溯源；`interim_goals` 泊车 a9a7424） | 无 |
 | 图原语 | ——（引擎涌现图） | aa_graph（图中性原语库） | Rust 侧反而领先 |
+
+> **溯源更正（2026-10-15）**：表中「checkpoint 导入/泊车」一行曾写作
+> 「上游已原生采纳，`run-workflow.ts:71-84`」——**这是错的**。
+>
+> **先明确「上游」指谁**。本仓的对齐基线是 `0971b4c`（= `origin/taren/durable-
+> recovery`，PR #19，**不是** `origin/main`）——这正是本文档标题所写的对齐目标。
+> 推导链（已逐个 hash 核验）：
+>
+> ```text
+> origin/main              b928717  2026-07-21  上游 main（已停滞）
+>   └─ taren/durable-recovery  0971b4c  2026-09-22  **本仓基线**（PR #19）
+>        ├─ fork/taren/...     0971b4c            fork 与基线同 hash，零分叉
+>        └─ f2-lite            498a882  2026-10-04  基线 + 6 个本地提交
+> ```
+>
+> `0971b4c` 是 `f2-lite` 的祖先、反向差 0 提交；fork 那支与基线**同 hash**。
+> 所以「f2-lite 里凡是 `0971b4c` 没有的，必是本地工作」这条判据成立。
+> 对 `reexecuteFrom` / `interimGoals` / `__interim-goal` 三个关键词核验：
+> `origin/main`（`b928717`）**零命中**、`0971b4c`（基线本身）**也零命中**——
+> 不是"main 还没合"，是**基线上根本不存在**。只存在于 f2-lite 那 6 个提交。
+> （`run-workflow.ts:80` / `:91`，runtime 侧 `runtime/types.ts:425` / `:430`），
+> 是本仓**自有设计**。成因：当时工作区 checkout 在 `f2-lite`，读本地文件时
+> 把「自己的注释」当成了上游（`f2-lite` 的注释字面写着 `F2-lite re-execute
+> plan`，被反向读成「上游引用 f2-lite」）。
+>
+> **实际影响**：redo / 泊车两轴**没有上游背书**——API 形状（`unsafe_invalidate`
+> 命名、`meta.imported_from` 的 index 语义）归本仓所有，可自由改；同时也没有
+> 上游测试兜底，`engine.rerun.test.ts` 是 `f2-lite` 自己的测试。
+> 上游至今**只有 undo 轴**（`taren/durable-recovery` 的 compensate），
+> 「上游两轴都有」的说法不成立。
 
 确认：Rust 引擎**零补偿机制**（`grep -rn compensate packages/workflow_core/src`
 零命中）；事件系统 `WorkflowEvent` 已有 StepFailed{error, attempts}、
@@ -126,6 +156,48 @@ pause/非 abort → 若 `engine.compensations` 非空 → 逆序执行补偿链 
 - 明确不做（对齐 #19 的范围声明）：无自动过期/大小限制；finished/errored/
   aborted 的信号返回 not-waiting；`__timer` 不可缓冲。
 
+**评估结论（2026-10-15 补记）**：core 层**已经是收件箱，零新机制**。
+
+- `signal_run`（`engine/mod.rs:1033`）**无条件** CAS append `SignalResolved`——
+  不检查 run 是否在等待，早到信号照常落盘；消费点是 replay 的
+  `find_resume`（`engine/mod.rs:899`），从日志短路拾取**首条**匹配。
+- 所以 #19 的核心行为（早到持久化 + 等待点 payload 过墙）由**事件日志天然
+  获得**——信号投递本就是一次普通 CAS append，而上游需要新机制是因为它的
+  信号投递不在事件日志里。`early_signal_run_acts_as_inbox` 已钉死：信号先于
+  run 落盘为日志第一条，驱动到 wait 点时过墙、全程无挂起事件。
+- **层对应（先对齐，别跨层比）**：
+
+  | 层 | 上游 | Rust |
+  | --- | --- | --- |
+  | runtime API | `runtime-driver.ts:49`/`:200` | `runtime_driver.rs:531` |
+  | store 契约 | `runtime-driver.ts:272` `store.deliverSignal` | `in_memory_store.rs:575` |
+  | 引擎消费点 | `run-workflow.ts:1095` `consumeBufferedSignal` | `engine/mod.rs:899` `find_resume` |
+  | core 投递原语 | **不存在**（core 只收 `signalDelivery` 作 resume 入参，`run-workflow.ts:42`） | `signal_run` `:1033` / `signal_event` `:1061` |
+
+  Rust 的 runtime 层与上游同构且**更严**：`deliver_signal` 先过 store 闸
+  （`is_run_waiting_for_signal`，`in_memory_store.rs:188`），未等待即
+  `NotWaiting`；只有 `Delivered` 才桥到 core 的 `signal_event`
+  （`runtime_driver.rs:548-559`）。
+
+- **与 #19 的真实差距**（都是设计差，不是缺功能）：
+  1. **多一层恒开的投递面**：#19 的开关在 runtime（`bufferSignals: true`），
+     Rust 的 runtime 也有闸——但 `signal_run` / `signal_event` 是 **core 直达
+     API，绕过 store 闸也能用**，这一层上游根本没有，也无从谈开关。宿主写错
+     `step_id` 会静默污染日志。
+  2. **只积累、不消费、不去重**：`find_resume` 读首条后条目**滞留日志**
+     （且**不能删**——`SignalResolved` 本身就是让 replay 短路的日志条目，删了崩溃
+     重放就找不到 resume）。真正缺的是上游那层 **signalId 去重**
+     （`in-memory-store.ts:165` 返回 `'duplicate'`）。
+  3. **无 `__timer` 豁免**：#19 在 core
+     （`run-workflow.ts:1095` `name !== '__timer'`）与 store
+     （`in-memory-store.ts:165`）**双闸**；Rust 两边都没有——`is_run_waiting_
+     for_signal` 只比对 `signal_name`，`__timer` 泊车的 run 照样能投递。
+- 注意分层：runtime 的 `deliver_signal` 对没在等的 run 返回 `NotWaiting`
+  （`in_memory_store.rs:584`）是**名字投递路径的既有拒绝**，与 core 的恒开
+  收件箱是两层，别用它论证「core 会拒绝早到信号」。
+- **排期建议**：不必为 Phase 3 写新机制。若要补齐，方向是「加开关 + 消费
+  语义」，**不是**「加收件箱」——收件箱已经有了。
+
 ## 4. Phase 4 — redo / 临时目标（名单透传原语，graph-agnostic）
 
 **核心定位修正**：core 是自由涌现代码——处理器里的步骤不必然构成 DAG（可以
@@ -144,16 +216,17 @@ pause/非 abort → 若 `engine.compensations` 非空 → 逆序执行补偿链 
 
 - `reexecute_from(source_run_id, unsafe_invalidate)`：全新 run 首驱前导入
   源 run 幸存 checkpoint（只导 `STEP_FINISHED`、失败 step 按设计重跑），
-  溯源 `meta.imported_from`（index 以源 run 持久化日志为基准）。参考上游
-  `run-workflow.ts:269-295`（上游已原生采纳 f2-lite 语义）；`StepFinished`
+  溯源 `meta.imported_from`（index 以源 run 持久化日志为基准）。参考
+  `f2-lite` 分支 `run-workflow.ts:269-295`（**本仓自有，上游未采纳**）；
+  `StepFinished`
   因此新增 `meta` 槽（缺省省略，日志形状前后兼容）。resume 驱动忽略、
-  `source_run_id == run_id` 报 validation、源缺失报 `run_lost`（上游
+  `source_run_id == run_id` 报 validation、源缺失报 `run_lost`（f2-lite
   in-memory 对缺失源静默导零，我们显式报错——attach 同款约定）；
 - `interim_goals` 泊车/续驱（a9a7424）：goal 全 checkpoint 后泊车，
   续驱补齐缺席 step。
 
 四个原语各有一个 demo（`packages/workflow_dag/tests/dag_recovery_demo.rs`），
-引擎侧三个场景测试镜像上游 `engine.rerun.test.ts`。
+引擎侧三个场景测试镜像 `f2-lite` `engine.rerun.test.ts`。
 **长期**：INVALIDATED 原语（失效事件 + 重放规则 + 状态转换）——Rust 引擎
 自有，无上游兼容包袱；undo（Phase 1）+ redo（本 Phase）两轴齐备后，
 agent 流水线的失败语义完整。

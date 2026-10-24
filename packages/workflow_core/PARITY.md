@@ -70,7 +70,7 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunWorkflowOptions.r
 | `runtime.minYieldRemainingMs` | `min_yield_remaining()`（缺省 1000） | |
 | `runtime.yieldResumeAt` | `yield_resume_at()` | |
 | `AbortController().cancel()` | `cancel_run(store, run_id)` | run 以 `Aborted` 终局；终态幂等；未知 run → `RunNotFound` |
-| `signalEvent(runId, event, payload)` | `signal_event(store, run_id, name, payload)` | 扫 `StepPaused` 按 `signal_name` 定位投递；无监听者 → `WorkflowError::SignalLost` |
+| `signalEvent(runId, event, payload)` | `signal_event(store, run_id, name, signal_id, payload)` | 扫 `SignalAwaited` 按 `name` 定位投递；无监听者 → `WorkflowError::SignalLost` |
 | 事件名 → 信号映射 | `"__approval"` / `"__timer"` / 用户事件名 | `approve`/`sleep`/`yield` 内部固定通道，用户事件名自定 |
 
 ## 已知待补 / 差异清单

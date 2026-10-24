@@ -185,9 +185,9 @@ where
 Defined in: [`packages/workflow_core/src/define/mod.rs:245`](../../../packages/workflow_core/src/define/mod.rs#L245)
 
 Durable approval wait: pauses the run until [`signal_run`](../functions/signal_run.md)
-delivers a decision for `key`. `reason` is persisted in the `StepPaused`
+delivers a decision for `key`. `reason` is persisted in the `SignalAwaited`
 checkpoint for approvers. Resolves to the signal's payload on success;
-on replay the already-recorded `StepResume` is served from the log.
+on replay the already-recorded `SignalResolved` is served from the log.
 
 #### Parameters
 

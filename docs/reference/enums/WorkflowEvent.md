@@ -91,39 +91,77 @@ Checkpoint (persisted): a step failed terminally.
 
 ***
 
-### StepPaused
+### SignalAwaited
 
 ```rust
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:134`](../../../packages/workflow_core/src/event.rs#L134)
+Defined in: [`packages/workflow_core/src/event.rs:132`](../../../packages/workflow_core/src/event.rs#L132)
 
-Checkpoint (persisted): the run parked at a durable wait point
-(`ctx.approve` / `ctx.sleep` / `ctx.sleep_until` / `ctx.wait_for_event`).
-`step_id` is the deterministic pause key (== the signal id
-[`signal_run`](../functions/signal_run.md) / [`signal_event`](../functions/signal_event.md)
-targets); `signal_name` is the channel the run is parked on
-(`"__timer"` for sleeps, `"__approval"` for approvals, a user event
-name for named waits). `due_at` is `Some` (wall-clock ms) for sleep-like
-waits so a timer host could auto-deliver, `None` for waits that need an
-external decision.
+Checkpoint (persisted): the run parked on a **named signal** wait
+(`ctx.wait_for_event` / `ctx.sleep*`). Aligns with upstream
+`SIGNAL_AWAITED` (`types.ts`, 字段逐字对应)。
+
+`name` is the channel the run is parked on — `"__timer"` for sleeps,
+a user event name for named waits. `deadline` is `Some` (wall-clock
+ms) for sleep-like waits so a timer host could auto-deliver.
 
 
 ***
 
-### StepResume
+### ApprovalRequested
 
 ```rust
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:148`](../../../packages/workflow_core/src/event.rs#L148)
+Defined in: [`packages/workflow_core/src/event.rs:147`](../../../packages/workflow_core/src/event.rs#L147)
 
-Checkpoint (persisted): a signal was delivered for a paused run
-(see [`signal_run`](../functions/signal_run.md)). Resolves the pending
-`StepPaused` with the same `step_id`; `payload` is what the
-`approve`/`sleep` call returns.
+Checkpoint (persisted): the run parked on an **approval** wait
+(`ctx.approve`). Aligns with upstream `APPROVAL_REQUESTED`.
+
+`approval_id` is the deterministic pause key (== the approval id the
+host delivers a decision for); `title` is what approvers see.
+
+
+***
+
+### SignalResolved
+
+```rust
+{ .. }
+```
+
+Defined in: [`packages/workflow_core/src/event.rs:166`](../../../packages/workflow_core/src/event.rs#L166)
+
+Checkpoint (persisted): a signal resolved the matching
+[`SignalAwaited`](WorkflowEvent.md). Aligns with upstream
+`SIGNAL_RESOLVED`.
+
+`signal_id` is the host-supplied idempotency token — upstream's rule:
+same `signal_id` at the same `step_id` is a no-op (idempotent retry),
+a different one is a lost race. `payload` is what the
+`wait_for_event` call returns.
+
+
+***
+
+### ApprovalResolved
+
+```rust
+{ .. }
+```
+
+Defined in: [`packages/workflow_core/src/event.rs:184`](../../../packages/workflow_core/src/event.rs#L184)
+
+Checkpoint (persisted): an approval decision resolved the matching
+[`ApprovalRequested`](WorkflowEvent.md). Aligns with
+upstream `APPROVAL_RESOLVED`.
+
+上游这里**没有** payload 字段——审批是结构化决定（`approved` +
+`feedback`），任意 payload 只属于 [`SignalResolved`]。见
+`docs/tanstack-alignment.md` 的事件分类对照。
 
 
 ***
@@ -134,7 +172,7 @@ Checkpoint (persisted): a signal was delivered for a paused run
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:155`](../../../packages/workflow_core/src/event.rs#L155)
+Defined in: [`packages/workflow_core/src/event.rs:196`](../../../packages/workflow_core/src/event.rs#L196)
 
 Observability only (not persisted): 0.0..=1.0 progress signal.
 
@@ -147,7 +185,7 @@ Observability only (not persisted): 0.0..=1.0 progress signal.
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:164`](../../../packages/workflow_core/src/event.rs#L164)
+Defined in: [`packages/workflow_core/src/event.rs:205`](../../../packages/workflow_core/src/event.rs#L205)
 
 Observability only (not persisted): `ctx.emit` fan-out. Reaches only
 the publisher, never the log — so it never becomes part of replay
@@ -162,7 +200,7 @@ the publisher, never the log — so it never becomes part of replay
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:173`](../../../packages/workflow_core/src/event.rs#L173)
+Defined in: [`packages/workflow_core/src/event.rs:214`](../../../packages/workflow_core/src/event.rs#L214)
 
 Checkpoint (persisted): `ctx.now()` recorded a wall-clock timestamp.
 On replay the cached value is served so a run sees the same clock
@@ -177,7 +215,7 @@ across resumes (TanStack `NOW_RECORDED`).
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:181`](../../../packages/workflow_core/src/event.rs#L181)
+Defined in: [`packages/workflow_core/src/event.rs:222`](../../../packages/workflow_core/src/event.rs#L222)
 
 Checkpoint (persisted): `ctx.uuid()` recorded a generated id. On
 replay the same id is served (TanStack `UUID_RECORDED`).
@@ -191,7 +229,7 @@ replay the same id is served (TanStack `UUID_RECORDED`).
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:194`](../../../packages/workflow_core/src/event.rs#L194)
+Defined in: [`packages/workflow_core/src/event.rs:235`](../../../packages/workflow_core/src/event.rs#L235)
 
 Observability only (not persisted): RFC 6902 JSON Patch describing
 `ctx.state` changes since the last durable boundary (TanStack
@@ -210,7 +248,7 @@ delta 语义见 `crate::engine::state_diff`。
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:202`](../../../packages/workflow_core/src/event.rs#L202)
+Defined in: [`packages/workflow_core/src/event.rs:243`](../../../packages/workflow_core/src/event.rs#L243)
 
 Checkpoint (persisted): 未捕获失败触发了补偿——原始失败随 `error`
 持久化，已登记的撤销 handler 将逆序执行。崩溃后恢复的驱动据此得知
@@ -225,7 +263,7 @@ Checkpoint (persisted): 未捕获失败触发了补偿——原始失败随 `err
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:209`](../../../packages/workflow_core/src/event.rs#L209)
+Defined in: [`packages/workflow_core/src/event.rs:250`](../../../packages/workflow_core/src/event.rs#L250)
 
 Checkpoint (persisted): 一个已登记的撤销 handler 成功完成——重启后
 该补偿不再重复执行（幂等键 = 补偿 id）。
@@ -239,7 +277,7 @@ Checkpoint (persisted): 一个已登记的撤销 handler 成功完成——重�
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:216`](../../../packages/workflow_core/src/event.rs#L216)
+Defined in: [`packages/workflow_core/src/event.rs:257`](../../../packages/workflow_core/src/event.rs#L257)
 
 Checkpoint (persisted): 一个撤销 handler 耗尽重试——补偿链就地停止
 （后续登记的补偿保持未执行，留给人工处置）。
@@ -253,7 +291,7 @@ Checkpoint (persisted): 一个撤销 handler 耗尽重试——补偿链就地�
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:226`](../../../packages/workflow_core/src/event.rs#L226)
+Defined in: [`packages/workflow_core/src/event.rs:267`](../../../packages/workflow_core/src/event.rs#L267)
 
 Checkpoint (persisted)：耐久重试（#19 `retry.durable`）——步骤失败后
 登记下次重试的绝对截止时间，run 挂起（`__timer` + deadline），到期的
@@ -268,7 +306,7 @@ sweep/重驱以此恢复。重放规则：本事件后该步骤视同未完成�
 pub fn step_id(&self) -> Option<&str>
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:240`](../../../packages/workflow_core/src/event.rs#L240)
+Defined in: [`packages/workflow_core/src/event.rs:281`](../../../packages/workflow_core/src/event.rs#L281)
 
 #### Returns
 
@@ -283,7 +321,7 @@ Defined in: [`packages/workflow_core/src/event.rs:240`](../../../packages/workfl
 pub fn ts(&self) -> i64
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:263`](../../../packages/workflow_core/src/event.rs#L263)
+Defined in: [`packages/workflow_core/src/event.rs:306`](../../../packages/workflow_core/src/event.rs#L306)
 
 事件发生时间（每个变体都带 `ts`，对齐 TS 侧 `event.ts`）。
 
@@ -300,7 +338,7 @@ Defined in: [`packages/workflow_core/src/event.rs:263`](../../../packages/workfl
 pub fn type_name(&self) -> &'static str
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:286`](../../../packages/workflow_core/src/event.rs#L286)
+Defined in: [`packages/workflow_core/src/event.rs:331`](../../../packages/workflow_core/src/event.rs#L331)
 
 对齐 TS 侧 `event.type`）。
 

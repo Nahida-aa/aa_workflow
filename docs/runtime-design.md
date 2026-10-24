@@ -409,7 +409,7 @@ drive 正常结束、进程可以走了。
 
 #### 结论（**已落地**）
 
-改 `exec_pause`：**写挂起 checkpoint（`StepPaused`）后立即返回**，不再自轮询。
+改 `exec_pause`：**写挂起 checkpoint（`SignalAwaited` / `ApprovalRequested`）后立即返回**，不再自轮询。
 
 对齐上游的 `throw new WorkflowPaused()` 形态——新增内部哨兵
 `WorkflowParked`（与 `StepHalt` 并列），由 drive 的 `match handler_result` 收尾：
@@ -690,7 +690,7 @@ sweep 能认领，必须有人把它登记成 `WorkflowExecutionStore::schedule_
 #### 为什么原来的测试没发现
 
 原来那个 `sweep_delivers_due_timer_and_completes` 测试**手工构造**了 Paused 信封、
-`StepPaused` 事件和 timer 记录——正好把「drive 收尾登记 timer」这一步跳过去了。
+`SignalAwaited` 事件和 timer 记录——正好把「drive 收尾登记 timer」这一步跳过去了。
 所以它一直是绿的，掩盖了整条链路是断的。
 
 补了三个端到端测试（都不碰 store 原语，从 `start_run` 开始）：

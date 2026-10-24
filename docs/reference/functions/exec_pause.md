@@ -20,14 +20,14 @@ approvals, `"__timer"` for sleeps, a user event name for named waits).
 `deadline` is an **absolute** UTC ms timestamp, stored verbatim (it is what
 a timer sweep indexes on) — `None` for waits with no time bound.
 
-Replay fast path: a `StepResume` already in the log resolves immediately,
+Replay fast path: a `SignalResolved` already in the log resolves immediately,
 so a crashed-paused run re-waits exactly once and never re-appends its
-`StepPaused`. Otherwise the pause checkpoint is persisted (idempotently)
+`SignalAwaited`. Otherwise the pause checkpoint is persisted (idempotently)
 and the run state flips to `Paused` + `waiting_for` / `pending_approval`.
 
 **Then it parks**: the function returns [`WorkflowParked`](../structs/WorkflowParked.md) immediately — it
 does NOT block. The drive ends `Paused`, the process is free to exit, and an
-external driver is what delivers the wake-up (a `StepResume` via
+external driver is what delivers the wake-up (a `SignalResolved` via
 [`signal_run`](signal_run.md) / [`signal_event`](signal_event.md), or a timer sweep noticing `deadline`).
 Mirrors TanStack, where the awaited primitive throws `WorkflowPaused` and
 the drive returns (`run-workflow.ts:970` / `:529`).

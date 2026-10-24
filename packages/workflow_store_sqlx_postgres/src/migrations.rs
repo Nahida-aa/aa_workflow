@@ -18,11 +18,21 @@
 pub const INITIAL_MIGRATION_SQL: &str =
     include_str!("../migrations/0000_workflow_store.sql");
 
+/// 收件箱迁移的 SQL 源文本（对齐上游 `0001_signal_inbox.sql`）。
+pub const SIGNAL_INBOX_MIGRATION_SQL: &str =
+    include_str!("../migrations/0001_signal_inbox.sql");
+
 /// 本次发布包含的全部迁移，按执行顺序。
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    id: "0000_workflow_store",
-    sql: INITIAL_MIGRATION_SQL,
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        id: "0000_workflow_store",
+        sql: INITIAL_MIGRATION_SQL,
+    },
+    Migration {
+        id: "0001_signal_inbox",
+        sql: SIGNAL_INBOX_MIGRATION_SQL,
+    },
+];
 
 /// 一条迁移。
 #[derive(Debug, Clone, Copy)]

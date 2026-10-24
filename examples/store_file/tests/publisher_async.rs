@@ -255,8 +255,8 @@ async fn paused_path_also_drains_the_queue() {
     let got = seen.lock().unwrap().clone();
     assert_eq!(
         got.last().map(String::as_str),
-        Some("STEP_PAUSED"),
-        "Paused 早退也必须排空 drain，终态事件应是 STEP_PAUSED，实际：{got:?}",
+        Some("APPROVAL_REQUESTED"),
+        "Paused 早退也必须排空 drain，终态事件应是 APPROVAL_REQUESTED，实际：{got:?}",
     );
 }
 
