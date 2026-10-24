@@ -58,7 +58,7 @@ fn get_workflow_runtime(base: &std::path::Path) -> Arc<WorkflowRuntimeDefinition
                     schedules: vec![],
                 },
             );
-            Arc::new(define_workflow_runtime(WorkflowRuntimeConfig::new(store, workflows)))
+            Arc::new(define_workflow_runtime(WorkflowRuntimeConfig::new(store, workflows)).unwrap())
         })
         .clone()
 }

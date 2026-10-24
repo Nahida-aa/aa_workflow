@@ -75,10 +75,8 @@ fn demo_runtime(
         );
     }
     (
-        Arc::new(define_workflow_runtime(WorkflowRuntimeConfig::new(
-            Arc::clone(&mem) as _,
-            reg,
-        ))),
+        Arc::new(define_workflow_runtime(WorkflowRuntimeConfig::new(Arc::clone(&mem) as _,
+            reg,)).unwrap()),
         mem,
     )
 }

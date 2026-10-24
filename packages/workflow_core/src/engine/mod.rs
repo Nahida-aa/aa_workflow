@@ -830,6 +830,49 @@ pub async fn exec_pause_with(
     meta: Option<serde_json::Value>,
     validator: Option<crate::define::PayloadValidator>,
 ) -> anyhow::Result<serde_json::Value> {
+    // 恢复路径：先试耐久收件箱（对齐上游 `run-workflow.ts:1095` 的等待点），
+    // 没有就回落全日志扫描。`__timer` 不走收件箱（上游 `name !== '__timer'`
+    // 的豁免：内部保留信号的投递由 sweep 自己保证）。
+    let buffered = if signal_name == "__timer" {
+        None
+    } else {
+        inner
+            .store
+            .consume_buffered_signal(&inner.run_id, step_id, signal_name)
+            .ok()
+            .flatten()
+    };
+    if let Some(ev) = buffered {
+        // **必须落账**：从收件箱消费出来的恢复事件要 append 进日志（上游
+        // `run-workflow.ts:1103` 的 `engine.emit(resolved)`——emit 即 append）。
+        // 只把 payload 交给 handler 而不写日志的话，重放时 `find_resume` 再也
+        // 找不到它，run 会重新泊车。
+        loop {
+            let n = inner.store.get_events(&inner.run_id)?.len();
+            match inner.store.append_event(&inner.run_id, n, &ev) {
+                Ok(()) => break,
+                Err(StoreError::Conflict { .. }) => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        inner.publish(&ev);
+        let payload = match ev {
+            WorkflowEvent::SignalResolved { payload, .. } => payload,
+            // 收件箱只应产出 SignalResolved；别的形状按空处理。
+            _ => serde_json::Value::Null,
+        };
+        // 恢复路径：投递进来的 payload 先过声明的 schema 再交给 workflow。
+        // 校验失败 = run 报错（不是 park），因为数据已经在这了、run 不会
+        // 重新等待。
+        if let Some(v) = &validator {
+            v(&payload).map_err(|e| {
+                crate::error::WorkflowError::Validation(format!(
+                    "payload for `{signal_name}` (step `{step_id}`) failed its declared schema: {e}"
+                ))
+            })?;
+        }
+        return Ok(payload);
+    }
     if let Some(payload) = find_resume(&inner.store, &inner.run_id, step_id) {
         // 恢复路径：投递进来的 payload 先过声明的 schema 再交给 workflow。
         // 校验失败 = run 报错（不是 park），因为数据已经在这了、run 不会

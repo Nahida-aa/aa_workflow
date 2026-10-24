@@ -467,6 +467,10 @@ impl WorkflowRunStoreAdapterStore for FileExecutionStore {
 // ============================================================
 
 impl WorkflowExecutionStore for FileExecutionStore {
+    fn supports_signal_inbox(&self) -> bool {
+        true
+    }
+
     fn create_run(&self, args: CreateRunArgs) -> anyhow::Result<CreateRunResult> {
         let _g = self.block();
         // 幂等：已存在则原样返回，**不覆盖**已有 input（契约断言这点）。

@@ -428,6 +428,10 @@ impl WorkflowRunStoreAdapterStore for InMemoryExecutionStore {
 }
 
 impl WorkflowExecutionStore for InMemoryExecutionStore {
+    fn supports_signal_inbox(&self) -> bool {
+        true
+    }
+
     fn create_run(&self, args: CreateRunArgs) -> anyhow::Result<CreateRunResult> {
         if let Some(existing) = self.get_run(&args.run_id) {
             return Ok(CreateRunResult::Existing { run: existing });

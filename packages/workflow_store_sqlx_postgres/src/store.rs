@@ -689,6 +689,10 @@ pub fn sqlx_postgres_store(pool: PgPool) -> Arc<dyn WorkflowExecutionStore> {
 // ============================================================
 
 impl WorkflowExecutionStore for SqlxPostgresStore {
+    fn supports_signal_inbox(&self) -> bool {
+        true
+    }
+
     fn create_run(&self, args: CreateRunArgs) -> anyhow::Result<CreateRunResult> {
         self.block(async move {
             let mut tx = self.pool.begin().await?;

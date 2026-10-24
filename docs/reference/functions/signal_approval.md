@@ -9,7 +9,7 @@ title: signal_approval
 pub fn signal_approval(store: &dyn RunStore, run_id: &str, approval_id: &str, approved: bool, feedback: Option<&str>) -> Result<(), WorkflowError>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:1117`](../../../packages/workflow_core/src/engine/mod.rs#L1117)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:1160`](../../../packages/workflow_core/src/engine/mod.rs#L1160)
 
 Appends an `ApprovalResolved` for the run parked on approval `approval_id`
 — the external side of

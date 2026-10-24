@@ -9,7 +9,7 @@ title: signal_run
 pub fn signal_run(store: &dyn RunStore, run_id: &str, step_id: &str, payload: Value) -> Result<(), WorkflowError>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:1073`](../../../packages/workflow_core/src/engine/mod.rs#L1073)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:1116`](../../../packages/workflow_core/src/engine/mod.rs#L1116)
 
 Appends a `SignalResolved` for a parked run — the external side of
 [`WorkflowCtx::approve`](../structs/BaseCtx.md). Safe to call

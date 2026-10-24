@@ -9,7 +9,7 @@ title: signal_event
 pub fn signal_event(store: &dyn RunStore, run_id: &str, event_name: &str, signal_id: Option<&str>, payload: Value) -> Result<(), WorkflowError>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:1163`](../../../packages/workflow_core/src/engine/mod.rs#L1163)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:1206`](../../../packages/workflow_core/src/engine/mod.rs#L1206)
 
 Appends a `SignalResolved` for the run currently parked waiting for the
 event `event_name` — the external side of

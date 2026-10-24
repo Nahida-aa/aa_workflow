@@ -308,6 +308,24 @@ pub trait RunStore: Send + Sync {
         let _ = run_id;
         None
     }
+
+    /// 从耐久收件箱取走一个早到信号（对齐上游 `RunStore.consumeBufferedSignal?`，
+    /// `workflow-core/src/types.ts:646`——上游把它放在 **core 的 RunStore** 上，
+    /// 因为调用方是引擎的等待点）。
+    ///
+    /// `None` = 没有匹配条目（含 store 不支持收件箱），调用方回落到
+    /// [`find_resume`](crate::engine) 的全日志扫描。
+    ///
+    /// **默认实现返回 `None`**（对应上游的可选 `?`）：不实现收件箱的 store
+    /// 无需改代码，行为即上游的 legacy adapter。
+    fn consume_buffered_signal(
+        &self,
+        _run_id: &str,
+        _step_id: &str,
+        _name: &str,
+    ) -> Result<Option<WorkflowEvent>, StoreError> {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]

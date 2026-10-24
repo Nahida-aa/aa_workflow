@@ -133,9 +133,7 @@ pub fn define_runtime() -> Fixture {
     );
 
     Fixture {
-        rt: Arc::new(define_workflow_runtime(WorkflowRuntimeConfig::new(
-            store, workflows,
-        ))),
+        rt: Arc::new(define_workflow_runtime(WorkflowRuntimeConfig::new(store, workflows,)).unwrap()),
         mem,
     }
 }

@@ -134,6 +134,15 @@ pub struct WorkflowRuntimeConfig<TWorkflows = HashMap<WorkflowId, WorkflowRegist
     pub default_lease_ms: Option<i64>,
     /// 全局事件 fan-out（best-effort，不参与耐久执行）。
     pub publish: Option<WorkflowRuntimeEventPublisher>,
+    /// 早到信号进收件箱（对齐上游 `bufferSignals`，`runtime-driver.ts:383`）。
+    ///
+    /// 关（默认）= 上游的默认行为：run 没在等就 `NotWaiting`，**不**缓冲。
+    /// 开 = 没在等的信号进 store 收件箱（`buffer_signal`），等 run 真的泊到
+    /// 那个名字上时由等待点消费。
+    ///
+    /// 构造期校验（对齐 `runtime-driver.ts:32-38`）：开了但 store 没实现收件箱
+    /// 就直接报错，不等到第一次投递才炸。
+    pub buffer_signals: bool,
 }
 
 impl<TWorkflows> WorkflowRuntimeConfig<TWorkflows> {
@@ -146,7 +155,19 @@ impl<TWorkflows> WorkflowRuntimeConfig<TWorkflows> {
             workflows,
             default_lease_ms: None,
             publish: None,
+            buffer_signals: false,
         }
+    }
+
+    /// 收件箱能力自检（对齐上游构造期那次 throw）。
+    fn assert_signal_inbox_supported(&self) -> anyhow::Result<()> {
+        if self.buffer_signals && !self.store.supports_signal_inbox() {
+            anyhow::bail!(
+                "buffer_signals requires a store with durable signal inbox support \
+                 (buffer_signal / consume_buffered_signal)"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -173,6 +194,9 @@ pub enum WorkflowRuntimeRunResultKind {
     Duplicate,
     /// run 没在等这个信号 / 审批。
     NotWaiting,
+    /// 信号已进收件箱，等 run 泊到该名字上时再由等待点消费
+    /// （对齐上游 `bufferSignals` 开时的 `buffered` 结果）。
+    Buffered,
 }
 
 /// 单次驱动 / 投递的结果（对齐上游 `WorkflowRuntimeRunResult`）。
@@ -332,15 +356,19 @@ pub struct WorkflowRuntimeDefinition<
 }
 
 /// 构造 runtime（对齐上游 `defineWorkflowRuntime`，define-runtime.ts:11）。
+///
+/// 构造期就做收件箱能力自检（对齐上游 `createRuntimeDriver` 里那次 throw）：
+/// 配了 `buffer_signals` 但 store 没实现收件箱，在这里就炸，不等第一次投递。
 pub fn define_workflow_runtime<TWorkflows>(
     config: WorkflowRuntimeConfig<TWorkflows>,
-) -> WorkflowRuntimeDefinition<TWorkflows> {
-    WorkflowRuntimeDefinition { config }
+) -> anyhow::Result<WorkflowRuntimeDefinition<TWorkflows>> {
+    config.assert_signal_inbox_supported()?;
+    Ok(WorkflowRuntimeDefinition { config })
 }
 
 static LEASE_OWNER_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -527,7 +555,13 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         .await
     }
 
-    /// 投递外部信号：四态 bookkeeping → 追加 `SignalResolved` → 尝试驱动。
+    /// 投递外部信号。两条路径（对齐上游 `runtime-driver.ts:200`）：
+    ///
+    /// - `buffer_signals` **开**：先无条件 `buffer_signal`（上游同此），只有
+    ///   「确已泊在该名字上」才立刻驱动——等待点在这次 drive 里从收件箱消费；
+    ///   否则带着 `Buffered` 返回，信号留在收件箱里等 run 自己走到。
+    /// - `buffer_signals` **关**（默认，= 上游默认行为）：走 store 的
+    ///   `deliver_signal`，没在等就 `NotWaiting`，**不**缓冲。
     pub async fn deliver_signal(
         &self,
         args: WorkflowRuntimeDeliverSignalArgs,
@@ -536,6 +570,88 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         let now = args.now.unwrap_or_else(now_ms);
         let deadline = resolve_runtime_deadline(args.deadline, args.max_duration_ms, started_at)?;
         let min_yield = normalize_min_yield_remaining_ms(args.min_yield_remaining_ms);
+
+        if self.config.buffer_signals {
+            let buffered = self.config.store.buffer_signal(DeliverSignalArgs {
+                run_id: args.run_id.clone(),
+                delivery: SignalDelivery {
+                    signal_id: args.signal_id.clone(),
+                    step_id: args.step_id.clone(),
+                    name: args.name.clone(),
+                    payload: args.payload.clone(),
+                },
+                now,
+            })?;
+            // 「已泊在该名字上」才值得立刻驱动；其余（进收件箱 / 重复 /
+            // 拒收 / run 不存在）都不驱动。
+            let parked_on_this = matches!(
+                &buffered,
+                BufferSignalResult::Buffered { run }
+                    if run.status == WorkflowExecutionStatus::Paused
+                        && run.waiting_for.as_ref().map(|w| w.signal_name.as_str())
+                            == Some(args.name.as_str())
+            );
+            if parked_on_this {
+                let BufferSignalResult::Buffered { run } = buffered else {
+                    unreachable!("上面已匹配 Buffered")
+                };
+                let workflow_id = run.workflow_id.clone();
+                let workflow = self.load_workflow(&workflow_id)?;
+                return self
+                    .drive_claimed_run(DriveArgs {
+                        thread_id: args.thread_id.clone(),
+                        publish: args.publish.clone(),
+                        workflow: &workflow,
+                        workflow_id: &workflow_id,
+                        run_id: &args.run_id,
+                        // resume 用**持久化在 run 记录里的 input**（同下游
+                        // Delivered 分支的理由）。
+                        input: Some(run.input.clone()),
+                        interim_goals: None,
+                        reexecute_from: None,
+                        lease_owner: args.lease_owner.clone(),
+                        lease_ms: args.lease_ms,
+                        now,
+                        deadline,
+                        min_yield_remaining_ms: min_yield,
+                        yield_resume_at: Some(now + 1),
+                        include_events: args.include_events,
+                        max_events: args.max_events,
+                    })
+                    .await;
+            }
+            let (kind, run) = match buffered {
+                BufferSignalResult::Buffered { run } => {
+                    (WorkflowRuntimeRunResultKind::Buffered, run)
+                }
+                BufferSignalResult::Duplicate { run } => {
+                    (WorkflowRuntimeRunResultKind::Duplicate, run)
+                }
+                BufferSignalResult::NotWaiting { run } => {
+                    (WorkflowRuntimeRunResultKind::NotWaiting, run)
+                }
+                BufferSignalResult::NotFound => {
+                    return Ok(WorkflowRuntimeRunResult {
+                        kind: WorkflowRuntimeRunResultKind::NotFound,
+                        run_id: args.run_id,
+                        workflow_id: None,
+                        run: None,
+                        events: vec![],
+                        event_count: 0,
+                        events_truncated: None,
+                    });
+                }
+            };
+            return Ok(WorkflowRuntimeRunResult {
+                kind,
+                run_id: args.run_id,
+                workflow_id: Some(run.workflow_id.clone()),
+                run: Some(run),
+                events: vec![],
+                event_count: 0,
+                events_truncated: None,
+            });
+        }
 
         let delivered = self.config.store.deliver_signal(DeliverSignalArgs {
             run_id: args.run_id.clone(),
@@ -1243,6 +1359,17 @@ mod driver_tests {
         mem: Arc<InMemoryExecutionStore>,
     }
 
+    /// 两个顺序的命名等待点（供收件箱端到端测试用）。
+    fn two_waits_workflow() -> WorkflowDefinition {
+        create_workflow(CreateWorkflowConfig::new("two_waits").input::<serde_json::Value>())
+            .handler(|ctx: WorkflowCtx| async move {
+                let a = ctx.wait_for_event("first", "first").await?;
+                let b = ctx.wait_for_event("second", "second").await?;
+                Ok(serde_json::json!({ "first": a, "second": b }))
+            })
+            .into()
+    }
+
     fn runtime_with(workflow_id: &str, workflow: WorkflowDefinition) -> Fixture {
         let mem: Arc<InMemoryExecutionStore> = Arc::new(InMemoryExecutionStore::default());
         let store: Arc<dyn WorkflowExecutionStore> = mem.clone();
@@ -1257,9 +1384,7 @@ mod driver_tests {
             },
         );
         Fixture {
-            rt: Arc::new(define_workflow_runtime(WorkflowRuntimeConfig::new(
-                store, workflows,
-            ))),
+            rt: Arc::new(define_workflow_runtime(WorkflowRuntimeConfig::new(store, workflows,)).unwrap()),
             mem,
         }
     }
@@ -1343,7 +1468,7 @@ mod driver_tests {
 
         let mut cfg = WorkflowRuntimeConfig::new(store, workflows);
         cfg.publish = Some(config_publish);
-        let rt = define_workflow_runtime(cfg);
+        let rt = define_workflow_runtime(cfg).unwrap();
         rt.start_run(WorkflowRuntimeStartRunArgs {
             workflow_id: "simple".into(),
             run_id: "both".into(),
@@ -1586,6 +1711,99 @@ mod driver_tests {
 
     /// 信号投递：`deliver_signal` 自己认领 + 驱动到完成。
     ///
+    /// 早到信号 = 收件箱（#19 bufferSignals 的核心行为，端到端）：
+    /// `buffer_signals` 开着，run 泊在 `payment` 上时投一个**别的名字**
+    /// → 不驱动、只进收件箱；之后 run 自己走到那个名字的等待点时，
+    /// 由 `consume_buffered_signal` 取走并落成 `SignalResolved`。
+    #[tokio::test]
+    async fn early_signal_is_buffered_then_consumed_at_the_wait_point() {
+        let mem: Arc<InMemoryExecutionStore> = Arc::new(InMemoryExecutionStore::default());
+        let store: Arc<dyn WorkflowExecutionStore> = mem.clone();
+        let mut workflows = HashMap::new();
+        workflows.insert(
+            "two_waits".to_string(),
+            WorkflowRegistration {
+                load: Arc::new(|| two_waits_workflow().into()),
+                previous_versions: HashMap::new(),
+                version: None,
+                schedules: vec![],
+            },
+        );
+        let mut cfg = WorkflowRuntimeConfig::new(store, workflows);
+        cfg.buffer_signals = true;
+        let rt = Arc::new(define_workflow_runtime(cfg).unwrap());
+
+        // Drive #1：泊在第一个等待点 `first` 上。
+        let started = rt
+            .start_run(WorkflowRuntimeStartRunArgs {
+                workflow_id: "two_waits".into(),
+                run_id: "r1".into(),
+                input: serde_json::json!({}),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(started.kind, WorkflowRuntimeRunResultKind::Paused);
+
+        // 投一个**还没轮到**的名字 → 应 Buffered，且不驱动（仍 Paused）。
+        let buffered = rt
+            .deliver_signal(WorkflowRuntimeDeliverSignalArgs {
+                run_id: "r1".into(),
+                signal_id: "second-1".into(),
+                name: "second".into(),
+                payload: serde_json::json!({ "second": true }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            buffered.kind,
+            WorkflowRuntimeRunResultKind::Buffered,
+            "没在等这个名字，应只进收件箱"
+        );
+        assert_eq!(
+            mem.load_run("r1").unwrap().unwrap().status,
+            WorkflowExecutionStatus::Paused,
+            "Buffered 不得驱动 run"
+        );
+
+        // 放行第一个等待点 → run 继续走到 `second`，等待点从收件箱消费。
+        let resumed = rt
+            .deliver_signal(WorkflowRuntimeDeliverSignalArgs {
+                run_id: "r1".into(),
+                signal_id: "first-1".into(),
+                name: "first".into(),
+                payload: serde_json::json!({ "first": true }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            resumed.kind,
+            WorkflowRuntimeRunResultKind::Completed,
+            "第二个等待点应由收件箱供料，run 跑完"
+        );
+
+        // 收件箱条目被消费后即消失（一次性）。
+        let events = mem.read_events(ReadEventsArgs {
+            run_id: "r1".into(),
+            from_index: None,
+        }).unwrap();
+        let resolved: Vec<_> = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                WorkflowEvent::SignalResolved { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            resolved,
+            vec!["first".to_string(), "second".to_string()],
+            "两个等待点都应留下 SignalResolved，且 second 来自收件箱"
+        );
+    }
+
     /// D3 之后挂起会**释放** lease（drive 已返回），所以 deliver 能直接 claim，
     /// 不用再等一个存活的自轮询 drive 来拾取 SignalResolved。
     #[tokio::test]
@@ -1842,7 +2060,7 @@ mod driver_tests {
                 schedules: vec![],
             },
         );
-        let rt = define_workflow_runtime(WorkflowRuntimeConfig::new(store, workflows));
+        let rt = define_workflow_runtime(WorkflowRuntimeConfig::new(store, workflows)).unwrap();
         rt.start_run(WorkflowRuntimeStartRunArgs {
             workflow_id: "peek".into(),
             run_id: "peek:1".into(),
@@ -1905,7 +2123,7 @@ mod driver_tests {
                 schedules: vec![],
             },
         );
-        let rt = define_workflow_runtime(WorkflowRuntimeConfig::new(store, workflows));
+        let rt = define_workflow_runtime(WorkflowRuntimeConfig::new(store, workflows)).unwrap();
         // 造一个"上一个 worker 死了"的 run：lease 过期 → sweep 会捡起并驱动。
         mem.create_run(CreateRunArgs {
             run_id: "peek:2".into(),

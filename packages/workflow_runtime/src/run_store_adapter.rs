@@ -350,6 +350,15 @@ pub trait WorkflowExecutionStore: WorkflowRunStoreAdapterStore {
         args: crate::types::DeliverSignalArgs,
     ) -> anyhow::Result<crate::types::BufferSignalResult>;
 
+    /// 本 store 是否实现耐久收件箱（`buffer_signal` + `consume_buffered_signal`）。
+    ///
+    /// TS 侧靠「方法在不在」判断（`if (config.store.bufferSignal)`）；Rust 的
+    /// trait 方法必须全部实现，所以用一个显式能力位表达同一件事。默认 `false`
+    /// = 上游的 legacy adapter（没有 `?` 那两个方法）。
+    fn supports_signal_inbox(&self) -> bool {
+        false
+    }
+
     // ── schedule ────────────────────────────────────────────
 
     /// 登记 / 更新一个 schedule（幂等，按 `schedule_id`）。
@@ -545,6 +554,36 @@ impl RunStore for RunStoreAdapter {
         });
 
         Some(rx)
+    }
+
+    /// 收件箱消费：委托给底层 store，并补上 `lease_owner`（对齐上游
+    /// `run-store-adapter.ts:33/36`——它在 adapter 这一层注入 owner）。
+    ///
+    /// 注意 `expected_next_index` 用**当前日志长度**：这是消费的并发闸门，
+    /// 底层发现长度不符会拒绝（上游抛 `LogConflictError`），由驱动重试。
+    fn consume_buffered_signal(
+        &self,
+        run_id: &str,
+        step_id: &str,
+        name: &str,
+    ) -> Result<Option<WorkflowEvent>, StoreError> {
+        let log_len = self
+            .inner
+            .read_events(ReadEventsArgs {
+                run_id: run_id.to_string(),
+                from_index: None,
+            })
+            .map(|v| v.len() as u64)
+            .map_err(to_store_error)?;
+        self.inner
+            .consume_buffered_signal(crate::types::ConsumeBufferedSignalArgs {
+                run_id: run_id.to_string(),
+                name: name.to_string(),
+                step_id: step_id.to_string(),
+                expected_next_index: log_len,
+                now: crate::runtime_driver::now_ms(),
+            })
+            .map_err(to_store_error)
     }
 }
 
