@@ -16,7 +16,7 @@
 | --- | --- | --- | --- |
 | runtime 四方法面 | startRun/deliverSignal/deliverApproval/sweep | ✅ 已对齐（runtime_driver.rs 同名四方法） | 无 |
 | store 契约 | WorkflowExecutionStore 19 方法 | 23 方法（store_contract.rs） | 形态差异已对齐 |
-| 信号 | bufferSignals 收件箱（**runtime 层 opt-in**，早到持久化 + 原子消费 + signalId 去重；需 store `bufferSignal`/`consumeBufferedSignal`，`__timer` 双闸豁免） | core 层收件箱 ✅（零新机制——信号即事件，`early_signal_run_acts_as_inbox` 钉死）；runtime 层与上游同构且更严（未等待即 `NotWaiting`） | 差距三项（core 层恒开不可关 / 只积累不去重 / 无 `__timer` 豁免，见 Phase 3 含层对应表） |
+| 信号 | bufferSignals 收件箱（**runtime 层 opt-in**，早到持久化 + 原子消费 + signalId 去重；需 store `bufferSignal`/`consumeBufferedSignal`，`__timer` 双闸豁免） | ✅ 已对齐：`buffer_signals` 开关 + 三 adapter 收件箱 + 等待点消费落账；core 直投原语已过闸 | 无（Phase 3 已收官，剩余三项为有意设计分歧） |
 | step 重试 | `retry.durable`（attempt/deadline 持久化，sweep 恢复） | ✅ 已实现（`RetryPolicy.durable` + STEP_RETRY_SCHEDULED 泊车/续驱，c1c7ddf） | 无 |
 | 补偿 | `ctx.compensate` + COMPENSATION_STARTED + 逆序 undo | ✅ 已实现（`ctx.compensate` 内存登记 + 重放重建 + 逆序 undo，c1c7ddf） | 无 |
 | checkpoint 导入/泊车 | reexecuteFrom / interimGoals（**f2-lite 自有，上游未采纳**；`f2-lite` 分支 `run-workflow.ts:71-84`） | ✅ 已实现（`reexecute_from` + `StepFinished.meta.imported_from` 溯源；`interim_goals` 泊车 a9a7424） | 无 |
@@ -156,47 +156,73 @@ pause/非 abort → 若 `engine.compensations` 非空 → 逆序执行补偿链 
 - 明确不做（对齐 #19 的范围声明）：无自动过期/大小限制；finished/errored/
   aborted 的信号返回 not-waiting；`__timer` 不可缓冲。
 
-**评估结论（2026-10-15 补记）**：core 层**已经是收件箱，零新机制**。
+**评估结论（2026-10-15 补记；2026-10-15 收官改写）**：已按上游**完整落地**，
+不是"零新机制"——最终形态见下。
 
-- `signal_run`（`engine/mod.rs:1033`）**无条件** CAS append `SignalResolved`——
-  不检查 run 是否在等待，早到信号照常落盘；消费点是 replay 的
-  `find_resume`（`engine/mod.rs:899`），从日志短路拾取**首条**匹配。
-- 所以 #19 的核心行为（早到持久化 + 等待点 payload 过墙）由**事件日志天然
-  获得**——信号投递本就是一次普通 CAS append，而上游需要新机制是因为它的
-  信号投递不在事件日志里。`early_signal_run_acts_as_inbox` 已钉死：信号先于
-  run 落盘为日志第一条，驱动到 wait 点时过墙、全程无挂起事件。
-- **层对应（先对齐，别跨层比）**：
+## 3.1 最终形态（对齐 #19 bufferSignals）
 
-  | 层 | 上游 | Rust |
-  | --- | --- | --- |
-  | runtime API | `runtime-driver.ts:49`/`:200` | `runtime_driver.rs:531` |
-  | store 契约 | `runtime-driver.ts:272` `store.deliverSignal` | `in_memory_store.rs:575` |
-  | 引擎消费点 | `run-workflow.ts:1095` `consumeBufferedSignal` | `engine/mod.rs:899` `find_resume` |
-  | core 投递原语 | **不存在**（core 只收 `signalDelivery` 作 resume 入参，`run-workflow.ts:42`） | `signal_run` `:1033` / `signal_event` `:1061` |
+**开关**：`WorkflowRuntimeConfig::buffer_signals`（默认 false = 上游默认行为：
+没在等就 `NotWaiting`，不缓冲）。构造期自检（对齐 `createRuntimeDriver` 那次
+throw）：开了但 store 没实现收件箱直接报错。
 
-  Rust 的 runtime 层与上游同构且**更严**：`deliver_signal` 先过 store 闸
-  （`is_run_waiting_for_signal`，`in_memory_store.rs:188`），未等待即
-  `NotWaiting`；只有 `Delivered` 才桥到 core 的 `signal_event`
-  （`runtime_driver.rs:548-559`）。
+**分流**（`runtime_driver.rs` `deliver_signal`，对齐 `runtime-driver.ts:200`）：
 
-- **与 #19 的真实差距**（都是设计差，不是缺功能）：
-  1. **多一层恒开的投递面**：#19 的开关在 runtime（`bufferSignals: true`），
-     Rust 的 runtime 也有闸——但 `signal_run` / `signal_event` 是 **core 直达
-     API，绕过 store 闸也能用**，这一层上游根本没有，也无从谈开关。宿主写错
-     `step_id` 会静默污染日志。
-  2. **只积累、不消费、不去重**：`find_resume` 读首条后条目**滞留日志**
-     （且**不能删**——`SignalResolved` 本身就是让 replay 短路的日志条目，删了崩溃
-     重放就找不到 resume）。真正缺的是上游那层 **signalId 去重**
-     （`in-memory-store.ts:165` 返回 `'duplicate'`）。
-  3. **无 `__timer` 豁免**：#19 在 core
-     （`run-workflow.ts:1095` `name !== '__timer'`）与 store
-     （`in-memory-store.ts:165`）**双闸**；Rust 两边都没有——`is_run_waiting_
-     for_signal` 只比对 `signal_name`，`__timer` 泊车的 run 照样能投递。
-- 注意分层：runtime 的 `deliver_signal` 对没在等的 run 返回 `NotWaiting`
-  （`in_memory_store.rs:584`）是**名字投递路径的既有拒绝**，与 core 的恒开
-  收件箱是两层，别用它论证「core 会拒绝早到信号」。
-- **排期建议**：不必为 Phase 3 写新机制。若要补齐，方向是「加开关 + 消费
-  语义」，**不是**「加收件箱」——收件箱已经有了。
+```text
+buffer_signals = false（默认）
+  deliver_signal → store.deliver_signal → 没在等就 NotWaiting，不缓冲
+
+buffer_signals = true
+  deliver_signal → store.buffer_signal（无条件）
+    ├─ 已泊在该名字上 → 立刻 drive → 等待点 consume_buffered_signal → 落账 → 放行
+    └─ 否则 → Buffered，信号留在收件箱等 run 自己走到
+```
+
+**契约**：`WorkflowExecutionStore::buffer_signal` + 基类
+`consume_buffered_signal`（后者放基类是因为调用方是 core 等待点，同上游把它放在
+`RunStore` 上）。三个 adapter 全实现：in_memory / file store / postgres
+（`0001_signal_inbox.sql`）。共享契约四条：signalId 去重（横跨"已投递"与
+"已缓冲"）、终态拒收、`__timer` 拒收、消费一次性。
+
+**等待点**（`exec_pause_with`）：先 `consume_buffered_signal`（`__timer` 豁免，
+同上游），命中则 **CAS append 落账 + publish**（对应上游 `engine.emit(resolved)`，
+emit 即 append）再放行；`None` 回落既有 `find_resume` 全日志扫描。
+
+> **踩过的坑**：第一版接线只把 payload 交给 handler、没写日志。本次 drive 看不出
+> 问题，但重放时 `find_resume` 找不到它 → run 重新泊车。是新增的端到端测试抓到
+> 的（日志里只有 `SIGNAL_AWAITED` + `RUN_FINISHED`，缺两条 `SignalResolved`）。
+
+## 3.2 层对应（先对齐，别跨层比）
+
+| 层 | 上游 | Rust |
+| --- | --- | --- |
+| runtime API | `runtime-driver.ts:49`/`:200` | `runtime_driver.rs` `deliver_signal` |
+| store 契约 | `runtime-driver.ts:272` `store.deliverSignal` | `in_memory_store.rs` `deliver_signal` |
+| 引擎消费点 | `run-workflow.ts:1095` `consumeBufferedSignal` | `exec_pause_with` → `consume_buffered_signal` |
+| core 投递原语 | **不存在**（core 只收 `signalDelivery` 作 resume 入参） | `signal_run` / `signal_event` |
+
+**core 直投原语已过闸**（对齐上游默认 `not-waiting` / `approval_lost`）：
+`signal_run` / `signal_approval` / `signal_event` 都只在目标确实泊着时落盘，否则报
+`SignalLost` 且不在日志留任何东西。原先「core 层无条件收件箱」随之移除——早到信号
+改由上面的可选收件箱承接。
+
+## 3.3 与 #19 的剩余差距（都是设计差，不是缺功能）
+
+1. **`find_resume` 读首条后条目滞留日志，且不能删**：`SignalResolved` 本身就是让
+   replay 短路的日志条目，删了崩溃重放就找不到 resume。上游的
+   `consumeBufferedSignal` 是"取走即移除"，因为它读的是**边表**而非日志。
+   去重已由 `buffer_signal` 的 signalId 键补上（这是原先缺的那条）。
+2. **`__timer` 只在 store 单闸豁免**：上游在 core（`name !== '__timer'`）与 store
+   （`in-memory-store.ts:165`）**双闸**；Rust 的 store 闸有（`buffer_signal` 拒收
+   `__timer`），core 等待点也有豁免，但 `signal_event(..., "__timer", ...)` 这条
+   直投路径仍能注入——timer 的投递由 sweep 自己保证，实际不可达，但形状上少一道。
+3. **字段大小写**：`rename_all` 只作用于事件类型 tag，字段是 `signal_id` 而非
+   `signalId`。这是 postgres 省略上游 `workflow_events_signal_id_idx` 的原因之一
+   （见 `SCHEMA_MIGRATIONS.md`）。
+
+## 3.4 排期建议
+
+**Phase 3 已收官**，无待办。剩余三项都是有意的设计分歧，已记录在案；若要消除第 3
+项（字段 camelCase），那是全事件序列化形状的改动，值得单开一轮评估。
 
 ## 4. Phase 4 — redo / 临时目标（名单透传原语，graph-agnostic）
 
