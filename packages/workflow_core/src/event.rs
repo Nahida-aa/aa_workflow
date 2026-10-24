@@ -237,6 +237,18 @@ pub enum WorkflowEvent {
         run_id: String,
         delta: Vec<crate::engine::state_diff::Operation>,
     },
+    /// Checkpoint (persisted): 一个撤销 handler 被登记——**登记本身是耐久的**，
+    /// 重放时不再追加（对齐上游 `COMPENSATION_REGISTERED`）。
+    ///
+    /// 上游把补偿 id 放在事件的 `stepId` 字段（它的 `findCheckpoint` 按
+    /// `stepId` 查）；本仓补偿事件统一用 `compensation_id`（与
+    /// `CompensationStarted` / `Completed` / `Failed` 一致），故 `step_id()`
+    /// 返回 `None`。
+    CompensationRegistered {
+        ts: i64,
+        run_id: String,
+        compensation_id: String,
+    },
     /// Checkpoint (persisted): 未捕获失败触发了补偿——原始失败随 `error`
     /// 持久化，已登记的撤销 handler 将逆序执行。崩溃后恢复的驱动据此得知
     /// "补偿进行中"。
@@ -295,6 +307,7 @@ impl WorkflowEvent {
             | WorkflowEvent::RunErrored { .. }
             | WorkflowEvent::Custom { .. }
             | WorkflowEvent::StateDelta { .. }
+            | WorkflowEvent::CompensationRegistered { .. }
             | WorkflowEvent::CompensationStarted { .. }
             | WorkflowEvent::CompensationCompleted { .. }
             | WorkflowEvent::CompensationFailed { .. } => None,
@@ -331,6 +344,7 @@ impl WorkflowEvent {
             | WorkflowEvent::NowRecorded { ts, .. }
             | WorkflowEvent::UuidRecorded { ts, .. }
             | WorkflowEvent::StateDelta { ts, .. }
+            | WorkflowEvent::CompensationRegistered { ts, .. }
             | WorkflowEvent::CompensationStarted { ts, .. }
             | WorkflowEvent::CompensationCompleted { ts, .. }
             | WorkflowEvent::CompensationFailed { ts, .. }
@@ -357,6 +371,7 @@ impl WorkflowEvent {
             WorkflowEvent::NowRecorded { .. } => "NOW_RECORDED",
             WorkflowEvent::UuidRecorded { .. } => "UUID_RECORDED",
             WorkflowEvent::StateDelta { .. } => "STATE_DELTA",
+            WorkflowEvent::CompensationRegistered { .. } => "COMPENSATION_REGISTERED",
             WorkflowEvent::CompensationStarted { .. } => "COMPENSATION_STARTED",
             WorkflowEvent::CompensationCompleted { .. } => "COMPENSATION_COMPLETED",
             WorkflowEvent::CompensationFailed { .. } => "COMPENSATION_FAILED",

@@ -229,11 +229,14 @@ impl<TInput, TState, TCtxExt> BaseCtx<TInput, TState, TCtxExt> {
                 return Err(anyhow::anyhow!("Duplicate compensation id \"{id}\"."));
             }
             list.push(crate::engine::Compensation {
-                id,
+                id: id.clone(),
                 undo: std::sync::Arc::new(undo),
                 retry,
             });
         }
+        // 登记落成耐久事件（对齐上游 `COMPENSATION_REGISTERED`）：handler 重放时
+        // 这一步不会重复写日志，崩溃后也从日志看得见"登记过什么"。
+        self.engine.append_compensation_registered(&id)?;
         Ok(())
     }
 

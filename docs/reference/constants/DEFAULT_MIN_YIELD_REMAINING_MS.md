@@ -5,7 +5,7 @@ title: DEFAULT_MIN_YIELD_REMAINING_MS
 
 # Constant: DEFAULT_MIN_YIELD_REMAINING_MS
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:729`](../../../packages/workflow_core/src/engine/mod.rs#L729)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:758`](../../../packages/workflow_core/src/engine/mod.rs#L758)
 
 Default `minYieldRemainingMs` (TanStack): `should_yield()` turns true once
 fewer than this many ms of the runtime budget remain.

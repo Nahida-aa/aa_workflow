@@ -9,7 +9,7 @@ title: exec_now
 pub fn exec_now(inner: &Arc<EngineRuntime>) -> Result<i64>
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:737`](../../../packages/workflow_core/src/engine/mod.rs#L737)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:766`](../../../packages/workflow_core/src/engine/mod.rs#L766)
 
 Deterministic wall-clock behind [`WorkflowCtx::now`](../structs/BaseCtx.md)
 (TanStack `ctx.now`): the call's timestamp, recorded as a `NowRecorded`

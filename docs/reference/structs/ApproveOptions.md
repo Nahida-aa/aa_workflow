@@ -5,7 +5,7 @@ title: ApproveOptions
 
 # Struct: ApproveOptions
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:601`](../../../packages/workflow_core/src/define/mod.rs#L601)
+Defined in: [`packages/workflow_core/src/define/mod.rs:604`](../../../packages/workflow_core/src/define/mod.rs#L604)
 
 [`BaseCtx::approve_with`](BaseCtx.md) 的选项（对齐 TanStack `ApproveOptions` +
 `RunAwaitable` 的 approval 变体，`types.ts:307-312` / `:521-528`）。
@@ -18,7 +18,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:601`](../../../packages/w
 deadline: Option<i64>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:603`](../../../packages/workflow_core/src/define/mod.rs#L603)
+Defined in: [`packages/workflow_core/src/define/mod.rs:606`](../../../packages/workflow_core/src/define/mod.rs#L606)
 
 绝对 UTC ms 期限；`None` = 等人，无时间上限。
 
@@ -31,7 +31,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:603`](../../../packages/w
 meta: Option<Value>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:605`](../../../packages/workflow_core/src/define/mod.rs#L605)
+Defined in: [`packages/workflow_core/src/define/mod.rs:608`](../../../packages/workflow_core/src/define/mod.rs#L608)
 
 自由元数据（如审批单链接、金额、影响面），落进 checkpoint + 投影。
 
@@ -44,7 +44,7 @@ Defined in: [`packages/workflow_core/src/define/mod.rs:605`](../../../packages/w
 schema: Option<PayloadSchema>
 ```
 
-Defined in: [`packages/workflow_core/src/define/mod.rs:607`](../../../packages/workflow_core/src/define/mod.rs#L607)
+Defined in: [`packages/workflow_core/src/define/mod.rs:610`](../../../packages/workflow_core/src/define/mod.rs#L610)
 
 恢复时对审批决定 payload 的形状校验。
 

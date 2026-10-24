@@ -177,7 +177,7 @@ _（存在非公开字段）_
 pub fn publish_progress(&self, step_id: &str, value: f64)
 ```
 
-Defined in: [`packages/workflow_core/src/engine/mod.rs:377`](../../../packages/workflow_core/src/engine/mod.rs#L377)
+Defined in: [`packages/workflow_core/src/engine/mod.rs:406`](../../../packages/workflow_core/src/engine/mod.rs#L406)
 
 #### Parameters
 

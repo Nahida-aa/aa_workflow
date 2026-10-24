@@ -340,6 +340,35 @@ impl EngineRuntime {
         }
     }
 
+    /// 追加一条补偿登记事件（对齐上游 `COMPENSATION_REGISTERED`）。
+    ///
+    /// **登记是耐久的**：日志里已有同 `compensation_id` 的登记就不再追加——
+    /// 这正是重放时handler 重新执行到同一个 `ctx.compensate` 调用点却不重复写
+    /// 日志的原因（与上游 `findCheckpoint` 那一步同义）。
+    pub(crate) fn append_compensation_registered(
+        &self,
+        compensation_id: &str,
+    ) -> Result<(), WorkflowError> {
+        let already = self.store.get_events(&self.run_id)?.iter().any(|ev| {
+            matches!(
+                ev,
+                WorkflowEvent::CompensationRegistered { compensation_id: id, .. }
+                    if id == compensation_id
+            )
+        });
+        if already {
+            return Ok(());
+        }
+        let ev = WorkflowEvent::CompensationRegistered {
+            ts: now_ms(),
+            run_id: self.run_id.clone(),
+            compensation_id: compensation_id.to_string(),
+        };
+        self.append(&ev)?;
+        self.publish(&ev);
+        Ok(())
+    }
+
     /// Diff [`prev_state_snapshot`](Self::prev_state_snapshot) vs
     /// [`state_mirror`](Self::state_mirror)，非空则 **emit-only** 发一条
     /// [`WorkflowEvent::StateDelta`] 并推进快照。

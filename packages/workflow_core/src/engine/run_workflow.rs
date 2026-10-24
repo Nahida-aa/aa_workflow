@@ -2128,6 +2128,83 @@ mod tests {
             .collect()
     }
 
+    /// 补偿**登记**是耐久的（对齐上游 \`COMPENSATION_REGISTERED\`）：落一条事件，
+    /// 且 handler 重放时不会重复追加。
+    #[tokio::test]
+    async fn compensation_registration_is_durable_and_replay_idempotent() {
+        let store: Arc<dyn RunStore> = Arc::new(InMemoryStore::new());
+        let undo_log = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let undo_in = undo_log.clone();
+
+        let wf = WorkflowDefinition::new("reg").handler(move |ctx: WorkflowCtx| {
+            let undo_in = undo_in.clone();
+            async move {
+                ctx.compensate(
+                    "undo-a",
+                    move |_sc: StepCtx| {
+                        let undo_in = undo_in.clone();
+                        Box::pin(async move {
+                            undo_in.lock().unwrap().push("undo-a".into());
+                            Ok(())
+                        })
+                    },
+                    RetryPolicy::new(1, Backoff::Fixed { base_ms: 1 }),
+                )?;
+                Err::<serde_json::Value, _>(anyhow::anyhow!("boom"))
+            }
+        });
+
+        let out = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("reg:1"),
+        )
+        .outcome().await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Errored);
+
+        let registered = store
+            .get_events("reg:1")
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(
+                e,
+                WorkflowEvent::CompensationRegistered { compensation_id, .. }
+                    if compensation_id == "undo-a"
+            ))
+            .count();
+        assert_eq!(registered, 1, "登记应落一条 COMPENSATION_REGISTERED");
+        assert_eq!(
+            undo_log.lock().unwrap().as_slice(),
+            &["undo-a".to_string()],
+            "undo 应执行一次"
+        );
+
+        // 重放（同 run_id 再驱一次）：登记事件不得重复追加。
+        let again = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("reg:1"),
+        )
+        .outcome().await
+        .unwrap();
+        assert_eq!(again.status, RunStatus::Errored);
+        let registered_again = store
+            .get_events("reg:1")
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(
+                e,
+                WorkflowEvent::CompensationRegistered { compensation_id, .. }
+                    if compensation_id == "undo-a"
+            ))
+            .count();
+        assert_eq!(
+            registered_again, 1,
+            "重放不得重复追加登记事件（findCheckpoint 那一步的对端）"
+        );
+    }
+
     /// 重复补偿 id 直接报错（对齐上游 \`Duplicate compensation id "x"\`）。
     ///
     /// 不检查的后果不只是"名单里多一项"：失败时逆序 undo 会把它执行两遍，

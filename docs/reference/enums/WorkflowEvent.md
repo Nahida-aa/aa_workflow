@@ -242,13 +242,32 @@ delta 语义见 `crate::engine::state_diff`。
 
 ***
 
+### CompensationRegistered
+
+```rust
+{ .. }
+```
+
+Defined in: [`packages/workflow_core/src/event.rs:247`](../../../packages/workflow_core/src/event.rs#L247)
+
+Checkpoint (persisted): 一个撤销 handler 被登记——**登记本身是耐久的**，
+重放时不再追加（对齐上游 `COMPENSATION_REGISTERED`）。
+
+上游把补偿 id 放在事件的 `stepId` 字段（它的 `findCheckpoint` 按
+`stepId` 查）；本仓补偿事件统一用 `compensation_id`（与
+`CompensationStarted` / `Completed` / `Failed` 一致），故 `step_id()`
+返回 `None`。
+
+
+***
+
 ### CompensationStarted
 
 ```rust
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:243`](../../../packages/workflow_core/src/event.rs#L243)
+Defined in: [`packages/workflow_core/src/event.rs:255`](../../../packages/workflow_core/src/event.rs#L255)
 
 Checkpoint (persisted): 未捕获失败触发了补偿——原始失败随 `error`
 持久化，已登记的撤销 handler 将逆序执行。崩溃后恢复的驱动据此得知
@@ -263,7 +282,7 @@ Checkpoint (persisted): 未捕获失败触发了补偿——原始失败随 `err
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:250`](../../../packages/workflow_core/src/event.rs#L250)
+Defined in: [`packages/workflow_core/src/event.rs:262`](../../../packages/workflow_core/src/event.rs#L262)
 
 Checkpoint (persisted): 一个已登记的撤销 handler 成功完成——重启后
 该补偿不再重复执行（幂等键 = 补偿 id）。
@@ -277,7 +296,7 @@ Checkpoint (persisted): 一个已登记的撤销 handler 成功完成——重�
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:257`](../../../packages/workflow_core/src/event.rs#L257)
+Defined in: [`packages/workflow_core/src/event.rs:269`](../../../packages/workflow_core/src/event.rs#L269)
 
 Checkpoint (persisted): 一个撤销 handler 耗尽重试——补偿链就地停止
 （后续登记的补偿保持未执行，留给人工处置）。
@@ -291,7 +310,7 @@ Checkpoint (persisted): 一个撤销 handler 耗尽重试——补偿链就地�
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:267`](../../../packages/workflow_core/src/event.rs#L267)
+Defined in: [`packages/workflow_core/src/event.rs:279`](../../../packages/workflow_core/src/event.rs#L279)
 
 Checkpoint (persisted)：耐久重试（#19 `retry.durable`）——步骤失败后
 登记下次重试的绝对截止时间，run 挂起（`__timer` + deadline），到期的
@@ -307,7 +326,7 @@ sweep/重驱以此恢复。重放规则：本事件后该步骤视同未完成�
 { .. }
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:281`](../../../packages/workflow_core/src/event.rs#L281)
+Defined in: [`packages/workflow_core/src/event.rs:293`](../../../packages/workflow_core/src/event.rs#L293)
 
 Observability (persisted): a durable-retry step began attempt `attempt`.
 Aligns with upstream `STEP_ATTEMPT_STARTED` — only emitted when the
@@ -321,7 +340,7 @@ step's retry policy is `durable` (non-durable attempts stay in-memory).
 pub fn step_id(&self) -> Option<&str>
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:291`](../../../packages/workflow_core/src/event.rs#L291)
+Defined in: [`packages/workflow_core/src/event.rs:303`](../../../packages/workflow_core/src/event.rs#L303)
 
 #### Returns
 
@@ -336,7 +355,7 @@ Defined in: [`packages/workflow_core/src/event.rs:291`](../../../packages/workfl
 pub fn ts(&self) -> i64
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:317`](../../../packages/workflow_core/src/event.rs#L317)
+Defined in: [`packages/workflow_core/src/event.rs:330`](../../../packages/workflow_core/src/event.rs#L330)
 
 事件发生时间（每个变体都带 `ts`，对齐 TS 侧 `event.ts`）。
 
@@ -353,7 +372,7 @@ Defined in: [`packages/workflow_core/src/event.rs:317`](../../../packages/workfl
 pub fn type_name(&self) -> &'static str
 ```
 
-Defined in: [`packages/workflow_core/src/event.rs:343`](../../../packages/workflow_core/src/event.rs#L343)
+Defined in: [`packages/workflow_core/src/event.rs:357`](../../../packages/workflow_core/src/event.rs#L357)
 
 对齐 TS 侧 `event.type`）。
 
