@@ -18,7 +18,7 @@
 | store 契约 | `WorkflowExecutionStore` 28 方法（PR#19 后：基类 7 + 扩展 21） | 28 方法（基类 7 + 扩展 21），**逐方法同名比对过** | **两处**：少 `completeTimer`、多 `supportsSignalInbox`（见 §0.2） |
 | 信号 | bufferSignals 收件箱（**runtime 层 opt-in**，早到持久化 + 原子消费 + signalId 去重；需 store `bufferSignal`/`consumeBufferedSignal`，`__timer` 双闸豁免） | ✅ 已对齐：`buffer_signals` 开关 + 三 adapter 收件箱 + 等待点消费落账；core 直投原语已过闸 | 无（Phase 3 已收官，剩余三项为有意设计分歧） |
 | step 重试 | `retry.durable`（attempt/deadline 持久化，sweep 恢复；`STEP_ATTEMPT_STARTED` 事件） | ✅ `RetryPolicy.durable` + `StepRetryScheduled` 泊车/续驱，`__retry:` timer 键同上游 | **一处**：无 `StepAttemptStarted` 事件（见 §0.3） |
-| 补偿 | `ctx.compensate` + `COMPENSATION_REGISTERED` + `COMPENSATION_STARTED{error}` + 逆序 undo；重复 id 报错 | ✅ `ctx.compensate` + `CompensationStarted/Completed/Failed` + 逆序 undo | **两处**：无 `CompensationRegistered` 事件、无重复 id 检查（见 §0.4） |
+| 补偿 | `ctx.compensate` + `COMPENSATION_REGISTERED` + `COMPENSATION_STARTED{error}` + 逆序 undo；重复 id 报错 | ✅ `ctx.compensate` + `CompensationRegistered/Started/Completed/Failed` + 逆序 undo + 重复 id 报错 | 无（仅一处键名分歧，见 §0.4） |
 | checkpoint 导入/泊车 | reexecuteFrom / interimGoals（**f2-lite 自有，上游未采纳**；`f2-lite` 分支 `run-workflow.ts:71-84`） | ✅ 已实现（`reexecute_from` + `StepFinished.meta.imported_from` 溯源；`interim_goals` 泊车 a9a7424） | 无 |
 
 > **本表 2026-10-15 逐行实测过**（此前四行「无差距」是未验证声明，且同表已出过
@@ -104,16 +104,48 @@ PR#19 后基线是 **28 个方法**（基类 7 + 扩展 21）；Rust 也是 **28
 ## 0.4 补偿：语义比对（2026-10-15）
 
 `CompensationStarted{error}` 字段与上游 `COMPENSATION_STARTED{ts, error}` 一致；
-逆序 undo、幂等键 = 补偿 id 一致。
+逆序 undo、幂等键 = 补偿 id 一致。原先实测出的两处差距（无 `CompensationRegistered`
+事件、无重复 id 检查）**均已补齐**，记在下面。
 
-**差距两处**：
+### 已补：`CompensationRegistered` 事件
 
-1. **无 `CompensationRegistered` 事件。** 上游 `ctx.compensate` 会 append
-   `COMPENSATION_REGISTERED{stepId}`，登记是**耐久**的；Rust 仅内存登记，靠
-   handler 重跑确定性重登记。两者在"handler 确定性"前提下等价（这也是本仓
-   replay 模型的地基），但上游多一条日志证据。
-2. **无重复 id 检查。** 上游 `Duplicate compensation id "x"` 直接抛错；Rust 的
-   `compensate` 只 `push`，同 id 登记两次会静默进名单（逆序 undo 时执行两次）。
+上游 `ctx.compensate` 会 append 一条 `COMPENSATION_REGISTERED`，登记因此是**耐久**的。
+Rust 原先仅内存登记、靠 handler 重跑确定性重登记——行为等价，但结构不同：日志里
+没有任何痕迹，重放时也无从判断「这个 run 登记过什么」。
+
+现补为 `EngineRuntime::append_compensation_registered(id)`：先查日志里有没有同 id
+的登记，没有才 append + publish。**先查再写**正是上游 `findCheckpoint` 那一步的
+对端——handler 重放时重新执行到同一个 `ctx.compensate` 调用点，不会重复写日志。
+
+测试 `compensation_registration_is_durable_and_replay_idempotent` 同时钉住两件事：
+登记落一条；同 run_id 重放后**仍是一条**。
+
+### 已补：重复 id 检查
+
+上游 `Duplicate compensation id "x"` 直接抛错。Rust 原先只 `push`，同 id 登记两次会
+静默进名单——失败时逆序 undo 把同一补偿执行两遍，而第二次的撤销对象可能已被第一次
+消掉。测试 `duplicate_compensation_id_is_rejected` 同时断言报错与「undo 只跑一次」。
+
+### 与上游的一处键名分歧（有意，记档）
+
+上游 `COMPENSATION_REGISTERED` 把补偿 id 放在事件的 `stepId` 字段——它的
+`findCheckpoint` 按 `event.stepId` 查，是复用查找键，不是语义上宣称"补偿 id 就是
+step id"。本仓给 `CompensationRegistered` 用 `compensation_id`，**这是有意的键名
+分歧**，理由是本仓内部一致性，不是"无差别"：
+
+| 事件 | id 字段 | 说明 |
+| --- | --- | --- |
+| `CompensationStarted` | **无** | 与上游 `COMPENSATION_STARTED{ts,error}` 一致 |
+| `CompensationCompleted` | `compensation_id` | 我改动前既有（`2fde9fa` 起） |
+| `CompensationFailed` | `compensation_id` | 我改动前既有 |
+| `CompensationRegistered` | `compensation_id` | 本次新增 |
+
+`run_compensations` 的跳过判断（匹配 `CompensationCompleted`）本来就按
+`compensation_id` 匹配。若给 Registered 单配一个 `stepId`，同族四个事件会出现两个
+键名指同一个概念；把 Completed/Failed 也改成 `stepId` 则是既改语义又动既有代码。
+两害相权取内部一致。
+
+代价说清楚：**读日志对照上游时，这一条的键名对不上**，要知道是刻意的。
 
 ## 1. Phase 1 — `ctx.compensate`（undo 轴）
 
