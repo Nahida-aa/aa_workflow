@@ -67,8 +67,15 @@ async fn sqlx_postgres_satisfies_execution_store_contract() {
 /// 在同步线程里建 runtime，跑完整套契约。
 ///
 /// runtime 在函数末尾 drop——此时已在 tokio 上下文之外，安全。
+///
+/// ⚠️ **必须 multi-thread 且 worker ≥2**：store 的同步方法内部走
+/// `block_in_place`，那会占住一个 worker，而 sqlx 连接池归还连接要 runtime
+/// 继续驱动后台任务。单 worker 会自己卡死自己——症状是
+/// `pool timed out while waiting for an open connection`（见
+/// `SqlxPostgresStore::block` 的文档）。与 `run_store_e2e.rs` 保持同一配置。
 fn run_contract_sync(url: &str) -> Result<(), String> {
-    let rt = tokio::runtime::Builder::new_current_thread()
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
         .enable_all()
         .build()
         .map_err(|e| format!("建 runtime 失败: {e}"))?;
