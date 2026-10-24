@@ -14,12 +14,16 @@
 
 | 能力 | TS（taren 分支） | Rust（aa-workflow） | 差距 |
 | --- | --- | --- | --- |
-| runtime 四方法面 | startRun/deliverSignal/deliverApproval/sweep | ✅ 已对齐（runtime_driver.rs 同名四方法） | 无 |
-| store 契约 | WorkflowExecutionStore 19 方法 | 23 方法（store_contract.rs） | 形态差异已对齐 |
+| runtime 四方法面 | startRun/deliverSignal/deliverApproval/sweep | ✅ 四方法同名，**入参逐字段比对过**（2026-10-15） | **一处**：`deliverSignal` 少 `meta`（见 §0.1） |
+| store 契约 | `WorkflowExecutionStore` 28 方法（PR#19 后：基类 7 + 扩展 21） | 28 方法（基类 7 + 扩展 21），**逐方法同名比对过** | **两处**：少 `completeTimer`、多 `supportsSignalInbox`（见 §0.2） |
 | 信号 | bufferSignals 收件箱（**runtime 层 opt-in**，早到持久化 + 原子消费 + signalId 去重；需 store `bufferSignal`/`consumeBufferedSignal`，`__timer` 双闸豁免） | ✅ 已对齐：`buffer_signals` 开关 + 三 adapter 收件箱 + 等待点消费落账；core 直投原语已过闸 | 无（Phase 3 已收官，剩余三项为有意设计分歧） |
-| step 重试 | `retry.durable`（attempt/deadline 持久化，sweep 恢复） | ✅ 已实现（`RetryPolicy.durable` + STEP_RETRY_SCHEDULED 泊车/续驱，c1c7ddf） | 无 |
-| 补偿 | `ctx.compensate` + COMPENSATION_STARTED + 逆序 undo | ✅ 已实现（`ctx.compensate` 内存登记 + 重放重建 + 逆序 undo，c1c7ddf） | 无 |
+| step 重试 | `retry.durable`（attempt/deadline 持久化，sweep 恢复；`STEP_ATTEMPT_STARTED` 事件） | ✅ `RetryPolicy.durable` + `StepRetryScheduled` 泊车/续驱，`__retry:` timer 键同上游 | **一处**：无 `StepAttemptStarted` 事件（见 §0.3） |
+| 补偿 | `ctx.compensate` + `COMPENSATION_REGISTERED` + `COMPENSATION_STARTED{error}` + 逆序 undo；重复 id 报错 | ✅ `ctx.compensate` + `CompensationStarted/Completed/Failed` + 逆序 undo | **两处**：无 `CompensationRegistered` 事件、无重复 id 检查（见 §0.4） |
 | checkpoint 导入/泊车 | reexecuteFrom / interimGoals（**f2-lite 自有，上游未采纳**；`f2-lite` 分支 `run-workflow.ts:71-84`） | ✅ 已实现（`reexecute_from` + `StepFinished.meta.imported_from` 溯源；`interim_goals` 泊车 a9a7424） | 无 |
+
+> **本表 2026-10-15 逐行实测过**（此前四行「无差距」是未验证声明，且同表已出过
+> provenance 错误）。下面四小节记每行的比对依据与已确认的差距；比对基线是
+> `0971b4c`。
 | 图原语 | ——（引擎涌现图） | aa_graph（图中性原语库） | Rust 侧反而领先 |
 
 > **溯源更正（2026-10-15）**：表中「checkpoint 导入/泊车」一行曾写作
@@ -55,6 +59,61 @@
 确认：Rust 引擎**零补偿机制**（`grep -rn compensate packages/workflow_core/src`
 零命中）；事件系统 `WorkflowEvent` 已有 StepFailed{error, attempts}、
 StepFinished{result, attempts}——耐久重试与补偿的持久化挂载点现成。
+
+## 0.1 runtime 四方法面：入参逐字段比对（2026-10-15）
+
+四个方法的入参**逐字段**比过（不是只看方法名）：
+
+| 方法 | 结论 |
+| --- | --- |
+| `startRun` | ✅ 全对齐。Rust 多 `interim_goals` / `reexecute_from`（f2-lite 自有，已标注） |
+| `deliverApproval` | ✅ 全对齐 |
+| `sweep` | ✅ 全对齐（含 `limit` 一次性设三类上限） |
+| `deliverSignal` | ⚠️ **少 `meta`** |
+
+**差距：`deliverSignal` 少 `meta`。** 上游 `WorkflowRuntimeDeliverSignalArgs.meta?`
+（`runtime/src/types.ts:430`）会随投递进入 `SIGNAL_RESOLVED.meta`；Rust 的
+`SignalDelivery` 没这个字段，于是我们给 `SignalResolved` 加的 `meta` **永远是
+`None`**。影响面：宿主无法给信号投递附自由元数据（审批单链接、金额、影响面这
+类）。`StepPaused`/`ApprovalRequested` 侧有 `meta`（`exec_pause_with` 收），
+只有**投递方向**缺。
+
+## 0.2 store 契约：逐方法同名比对（2026-10-15）
+
+PR#19 后基线是 **28 个方法**（基类 7 + 扩展 21）；Rust 也是 **28 个**。snake→camel
+后双向 diff 全空，只差两个：
+
+- **少 `completeTimer`**（上游 `completeTimer?`，**可选**）：Rust 在
+  `deliver_signal` 成功时直接删 timer 记录（`in_memory_store.rs` 的
+  `timers.remove(...)`），效果等价。已在 `SCHEMA_MIGRATIONS.md` 记过同类取舍。
+- **多 `supportsSignalInbox`**：Rust 必要的能力位。TS 靠「方法在不在」判断
+  （`if (config.store.bufferSignal)`），Rust 的 trait 方法必须全部实现，所以用
+  显式能力位表达同一件事。
+
+## 0.3 step 重试：语义比对（2026-10-15）
+
+`StepRetryScheduled` 字段与上游逐字对应（`attempt` / `nextAttemptAt` / `error` /
+`attempts`）；`__retry:` timer 键同上游；`RetryPolicy.durable` 对应上游
+`StepRetryOptions.durable`。
+
+**差距：无 `StepAttemptStarted` 事件。** 上游在 `retryPolicy.durable` 时每次尝试
+前 emit `STEP_ATTEMPT_STARTED{stepId, attempt}`，Rust 没有这个事件类型（事件分类
+对照见 `docs/tanstack-alignment.md`）。影响面：日志里看不到"第几次尝试开始了"，
+只有失败后排的 `STEP_RETRY_SCHEDULED`。
+
+## 0.4 补偿：语义比对（2026-10-15）
+
+`CompensationStarted{error}` 字段与上游 `COMPENSATION_STARTED{ts, error}` 一致；
+逆序 undo、幂等键 = 补偿 id 一致。
+
+**差距两处**：
+
+1. **无 `CompensationRegistered` 事件。** 上游 `ctx.compensate` 会 append
+   `COMPENSATION_REGISTERED{stepId}`，登记是**耐久**的；Rust 仅内存登记，靠
+   handler 重跑确定性重登记。两者在"handler 确定性"前提下等价（这也是本仓
+   replay 模型的地基），但上游多一条日志证据。
+2. **无重复 id 检查。** 上游 `Duplicate compensation id "x"` 直接抛错；Rust 的
+   `compensate` 只 `push`，同 id 登记两次会静默进名单（逆序 undo 时执行两次）。
 
 ## 1. Phase 1 — `ctx.compensate`（undo 轴）
 
