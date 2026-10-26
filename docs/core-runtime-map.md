@@ -60,6 +60,11 @@
   重放读记录不重新生成（`engineNow :1270` / `engineUuid :1299`）。
 - **`meta` 槽**：宿主元数据 + `importedFrom` 溯源（reexecuteFrom 导入的事件）；
   **`audience`**：引擎忽略，投影层过滤 internal/client/admin 视图用。
+- **resume 驱动里事件的出现顺序**（实测，`wf-demo` 测试
+  `workflow-event-example.test.ts` 钉死）：resume 入口先解析宿主 delivery →
+  `SIGNAL_RESOLVED` / `APPROVAL_RESOLVED` **先于** `RUN_STARTED` 落账，然后才
+  走重放。所以 resume 的流是 `[SIGNAL_RESOLVED, RUN_STARTED, …]`，**不是**
+  `[RUN_STARTED, SIGNAL_RESOLVED, …]`。闭卷重画时按这个顺序画，别按直觉。
 - **RUN_STARTED 不落盘**（测试原话 "the stream prepends the unpersisted
   RUN_STARTED"）——importedFrom 的 index 以**持久化日志**为基准，不受它影响。
 - **挂起没有专用事件类型（两边都是）**：sleep/yield 统一走
