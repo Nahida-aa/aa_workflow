@@ -12,11 +12,11 @@
 | # | 功能 | f2-lite (TS) | aa-workflow (Rust) | 状态 |
 | --- | --- | --- | --- | --- |
 | F1 | 同 run 继续：resume + 失效名单 + 临时目标 | ❌ | ❌ | **设计中，未实现** |
-| F2 | redo：新 run 播种幸存 checkpoint | ✅ | ✅ | 已实现 |
+| F2 | redo：新 run 播种幸存 checkpoint | ✅ | ✅ | 已实现（命名待定：`reexecuteFrom` → `reseedRun`） |
 | F3 | 临时目标泊车（interim goals） | ✅ | ✅ | 已实现 |
 | F4 | 信号收件箱（buffer_signals） | ✅（基线 taren 分支） | ✅ | 已实现（Rust 侧 `c536e03` 等） |
 | F5 | 耐久重试 + 补偿 | ✅ | ✅ | 已实现 |
-| F6 | INVALIDATED 耐久失效原语 | ❌ | ❌ | **已评估：不做**（见下） |
+| F6 | INVALIDATED 耐久失效原语 | ❌ | ❌ | **已评估：不做**（区别于 F2 redo/seed，见 `docs/concepts/redo-vs-invalidation.md`） |
 
 ## F1. 同 run 继续：resume + 失效名单 + 临时目标
 
@@ -56,14 +56,23 @@ entry，step 回 `Pending` → 重跑 → 追加新 `StepFinished` → 重放时
 **落地顺序**：f2-lite 先行加 `invalidateSteps` 并写测试 → Rust 镜像 → 回本文件
 更新状态。
 
-## F2. redo：新 run 播种幸存 checkpoint（已实现）
+## F2. redo：新 run 播种幸存 checkpoint（已实现，命名待定）
 
 `reexecute_from(source_run_id, unsafe_invalidate)`：全新 run 首驱前导入源 run
 幸存的 `STEP_FINISHED`（失败 step 按设计重跑），溯源 `meta.importedFrom`。
 两侧都有（f2-lite `reexecuteFrom` / Rust `057a0c6`、runtime 透传 `91111f3`）。
 
+**命名待定**：`reexecuteFrom` 这个名字没体现"落到一个新 run 里"（字面只说"从哪
+重放"，没说结果是新 run）。建议下一版 API 改名 **`reseedRun(sourceRunId,
+{ unsafeInvalidate })`**——保留 `re-` 前缀（增量语义 + 词族对齐 redo），旧名留
+alias 一版再删。论证见 `docs/concepts/redo-vs-invalidation.md` §6。
+
 **定位**：显式新开 run = 常规手段，服务于「换世界重来 + 旧日志原样不动」，
 不是继续手段。日志型代价（新 id / 引用断 / 审计跨 run）由它的问题域承担。
+
+> **注意**：F2 的 redo（seed）≠ F6 的 INVALIDATED。redo/seed 机制轻（零新事件、
+> 零 store 契约变更，已落地），**保留**；INVALIDATED 持久失效原语才是不做的对象。
+> "redo 不进 core" 若被听成"seed 也不做"是误读——seed 是失败续跑的正确默认路径。
 
 ## F3. 临时目标泊车（已实现）
 
