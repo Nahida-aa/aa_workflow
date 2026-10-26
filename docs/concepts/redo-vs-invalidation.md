@@ -6,6 +6,17 @@
 
 ## 0. TL;DR（工程师 30 秒版）
 
+> 先分清两件常被混成一件事的：
+>
+> - **redo（seed）**：开**新 run** + 把源 run 的幸存 checkpoint **播种**进去，失效名单
+>   里的 step 重跑。机制轻——零新事件类型、零 store 契约变更（f2-lite 引擎已落地）。
+> - **INVALIDATED（持久失效原语）**：让"作废决定"本身成为**耐久事实**（跨 drive 仍生效、
+>   日志可独立读出"这步被作废过"）。需要新事件 + 重放规则 + 状态转换，重。
+>
+> 本仓立场：**redo（seed）可以做、且是失败续跑的正确默认路径；INVALIDATED 明确不做**
+> （`feature-requirements.md` F6）。"redo 不进 core" 这句话实际否的是 INVALIDATED，
+> 别把它误读成"seed 也不要做"。
+
 | 你想做什么 | 应该的路 | 不应做的路 |
 | --- | --- | --- |
 | 同一个 run 里“把某几步作废，再跑几步” | **F1：drive 参数 `invalidateSteps`** (same run, no persistence) | — |
@@ -39,7 +50,8 @@
 
 ## 2. 为什么 INVALIDATED 会 complicated core
 
-<|constrain|> aspect | cost |
+| 维度 | 代价 |
+| --- | --- |
 | --- | --- |
 | new event kind | WorkflowEvent union + Rust enum expand; replay matcher updates in two surfaces |
 | replay semantics | invalidated step projection & propagation to successor + compensation undo? |
@@ -96,16 +108,44 @@ replay converges to expected.
 
 None of these trade-offs violate AGENTS constraints; they just live downstream.
 
-## 6. Decision tree (use in docs)
+## 6. 命名：`reexecuteFrom` 应叫 `reseedRun`
+
+`reexecuteFrom` 这个名字**没体现"落到一个新 run 里"**——"re-execute from" 字面只说
+了"从哪重放"，没说结果是一个新 run。读代码的人容易误以为是在**同一个 run 里**重放。
+
+**建议改名 `reseedRun(sourceRunId, { unsafeInvalidate })`**，并保留 `re-` 前缀：
+
+| 候选 | 体现了什么 | 漏了什么 |
+| --- | --- | --- |
+| `reexecuteFrom(src, …)` | 源 run、失效名单 | **新 run** 这件事 |
+| `seedRun(src, …)` | 新 run + 播种 | "第二次播种"的增量语义 |
+| **`reseedRun(src, { unsafeInvalidate })`** | **新 run + 从源 run 幸存 checkpoint 选择性重新播种** | — |
+
+`re-` 不可省：
+
+1. **语义**：`seed` 单独用在编程圈几乎都指"第一次初始化一个新实例"（`db seed` /
+   `rand::seed()`）——隐含"从零种"。但这里做的是"**从源 run 已有的 checkpoint 重新种**"
+   （幸存的 seed、失效/失败的重跑），是**增量**播种。省 `re-` 会丢"第二次"的信息。
+2. **词族**：`redo` / `re-execute` / **reseed** 同属"redo 一族"的 `re-` 词族标志，
+   读的人一眼归到"redo"；丢 `re-` 变 `seedRun` 就滑到"初始化族"，认知跑偏。
+3. **不撞术语**：`reseed` 在 PostgreSQL / Kafka / Rails 都没被占；分布式圈偶见
+   `reseed follower`（从已有数据重同步 follower），语义同向不冲突。
+
+> 注意：改名只动**新 API 的命名**，不影响机制。`reexecuteFrom` 在 f2-lite 引擎已落地
+> （`run-workflow.ts:269-295`），Rust 侧已镜像（`057a0c6`）。若采纳 `reseedRun`，
+> 应在**下一版 API** 落地时改名，旧 `reexecuteFrom` 留 alias 一版再删（对齐上游
+> 的 version routing 不变量 `core-runtime-map.md` §4 #9：不静默回退）。
+
+## 7. Decision tree (use in docs)
 
 ```
-mutate a few steps inverse run?
+mutate a few steps in a run?
  ├─ want same run id / no log split → F1 invalidateSteps (drive param)
- ├─ want clean audit / new identity → F2 reexecuteFrom (redo, seeding)
+ ├─ want clean audit / new identity → F2 reseedRun (redo: 新 run + seed 幸存 checkpoint，即原 reexecuteFrom，见 §6 命名)
  └─ want durable fact "this step is invalidated universally" → no engine prim; app externalize
 ```
 
-## 7. upstream signals (supporting no INVALIDATED)
+## 8. upstream signals (supporting no INVALIDATED)
 
 - TanStack `f2-lite-feature-points.md` §6: explicit "INVALIDATED 不做", matches F6;
 - ai-orchestration official uses same-run resume + redo split per F2-lite note §1
@@ -114,7 +154,7 @@ mutate a few steps inverse run?
 - more: reexecuteFrom still inored by TanStack as "future" public API in their docs
   (contract arms shipped, internal docs point out "future-proof schema primitives").
 
-## 8. doc obligations (what must be published to avoid repeated questions)
+## 9. doc obligations (what must be published to avoid repeated questions)
 
 1. `docs/quick-start.md` get a "redo recipe" with importedFrom fields annotated.
 2. `feature-requirements.md`: F6 explicit positioning "别(ld validity) persistence primitive".
@@ -124,10 +164,8 @@ mutate a few steps inverse run?
 5. `docs/core-runtime-map.md`: §3 line adds no extra primitives; no change needed.
 6. Tests: one E2E scenario "redo round trip preserves audit refs + new run result".
 
-## 9. pointers
+## 10. pointers
 
 - F1 mechanism: engine/run_workflow.rs:876-876 / 902  (see command above)
 - F2 path: commit 057a0c6 + runtime 91111f3
 - F4/F5 alignment: commit c536e03 / 0971b4c
-EOF
-echo done
