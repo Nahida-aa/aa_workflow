@@ -243,55 +243,63 @@ export type CheckpointEvent = Extract<
 ```ts
 import { createWorkflow, runWorkflow, inMemoryRunStore } from '@tanstack/workflow-core'
 
+// ① 定义 workflow——builder 链：createWorkflow(config).handler(fn)
 const report = createWorkflow({
   id: 'doc-report',
-  initialize: () => ({ words: 0 }),
-  handler: async (ctx, input: { doc: string }) => {
-    // ① 第一步：读文档 → 进 STEP_STARTED / STEP_FINISHED
-    const analysis = await ctx.step('analyze', async () => {
-      const words = (await fetch(input.doc)).text() // 业务 IO（示例省略）
-      ctx.state.words = words.length                  // emit-only，不进日志
-      return { words: words.length, risk: words.length > 1000 ? 'high' : 'low' }
-    }, { meta: { doc: input.doc } })
+  initialize: ({ input }) => ({ words: 0 }),
+})
+  .handler(async (ctx) => {
+    // ① 读文档 → STEP_STARTED / STEP_FINISHED（meta 进日志）
+    const analysis = await ctx.step(
+      'analyze',
+      async () => {
+        const text = await fetch(ctx.input.doc).then((r) => r.text())
+        ctx.state.words = text.length       // emit-only（STATE_DELTA），不进日志
+        return { words: text.length, risk: text.length > 1000 ? 'high' : 'low' }
+      },
+      { meta: { doc: ctx.input.doc } },
+    )
 
-    // ② 第二步：写报告 → 进 STEP_STARTED / STEP_FINISHED
+    // ② 写报告 → STEP_STARTED / STEP_FINISHED
     const report = await ctx.step('writeReport', async () => ({
       md: `# Report\nwords=${analysis.words}`,
     }))
 
-    // ③ 泊车：sleep 480s → 写 SIGNAL_AWAITED{name:'__timer', deadline}，
-    //    run 立刻结束本次 drive（不阻塞 worker）。
+    // ③ 泊车：写 SIGNAL_AWAITED{name:'__timer', deadline}，
+    //    本次 drive 立刻结束（不阻塞 worker）。
     await ctx.sleepUntil(Date.now() + 480_000, { id: 'cooldown' })
 
-    // ④ 宿主稍后 deliver `__timer`（sweep 自动注入）→ 恢复后继续：
+    // ④ 宿主稍后 deliver `__timer`（sweep 自动注入）→ 恢复后继续
     await ctx.step('deliver', async () => ({ sent: true }))
 
     return { summary: 'done', ...report }
-  },
-})
-```
+  })
 
-驱动这段代码的宿主侧：
-
-```ts
+// ② 驱动
 const store = inMemoryRunStore()
-const wf = report.createRegistry()
 
-// 第一次 drive：跑到 ③ 处写 SIGNAL_AWAITED 后 park
+// 第一次 drive：start（带 input）→ 跑到 ③ 写 SIGNAL_AWAITED 后 park
 for await (const ev of runWorkflow({
-  workflow: wf.get('doc-report'),
-  input: { doc: 'x.pdf' },
+  workflow: report,
   runStore: store,
+  input: { doc: 'x.pdf' },
   runId: 'r-abc',
 })) { /* ev 逐条流过，对应下面 jsonl 前 6 行 */ }
 
-// 480s 后宿主 sweep（或手动）deliver __timer → 第二次 drive
-// （resume）：从 ④ 处继续，对应下面 jsonl 后 4 行
-await store.deliverSignal?.({
+// 480s 后宿主 sweep（或手动 resume）→ 第二次 drive：resume（带 signalDelivery）
+// 从 ④ 处继续，对应下面 jsonl 后 4 行
+for await (const ev of runWorkflow({
+  workflow: report,
+  runStore: store,
   runId: 'r-abc',
-  delivery: { signalId: 'timer-1', name: '__timer' },
-})
+  signalDelivery: { signalId: 'timer-1', name: '__timer', payload: null },
+})) { /* RUN_FINISHED 在流末尾 */ }
 ```
+
+> **注**：`runWorkflow` 是 `async function*`（AsyncIterable）。drive 的两种模式：
+> **start**（带 `input`，开新 run）/ **resume**（带 `runId` + `signalDelivery`，
+> 从挂起点续跑）。宿主通常不手动 resume，而是定期 `sweep()` 由引擎自动 deliver
+> 到期 timer（见 `wf-demo` 的 `timer-sweep.ts`）。
 
 下面 jsonl 就是这两次 drive 的事件流拼起来的样子：
 
