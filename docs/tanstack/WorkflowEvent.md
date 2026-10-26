@@ -302,6 +302,13 @@ for await (const ev of runWorkflow({
 > **start**（带 `input`，开新 run）/ **resume**（带 `runId` + `signalDelivery`，
 > 从挂起点续跑）。宿主通常不手动 resume，而是定期 `sweep()` 由引擎自动 deliver
 > 到期 timer（见 `wf-demo` 的 `timer-sweep.ts`）。
+>
+> **可运行验证**：上面这段代码不是伪代码——`wf-demo` 里有一份真测试
+> `packages/server/src/workflow-event-example.test.ts`（main 分支，直接 `import`
+> 引擎源）逐条断言两次 drive 的事件序列、`waitingFor` 投影、以及持久化日志
+> 里**不**出现 `RUN_STARTED` / `STEP_STARTED` / `STATE_DELTA`。跑法：
+> `bun packages/server/src/workflow-event-example.test.ts`（在 `wf-demo` 仓，引擎基线
+> 需切到 `taren/durable-recovery` = `0971b4c`，见 `wf-demo` README 分支配对表）。
 
 下面 jsonl 就是这两次 drive 的事件流拼起来的样子：
 
