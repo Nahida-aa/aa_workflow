@@ -6,6 +6,7 @@
 > 行号基于 mirror base `0971b4c`（2026-10 快照，已含 durable retries / compensation）。
 > 上游一旦 diff 本页就该失效——这是设计，不是缺陷：
 > `git -C ../learn_ls/workflow log --oneline 0971b4c..HEAD` 有输出，就回来逐条核锚点。
+> 上游方向雷达与全量重跑步骤见 `docs/dag-strategies.md`（§8 操作手册）。
 
 主线一句话：**把「执行到哪了」记成 append-only 事件日志，把「继续执行」变成
 「重放日志 + 从断点接着跑」**。handler 是普通 async 函数，每次 drive 从头重跑，
