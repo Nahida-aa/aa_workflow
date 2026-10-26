@@ -2,6 +2,7 @@
 **整个引擎的"通用语法"——所有 durability 与 observability 消费面都只约定这一种**事件 shape
 
 ```ts
+export type WorkflowMetadata = Record<string, unknown>
 // ============================================================
 // Workflow event stream (unified log entry + transport event)
 // ============================================================
@@ -210,9 +211,9 @@ export type CheckpointEvent = Extract<
 ### 1. `WorkflowEvent` 是干嘛的
 
 `WorkflowEvent` 是整个引擎**通用的语法**：所有 durability 与 observability
-消费面都只约定这一种事件 shape，so no second schema for "store row" vs "wire shape"。
+消费面都只约定这一种事件 shape，没有第二个 schema：store 行 与 wire 形状 共用同一形状。
 
-<|message|> consumer | 怎么用 | 不能做的事 |
+| consumer | 怎么用 | 不能做的事 |
 | --- | --- | --- |
 | Durability 引擎 | `appendEvent(runId, index, event)` 写入 run log；replay 时 `fold_step_states` 按 stepId 短路 | 把 `ctx.state` 持久化成 STATE_DELTA（STATE_DELTA **不进日志**，emit-only） |
 | Observability/UI | 异步 iterable `runWorkflow`、Durable Streams URL、browser subscribe | 把 RUN_STARTED 当成 persisted 证据（**不落盘**、也不占下标） |
@@ -239,4 +240,22 @@ export type CheckpointEvent = Extract<
 {"type":"SIGNAL_AWAITED","ts":1729891051010,"stepId":"cooldown","name":"__timer","deadline":1729891111000,"meta":{"reason":"rate-limit"}}
 ```
 
-<|message|>
+（park 后由宿主 deliver `__timer` 续驱，追加如下）
+
+```jsonl
+{"type":"SIGNAL_RESOLVED","ts":1729891111020,"stepId":"cooldown","name":"__timer","signalId":"timer-1","payload":null}
+{"type":"STEP_STARTED","ts":1729891111030,"stepId":"deliver"}
+{"type":"STEP_FINISHED","ts":1729891111100,"stepId":"deliver","result":{"sent":true}}
+{"type":"RUN_FINISHED","ts":1729891111120,"runId":"r-abc","output":{"summary":"done"}}
+```
+
+### 4. 持久化 vs 不持久化一览
+
+| 事件 | persisted? | replay? |
+| --- | --- | --- |
+| `RUN_STARTED` / `STEP_STARTED` / `STATE_DELTA` / `CUSTOM` | ❌ 只 emit | 忽略 |
+| `SIGNAL_AWAITED` / `APPROVAL_REQUESTED` | ✅ | 定位 pending wait |
+| 其余 12 个 CheckpointEvent（`STEP_ATTEMPT_STARTED` / `STEP_RETRY_SCHEDULED` / `COMPENSATION_REGISTERED` / `COMPENSATION_STARTED` / `STEP_FINISHED` / `STEP_FAILED` / `SIGNAL_RESOLVED` / `APPROVAL_RESOLVED` / `NOW_RECORDED` / `UUID_RECORDED` / `RUN_FINISHED` / `RUN_ERRORED`） | ✅ | 短路已完成的原语 |
+
+`meta`（宿主元数据 + `importedFrom` 溯源）与 `audience`（internal/client/admin 投影视图）是上层扩展槽——engine 不读，只透传。
+
