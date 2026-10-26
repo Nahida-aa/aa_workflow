@@ -270,6 +270,8 @@ const report = createWorkflow({
     await ctx.sleepUntil(Date.now() + 480_000, { id: 'cooldown' })
 
     // ④ 宿主稍后 deliver `__timer`（sweep 自动注入）→ 恢复后继续
+    // 注意：resume 驱动里 `SIGNAL_RESOLVED` 先于 `RUN_STARTED` 落账（宿主
+    // delivery 在重放前解析），见 `wf-demo` 测试 `packages/server/src/workflow-event-example.test.ts`
     await ctx.step('deliver', async () => ({ sent: true }))
 
     return { summary: 'done', ...report }
