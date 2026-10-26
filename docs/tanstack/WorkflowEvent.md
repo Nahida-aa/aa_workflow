@@ -231,6 +231,13 @@ export type CheckpointEvent = Extract<
 
 ### 3. 一个 run 的 jsonl 例（JS/camelCase 风格，真实 JSONL 无注释）
 
+**注意：下面演示的是「运行时事件流」（observability 消费面看到的完整流），不是「真的会全进日志」。** 引擎里两类事件共用一条流，但**只有一部分会被 `appendEvent` 真正写进日志**（见 §4 的表）：
+
+- `RUN_STARTED` / `STEP_STARTED` / `STATE_DELTA` / `CUSTOM` 只会**扇出**（emit），**不进日志**；
+- `STEP_FINISHED` / `STEP_FAILED` / `SIGNAL_AWAITED` / `SIGNAL_RESOLVED` / `APPROVAL_*` / `NOW_RECORDED` / `UUID_RECORDED` / `RUN_FINISHED` / `RUN_ERRORED` / retry / compensation 这些才是 checkpoint 或 coordination 事件，会 append 进日志。
+
+所以下面 jsonl 里出现的每一条，都是「这条事件在流上被发出来了」，但**是否真的落日志，要按 §4 的表过滤**。`RUN_STARTED` 不占持久化下标（`importedFrom.index` 的基准），`STATE_DELTA` 是 emit-only，都不在日志里。
+
 ```jsonl
 {"type":"RUN_STARTED","ts":1729891000000,"runId":"r-abc","threadId":"T1"}
 {"type":"STEP_STARTED","ts":1729891000010,"stepId":"analyze","meta":{"doc":"x.pdf"}}
