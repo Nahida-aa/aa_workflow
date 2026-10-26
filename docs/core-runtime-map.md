@@ -3,7 +3,9 @@
 > **用法**：定期（建议两周）**不看代码**白纸重画三样东西——①文件地图 ②事件三分类表
 > ③四入口/driveClaimedRun 骨架——然后翻到本页核对。画不出来的地方就是「以为懂了
 > 其实没懂」的机制；对不上的条目说明上游变了，回源码核实后更新本页。
-> 行号基于 mirror base `b928717`（2026-10 快照），上游 diff 后按 §8 雷达更新。
+> 行号基于 mirror base `0971b4c`（2026-10 快照，已含 durable retries / compensation）。
+> 上游一旦 diff 本页就该失效——这是设计，不是缺陷：
+> `git -C ../learn_ls/workflow log --oneline 0971b4c..HEAD` 有输出，就回来逐条核锚点。
 
 主线一句话：**把「执行到哪了」记成 append-only 事件日志，把「继续执行」变成
 「重放日志 + 从断点接着跑」**。handler 是普通 async 函数，每次 drive 从头重跑，
@@ -18,7 +20,7 @@
 | 文件 | 行数 | 职责 | Rust 对应 |
 | --- | --- | --- | --- |
 | `engine/run-workflow.ts` | 1742 | 心脏：runWorkflow generator、四驱动模式分流、driveHandler、全部原语实现（engineStep/engineApprove/engineSleep/…）、reexecuteFrom 导入、middleware 组合、yield/deadline | `engine/run_workflow.rs` + `engine/mod.rs` |
-| `types.ts` | 721 | WorkflowEvent 联合 + 三分类注释（`:45-70`）、StepOptions/RetryOptions、RunState（`:540`）、BaseCtx、waitingFor（`:551`） | `event.rs` + `run_store/mod.rs` + `define/mod.rs` |
+| `types.ts` | 721 | WorkflowEvent 联合 + 三分类注释（`:39-69`）、StepOptions/RetryOptions、RunState（`:572`）、`RunAwaitable`（`:549`）/ `waitingFor`（`:586`）、BaseCtx | `event.rs` + `run_store/mod.rs` + `define/mod.rs` |
 | `define/define-workflow.ts` | 206 | `createWorkflow(config)` 声明期入口（唯一公共构造门） | `define/define_workflow.rs` |
 | `telemetry.ts` | 182 | OTel span（`tanstack.workflow` 前缀）；记录 payload 默认不进属性 | 无（Rust 未做） |
 | `run-store/in-memory.ts` | 117 | core 侧测试 store（旧 6 方法契约） | `run_store/in_memory.rs` |
@@ -34,12 +36,12 @@
 | --- | --- | --- | --- |
 | `runtime-driver.ts` | 1351 | 四入口 + driveClaimedRun 骨架（`:746`）+ 心跳（`:1200`）+ syncTimerFromRunState（`:941`）+ classifyRun | `runtime_driver.rs` |
 | `in-memory-store.ts` | 774 | 契约参考实现（队列+记录+索引三合一） | `in_memory_store.rs` |
-| `types.ts` | 514 | WorkflowExecutionStore 契约（19 方法）+ 四态投递结果（`:423`） | `types.rs`（23 方法） |
+| `types.ts` | 514 | WorkflowExecutionStore 契约（19 必选 + `bufferSignal`/`completeTimer` 两个可选 = 21，`:321`/`:335`）+ 四态投递结果 `DeliverSignalResult`（`:170`） | `run_store_adapter.rs`（21 方法）+ `types.rs`（入参/结果类型） |
 | `schedule-materializer.ts` | 272 | cron/every 声明 → 队列播种（schedule → run） | `schedule_materializer.rs` |
 | `run-store-adapter.ts` | 89 | 新契约 → core 旧契约降格（`createRunStoreAdapter`） | `run_store_adapter.rs` |
 | `define-runtime.ts` + `index.ts` | 46+82 | `defineWorkflowRuntime(config)` / 桶导出 | 同名 |
 
-## 2. WorkflowEvent 三分类（`types.ts:45-70` 官方注释）
+## 2. WorkflowEvent 三分类（`types.ts:39-69` 官方注释 + `CheckpointEvent` `:214`）
 
 | 类 | 成员 | 落盘？ | replay 用它做什么 |
 | --- | --- | --- | --- |
@@ -49,21 +51,33 @@
 
 关键细节：
 
+- **注释比类型旧**：`types.ts:39-69` 那段散文注释仍写着 8 个 checkpoint
+  （没有 retries/compensation 四件），而 `CheckpointEvent`（`:214`）已经 12 个。
+  差异来自 `0971b4c`「Add durable signals, retries, and compensation」——
+  **以类型为准，别以注释为准**（本表列的是类型里的 12 个）。
 - **`NOW_RECORDED` / `UUID_RECORDED`**：确定性的外部性补丁——先掷骰子再记录，
   重放读记录不重新生成（`engineNow :1270` / `engineUuid :1299`）。
 - **`meta` 槽**：宿主元数据 + `importedFrom` 溯源（reexecuteFrom 导入的事件）；
   **`audience`**：引擎忽略，投影层过滤 internal/client/admin 视图用。
 - **RUN_STARTED 不落盘**（测试原话 "the stream prepends the unpersisted
   RUN_STARTED"）——importedFrom 的 index 以**持久化日志**为基准，不受它影响。
-- **TS 形态差异**：TS 没有独立的事件类型表达挂起——sleep/yield 统一走
-  `engineWaitForEvent('__timer')`（`engineSleepUntil :1159`），挂起 =
-  SIGNAL_AWAITED（`__timer` 通道）+ `waitingFor.kind: 'signal'|'approval'`。
-  Rust 侧是 `STEP_PAUSED` / `STEP_RESUME` 一对 checkpoint + `waiting_for`
-  投影——**形态不同，语义同构**（泊车写 checkpoint、恢复找 StepResume 短路）。
+- **挂起没有专用事件类型（两边都是）**：sleep/yield 统一走
+  `engineWaitForEvent('__timer')`（`engineSleepUntil :1159`）——挂起 =
+  `SIGNAL_AWAITED`（`name: '__timer'` + `deadline`）或 `APPROVAL_REQUESTED`，
+  恢复 = 对应 `SIGNAL_RESOLVED` / `APPROVAL_RESOLVED` 短路。Rust 同构：
+  `SignalAwaited` / `ApprovalRequested`（`event.rs:163/:178`），sleep 走
+  `ctx.sleep*` → `__timer` 通道（`engine/mod.rs:491`）。
+  真正的差别只在**投影**：Rust 显式定义 `RunStatus::Paused` 与
+  `StepStatus::Paused`（`event.rs:17/:33`，后者由 `fold_step_states` 派生），
+  TS 只有 `RunStatus`（`:542`，含 `'paused'`），**没有 StepStatus**。
+- **Rust 多三个事件**：`STEP_PROGRESS`、`COMPENSATION_COMPLETED`、
+  `COMPENSATION_FAILED`——TS 的 WorkflowEvent 联合里都没有（见
+  `docs/tanstack-alignment.md`「完整分歧清单」与 `packages/workflow_core/PARITY.md`
+  §已知待补/差异清单）。
 
 ## 3. 四驱动模式 × 四入口
 
-### core：runWorkflow 的四种驱动模式（`run-workflow.ts:34/:189/:260/:371/:189`）
+### core：runWorkflow 的四种驱动模式（`run-workflow.ts:34` options / `:169` 四路分流 / `:189` start / `:260` resume / `:371` attach）
 
 ```
 input                          → start（新 run）
@@ -76,7 +90,8 @@ runId + attach: true           → attach（只读回放，不执行 handler）
 
 ```
 startRun        幂等 createRun（已存在且非 Queued → 不重复驱动）
-deliverSignal   四态投递：NotFound / Duplicate / NotWaiting / Delivered（types.ts:423）
+deliverSignal   四态投递：delivered / duplicate / not-waiting / not-found
+                （`DeliverSignalResult`，`types.ts:170`；not-waiting 时顺手 recover）
 deliverApproval 同款四态
 sweep           recover 的家：捞 stale lease 的 run + 驱动到期 timer
                     ↓ 全部汇入
@@ -116,3 +131,31 @@ RunState 投影（resume/审计）、timer/schedule 索引（sweep 的捞取面�
    结束，绝不路由进新版代码（select-version.ts 的注释原话）。
 10. **core 只区分「哪些要持久化」，介质不在词汇里**——磁盘与否、连接池、租约
     都是 runtime/store 层的事。core 的函数签名里不应该出现这些词。
+
+## 5. 复核记录
+
+**2026-10-26**：本页首次成稿后立刻做了一次全量复核（逐锚点 `git show <commit>:<file>`
+取行号，而非凭记忆），修正了两类问题，留档是因为它们正是本页要防的东西：
+
+- **base 记错**：原写 `b928717`，但全部行数/行号（含 12 个 checkpoint 事件）实际对齐
+  `0971b4c`。照着错的 base 去 diff，会把整份「上游变了」误判成噪声。
+- **两处实质错误**：
+  1. 曾写「Rust 侧是 `STEP_PAUSED` / `STEP_RESUME` 一对 checkpoint」——**Rust 里
+     根本没有这两个事件**（`grep StepPaused/StepResume` 零命中）。两边都是
+     `SIGNAL_AWAITED('__timer')` 泊车，差别只在投影（Rust 有 `StepStatus`，TS 没
+     有）。这是「没读代码、凭印象写对照」的典型产物，现已按源码重写。
+  2. 曾写 `DeliverSignalResult` 在 `types.ts:423`——实际在 `:170`；`:423` 是
+     `WorkflowRuntimeDeliverSignalArgs`。
+- **一处方法论收获**：`types.ts` 的散文注释（8 个 checkpoint）比 `CheckpointEvent`
+  类型（12 个）旧。**上游漂移时注释滞后于类型**，核对锚点要锚类型、锚 `export`，
+  不要锚注释。
+
+复核脚本（复制改 file 即可）：
+
+```bash
+cd ../learn_ls/workflow
+git show 0971b4c:packages/workflow-core/src/types.ts | grep -n "CheckpointEvent\|export interface RunState"
+git show 0971b4c:packages/workflow-runtime/src/types.ts | grep -n "DeliverSignalResult\|export interface WorkflowExecutionStore"
+git show 0971b4c:packages/workflow-runtime/src/runtime-driver.ts | grep -n "driveClaimedRun\|claimRun\|syncTimerFromRunState"
+```
+
