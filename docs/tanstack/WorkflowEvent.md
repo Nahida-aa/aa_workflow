@@ -238,6 +238,63 @@ export type CheckpointEvent = Extract<
 
 所以下面 jsonl 里出现的每一条，都是「这条事件在流上被发出来了」，但**是否真的落日志，要按 §4 的表过滤**。`RUN_STARTED` 不占持久化下标（`importedFrom.index` 的基准），`STATE_DELTA` 是 emit-only，都不在日志里。
 
+#### 产生这段流的 workflow 代码（对应下面 jsonl）
+
+```ts
+import { createWorkflow, runWorkflow, inMemoryRunStore } from '@tanstack/workflow-core'
+
+const report = createWorkflow({
+  id: 'doc-report',
+  initialize: () => ({ words: 0 }),
+  handler: async (ctx, input: { doc: string }) => {
+    // ① 第一步：读文档 → 进 STEP_STARTED / STEP_FINISHED
+    const analysis = await ctx.step('analyze', async () => {
+      const words = (await fetch(input.doc)).text() // 业务 IO（示例省略）
+      ctx.state.words = words.length                  // emit-only，不进日志
+      return { words: words.length, risk: words.length > 1000 ? 'high' : 'low' }
+    }, { meta: { doc: input.doc } })
+
+    // ② 第二步：写报告 → 进 STEP_STARTED / STEP_FINISHED
+    const report = await ctx.step('writeReport', async () => ({
+      md: `# Report\nwords=${analysis.words}`,
+    }))
+
+    // ③ 泊车：sleep 480s → 写 SIGNAL_AWAITED{name:'__timer', deadline}，
+    //    run 立刻结束本次 drive（不阻塞 worker）。
+    await ctx.sleepUntil(Date.now() + 480_000, { id: 'cooldown' })
+
+    // ④ 宿主稍后 deliver `__timer`（sweep 自动注入）→ 恢复后继续：
+    await ctx.step('deliver', async () => ({ sent: true }))
+
+    return { summary: 'done', ...report }
+  },
+})
+```
+
+驱动这段代码的宿主侧：
+
+```ts
+const store = inMemoryRunStore()
+const wf = report.createRegistry()
+
+// 第一次 drive：跑到 ③ 处写 SIGNAL_AWAITED 后 park
+for await (const ev of runWorkflow({
+  workflow: wf.get('doc-report'),
+  input: { doc: 'x.pdf' },
+  runStore: store,
+  runId: 'r-abc',
+})) { /* ev 逐条流过，对应下面 jsonl 前 6 行 */ }
+
+// 480s 后宿主 sweep（或手动）deliver __timer → 第二次 drive
+// （resume）：从 ④ 处继续，对应下面 jsonl 后 4 行
+await store.deliverSignal?.({
+  runId: 'r-abc',
+  delivery: { signalId: 'timer-1', name: '__timer' },
+})
+```
+
+下面 jsonl 就是这两次 drive 的事件流拼起来的样子：
+
 ```jsonl
 {"type":"RUN_STARTED","ts":1729891000000,"runId":"r-abc","threadId":"T1"}
 {"type":"STEP_STARTED","ts":1729891000010,"stepId":"analyze","meta":{"doc":"x.pdf"}}
