@@ -16,6 +16,13 @@
 > 关键设计：**「挂起即返回」+ 日志可重放**（见 `core-runtime-map.md` §4 不变量 #5 / #1）。
 > 所以崩溃 = 进程死了，但日志还在 store 里；新进程 sweep 捞到 → 认领 → 重放 → 续跑。
 
+> **注意区分「引擎」与「运行时」**：
+> - **崩溃恢复的实质（重放 + checkpoint 短路）在 `workflow-core`**，宿主**可以只用 core** 实现：
+>   自己记录哪些 run 该恢复、自己决定 delivery，直接调 `runWorkflow({ recover: true })`。
+> - **`workflow-runtime` 提供的是「自动化」便利**：`sweep()` 自动捞 stale lease + 自动注入
+>   `__timer` / cron。你**可以不用 runtime**，自己实现 claim + 驱动。
+> - 两种写法的对照见 **§6（仅 core）** 与 **§7（用 runtime）**。
+
 ---
 
 ## 1. 崩溃发生在哪、靠什么兜住
@@ -81,10 +88,15 @@ interface ClaimStaleRunsArgs {
 默认 `DEFAULT_SWEEP_LIMIT`）+ deadline + 背压（`shouldStopForDeadline`）。宿主只负责
 **定期 wake-up tick**，真正「能不能捞到」是 store 的活。
 
-> sweep 是崩溃恢复的主通道：**宿主必须定期跑 sweep**（上游 `durable-recovery.md`
-> 升级指南第 4 条「Keep regular sweeps enabled, including maxRecoveredRuns and
-> maxTimers」）。in-memory store 数据随进程丢，但它的 sweep 语义与 D1/Postgres 一致，
-> 测试时用 in-memory 验证行为。
+> sweep 是崩溃恢复的主通道：**用 runtime 时宿主必须定期跑 sweep**（上游
+> `durable-recovery.md` 升级指南第 4 条「Keep regular sweeps enabled, including
+> maxRecoveredRuns and maxTimers」）。in-memory store 数据随进程丢，但它的 sweep
+> 语义与 D1/Postgres 一致，测试时用 in-memory 验证行为。
+>
+> 但 sweep 不是唯一选择——**不用 runtime、纯 core** 也能做崩溃恢复：宿主自己记录
+> 「哪些 run 要恢复 + 每次恢复的 delivery」，崩溃后逐个 `runWorkflow({ recover: true, ... })`。
+> 区别只是「谁来负责发现该恢复哪个 run」：runtime 的 `claimStaleRuns` 自动扫 lease，
+> 纯 core 模式这步要宿主自己维护（见 §6 仅 core / §7 用 runtime 的对照）。
 
 ---
 
@@ -122,9 +134,58 @@ interface ClaimStaleRunsArgs {
 
 ---
 
-## 6. 宿主视角：完整崩溃恢复闭环
+## 6. 仅 core：宿主自己驱动恢复（不用 runtime）
+
+`workflow-core` 自带崩溃恢复的**实质**——重放 + checkpoint 短路 + `recover: true`
+驱动模式。宿主可以完全不引 `workflow-runtime`，自己负责「发现该恢复哪个 run」：
 
 ```ts
+import { runWorkflow, inMemoryRunStore } from '@tanstack/workflow-core'
+
+const store = inMemoryRunStore()   // 生产换 D1 / Postgres RunStore
+const workflow = createWorkflow({ id: 'order', ... }).handler((ctx) => { /* ... */ })
+
+// —— 正常驱动（start）——
+await drain(runWorkflow({ workflow, runStore: store, runId: 'o-1', input: {...} }))
+// 进程在这里崩了；日志已落 store（D1/Postgres），in-memory 则丢
+
+// —— 新进程起来，宿主自己知道「o-1 还卡在 __timer / 外部信号」——
+// 崩溃恢复 = 重新调 runWorkflow，带 runId + 该 run 当前挂起点需要的 delivery：
+await drain(runWorkflow({
+  workflow,
+  runStore: store,
+  runId: 'o-1',
+  recover: true,                                    // recovery 驱动模式（run-workflow.ts:169）
+  // 卡在 __timer：
+  signalDelivery: { name: '__timer', signalId: 'timer:o-1:step:deadline', payload: undefined },
+  // 卡在外部信号：
+  // signalDelivery: { name: 'payment-received', signalId: 'pay-1', payload: { paymentId: '456' } },
+  // 卡在审批：
+  // approval: { approvalId: 'appr-1', approved: true },
+}))
+```
+
+要点：
+
+- **core 不知道「哪些 run 该被恢复」**——它只接受「给我这个 runId + 它的 delivery，我重放续跑」。
+  「哪个 run 卡住了、卡在哪、delivery 是什么」是**宿主的账**（宿主自己存 run 状态 / 挂起点）。
+- `recover: true` 只是告诉引擎「这是 recovery 驱动」（sweep 与 deliverSignal 未等待时的
+  推一把都走它，`core-runtime-map.md` §3）。实际重放逻辑 = 从 store 拿日志 + 短路。
+- **没有租约、没有自动 sweep、没有 timer 自动注入**——这些都靠宿主自己实现。
+  sleep 的 `__timer` 要宿主 cron 到期后**手动**构造 `signalDelivery` 投进去。
+
+> 适合：宿主已有调度框架（平台帮你 sweep）、或短命单进程「崩了直接开新 run 重跑」
+> 的场景。核心语义够用，不想要 runtime 的自动化，就停在这。
+
+---
+
+## 7. 用 runtime：自动 claim + 自动 sweep（完整闭环）
+
+`workflow-runtime` 在 core 之上加了「自动发现 + 自动驱动」：
+
+```ts
+import { defineWorkflowRuntime } from '@tanstack/workflow-runtime'
+
 // 宿主（Cloudflare Cron / Railway / Netlify / Vercel scheduler 都行）
 const runtime = defineWorkflowRuntime({ store, workflows, bufferSignals: true })
 
@@ -135,9 +196,19 @@ await runtime.startRun({ workflowId: 'order', runId: 'o-1', input: {...} })
 
 // 宿主定期（比如每 30s 一次）：
 await runtime.sweep({ maxRecoveredRuns: 25, maxTimers: 25, maxDurationMs: 55_000 })
-//   内部：claimStaleRuns 捞过期 lease 的 run → driveClaimedRun(recover:true) 重放续跑
-//         + claimDueTimers / claimDueScheduleBuckets 把到期 timer / cron 也驱动了
+//   内部自动：
+//   1) claimStaleRuns 捞 lease 过期的 run → driveClaimedRun(recover:true) 重放续跑
+//   2) claimDueTimers 把到期 __timer 自动 deliverSignal 唤醒 sleep
+//   3) claimDueScheduleBuckets 把到期 cron 物化成新 run
 ```
+
+runtime 比「仅 core」多做了三件事：
+
+| 多做的事 | 机制 |
+| --- | --- |
+| **自动发现**哪些 run 该恢复 | `claimStaleRuns`（`runtime-driver.ts:469`）扫 lease 过期 + queued + pendingSignal + missingTimer |
+| **自动认领**（谁抢到谁跑） | lease CAS（`claimRun`，`runtime-driver.ts:796`）+ 心跳续租（`startLeaseHeartbeat`，`:837`） |
+| **自动唤醒 timer** | `syncTimerFromRunState`（`:941`）把停在 `__timer` 的 deadline 登记成 timer 记录，sweep 到期自动 `deliverSignal` |
 
 **宿主责任清单**（引擎不管的部分）：
 
@@ -147,9 +218,13 @@ await runtime.sweep({ maxRecoveredRuns: 25, maxTimers: 25, maxDurationMs: 55_000
 - 外部副作用幂等（`StepContext.id` 当 idempotency key）；
 - run 保留策略（inbox 条目无自动过期）。
 
+> 两种写法**底层都是同一套**：runtime 的 sweep 内部还是调 core 的 `runWorkflow({ recover: true })`
+> 做重放（`driveClaimedRun` → `runWorkflow`）。区别只在「发现 + 认领 + timer 注入」这三件自动化
+> 由谁做。
+
 ---
 
-## 7. 不变量（违反会怎样）
+## 8. 不变量（违反会怎样）
 
 | 不变量 | 违反后果 |
 | --- | --- |
@@ -157,16 +232,17 @@ await runtime.sweep({ maxRecoveredRuns: 25, maxTimers: 25, maxDurationMs: 55_000
 | 已 checkpoint 的 step 无条件短路（闭包不执行） | 重放重跑副作用 → 钱扣两次 / 消息发两遍 |
 | lease 过期才允许别的 owner 认领（CAS 闸） | 两个 worker 同时驱动一个 run → 日志冲突 |
 | sweep bounded（上限 + deadline） | 一个慢 run 卡死整批 sweep → 其他 run 饿死 |
-| 宿主定期 sweep | 崩溃的 run 永远不被捞回 |
+| 「发现该恢复哪个 run」有人负责（runtime sweep 或宿主自己） | 崩溃的 run 永远不被捞回 |
 
 ---
 
-## 8. 代码位置索引（0971b4c）
+## 9. 代码位置索引（0971b4c）
 
 | 主题 | 文件 : 行 |
 | --- | --- |
 | `runWorkflow` 四驱动模式（含 `recover:true`） | `packages/workflow-core/src/engine/run-workflow.ts:34/:189/:260/:371`（start/resume/attach），`recover` 走 `:169` 分流 |
 | `runWorkflow` generator + 事件队列 | `run-workflow.ts:82` |
+| **仅 core 恢复**：`recover:true` + `signalDelivery`/`approval` 直接 `runWorkflow` | `run-workflow.ts:169`（分流）+ `RunWorkflowOptions`（`:34`） |
 | `driveClaimedRun` 骨架（认领→心跳→驱动→timer→释放） | `packages/workflow-runtime/src/runtime-driver.ts:746` |
 | `sweep`（recovered/scheduled/timers 三段） | `runtime-driver.ts:464/:545/:610` |
 | `claimStaleRuns` 契约 + 参考实现 | `runtime/src/types.ts:353` / `in-memory-store.ts:497` |
