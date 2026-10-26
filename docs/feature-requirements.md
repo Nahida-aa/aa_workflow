@@ -94,6 +94,10 @@ TS 侧基线 `taren/durable-recovery` 原生有 `bufferSignals`。
 日志两条 `StepFinished` 后者胜已覆盖需求。若将来出现该场景（例：审计要求
 「作废决定本身是耐久事实」），按配对纪律两遍实现，**先写设计文档**。
 
+更详尽 rationale（engine complexity、redo trade-offs、decision tree、upstream
+supporting points）见 `docs/concepts/redo-vs-invalidation.md`（ADR 式，编号与本仓
+F1/F2/F6 对齐）。
+
 ## 通用约束（本轮明确过的，新增功能都要过）
 
 1. **隐式新开 run 默认禁止**。引擎在 resume 时内部创建新 run 而调用方不直接
