@@ -4,11 +4,11 @@
 //! ⑤ 的 `DagShape` 是「DAG 术语」唯一合法驻地（aa_graph 闭包展开 → 名单透传）。
 //!
 //! ① interimGoals 泊车 + deliver_signal 续驱  ② compensate 逆序撤销
-//! ③ durable retry 泊车 + sweep 续跑  ④ reexecuteFrom redo（名单透传）
+//! ③ durable retry 泊车 + sweep 续跑  ④ reseedRun redo（名单透传）
 //! ⑤ 形状图合龙（dub_sf_ocr 同款 10 步）
 
 use aa_workflow_core::{
-    CreateWorkflowConfig, ReexecuteFrom, StepCtx, WorkflowCtx, WorkflowDefinition, WorkflowEvent,
+    CreateWorkflowConfig, ReseedRun, StepCtx, WorkflowCtx, WorkflowDefinition, WorkflowEvent,
     create_workflow,
 };
 use aa_workflow_dag::DagShape;
@@ -305,11 +305,11 @@ async fn demo_durable_retry_park_and_resume() {
     );
 }
 
-/// ④ redo（INVALIDATE 侧）：`reexecuteFrom` 经 start_run 透传——源 run 幸存
+/// ④ redo（INVALIDATE 侧）：`reseedRun` 经 start_run 透传——源 run 幸存
 ///    checkpoint 导入（带 imported_from 溯源），失效名单里的 b 重跑，a/c 短路。
 ///    名单封闭性是调用者的不变量（`unsafe` 之名由此而来）。
 #[tokio::test]
-async fn demo_reexecute_from_invalidate_rerun() {
+async fn demo_reseed_run_invalidate_rerun() {
     let log = Arc::new(Mutex::new(TestLog::default()));
     let (rt, _mem) = demo_runtime(vec![("w", three_step_wf(&log))]);
 
@@ -329,7 +329,7 @@ async fn demo_reexecute_from_invalidate_rerun() {
             workflow_id: "w".into(),
             run_id: "demo:redo".into(),
             input: serde_json::json!({}),
-            reexecute_from: Some(ReexecuteFrom::new("demo:src").with_invalidate(vec!["b".into()])),
+            reseed_run: Some(ReseedRun::new("demo:src").with_invalidate(vec!["b".into()])),
             ..Default::default()
         })
         .await
@@ -358,8 +358,8 @@ async fn demo_reexecute_from_invalidate_rerun() {
 ///    sf_ocr_pre→sf_ocr→sf_ocr_fix→translate）+ 汇聚链
 ///    （split_audio 吃两支产物 → tts → mix_audio → mix_video）。
 ///    场景：翻译服务故障——translate 失败，其余 5 步成功在案。
-///    `DagShape::reexecute_plan` 缺省 from = 未成功节点（translate 及其下游
-///    4 步），闭包展开后交给 start_run 的 reexecute_from；修复后重跑恰好
+///    `DagShape::reseed_plan` 缺省 from = 未成功节点（translate 及其下游
+///    4 步），闭包展开后交给 start_run 的 reseed_run；修复后重跑恰好
 ///    那 5 步，OCR 链与人声轴全部导入短路。形状只是名单计算依据——真实
 ///    handler 的 try_join! 并行在 demo 里串行化（执行序与形状解耦）。
 #[tokio::test]
@@ -403,7 +403,7 @@ async fn demo_dub_sf_ocr_shape_closure_redo() {
     let core_store = create_run_store_adapter(Arc::clone(&mem) as _);
     let source_events = core_store.get_events("dub:src").unwrap();
     let plan = shape
-        .reexecute_plan("dub:src", &source_events, None)
+        .reseed_plan("dub:src", &source_events, None)
         .expect("from 缺省不引入未知 step");
     assert_eq!(
         plan.unsafe_invalidate,
@@ -418,7 +418,7 @@ async fn demo_dub_sf_ocr_shape_closure_redo() {
             workflow_id: "dub_sf_ocr".into(),
             run_id: "dub:redo".into(),
             input: serde_json::json!({}),
-            reexecute_from: Some(plan),
+            reseed_run: Some(plan),
             ..Default::default()
         })
         .await

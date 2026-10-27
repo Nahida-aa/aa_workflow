@@ -20,7 +20,7 @@ use crate::run_store::RunStore;
 mod run_workflow;
 pub mod state_diff;
 pub use run_workflow::{
-    PublisherFn, ReexecuteFrom, RunId, RunOutcome, RunWorkflowOptions, run_workflow,
+    PublisherFn, ReseedRun, RunId, RunOutcome, RunWorkflowOptions, run_workflow,
     run_workflow_sync, select_workflow_version,
 };
 pub use state_diff::{Operation, diff_state, snapshot_state};

@@ -52,7 +52,7 @@ pub mod run_store;
 pub use define::{AnyWorkflowDefinition, ApproveOptions, Backoff, BaseCtx, CreateWorkflowConfig, PayloadSchema, PayloadValidator, RetryPolicy, StepCtx, StepOptions, WaitForEventOptions, WorkflowBuilder, WorkflowCtx, WorkflowDefinition, create_workflow};
 pub use engine::{Operation, diff_state, snapshot_state};
 pub use engine::{
-    PublisherFn, ReexecuteFrom, RunId, RunOutcome, RunWorkflowOptions, cancel_run, run_workflow,
+    PublisherFn, ReseedRun, RunId, RunOutcome, RunWorkflowOptions, cancel_run, run_workflow,
     run_workflow_sync, select_workflow_version, signal_approval, signal_event, signal_run,
 };
 pub use error::{RunError, RunErrorCode, StoreError, WorkflowError};

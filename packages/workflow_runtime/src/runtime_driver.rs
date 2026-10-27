@@ -230,8 +230,8 @@ pub struct WorkflowRuntimeStartRunArgs {
     pub interim_goals: Option<Vec<String>>,
     /// redo 计划（f2-lite 自有，上游未采纳；f2-lite `runtime/types.ts:425`，INVALIDATE 侧）：全新
     /// run 首驱前导入源 run 幸存 checkpoint，失效名单重跑。语义见
-    /// [`aa_workflow_core::ReexecuteFrom`]；resume 驱动被 core 忽略（fresh-only）。
-    pub reexecute_from: Option<aa_workflow_core::ReexecuteFrom>,
+    /// [`aa_workflow_core::ReseedRun`]；resume 驱动被 core 忽略（fresh-only）。
+    pub reseed_run: Option<aa_workflow_core::ReseedRun>,
     /// 覆盖时钟（测试用）；缺省取当前时间。
     pub now: Option<i64>,
     pub deadline: Option<i64>,
@@ -546,7 +546,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
             run_id: &args.run_id,
             input: Some(args.input),
             interim_goals: args.interim_goals.clone(),
-            reexecute_from: args.reexecute_from.clone(),
+            reseed_run: args.reseed_run.clone(),
             lease_owner: args.lease_owner.clone(),
             lease_ms: args.lease_ms,
             now,
@@ -613,7 +613,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                         // Delivered 分支的理由）。
                         input: Some(run.input.clone()),
                         interim_goals: None,
-                        reexecute_from: None,
+                        reseed_run: None,
                         lease_owner: args.lease_owner.clone(),
                         lease_ms: args.lease_ms,
                         now,
@@ -698,7 +698,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                         // 上游同此：`runtime-driver.ts:481` 传 `claim.run.input`。
                         input: Some(run.input.clone()),
                         interim_goals: None,
-                        reexecute_from: None,
+                        reseed_run: None,
                         lease_owner: args.lease_owner.clone(),
                         lease_ms: args.lease_ms,
                         now,
@@ -815,7 +815,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
             run_id: &args.run_id,
             input: Some(input),
             interim_goals: None,
-            reexecute_from: None,
+            reseed_run: None,
             lease_owner: args.lease_owner.clone(),
             lease_ms: args.lease_ms,
             now,
@@ -887,7 +887,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                     run_id: &claim.run.run_id,
                     input: Some(claim.run.input.clone()),
                     interim_goals: None,
-                    reexecute_from: None,
+                    reseed_run: None,
                     lease_owner: Some(lease_owner.clone()),
                     lease_ms: Some(lease_ms),
                     thread_id: None,
@@ -927,7 +927,7 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
                     run_id: bucket.run_id.clone(),
                     input: bucket.input.clone().unwrap_or(serde_json::Value::Null),
                     interim_goals: None,
-                    reexecute_from: None,
+                    reseed_run: None,
                     now: Some(now),
                     deadline,
                     max_duration_ms: None,
@@ -1130,8 +1130,8 @@ impl<TWorkflows: WorkflowRegistry> WorkflowRuntimeDefinition<TWorkflows> {
         if let Some(goals) = &args.interim_goals {
             opts = opts.interim_goals(goals.clone());
         }
-        if let Some(rf) = &args.reexecute_from {
-            opts = opts.reexecute_from(rf.clone());
+        if let Some(rf) = &args.reseed_run {
+            opts = opts.reseed_run(rf.clone());
         }
         opts = opts.publish(Some(publish));
         let drive_result = run_workflow(opts).outcome().await;
@@ -1203,8 +1203,8 @@ struct DriveArgs<'a> {
     /// 续驱名单走重复 `start_run`，上游无 interimGoals、deliverSignal args 自然不带）。
     interim_goals: Option<Vec<String>>,
     /// redo 计划——start_run 透传；其余入口恒 `None`（core 对 resume 驱动
-    /// 本来就忽略 reexecute_from，fresh-only）。
-    reexecute_from: Option<aa_workflow_core::ReexecuteFrom>,
+    /// 本来就忽略 reseed_run，fresh-only）。
+    reseed_run: Option<aa_workflow_core::ReseedRun>,
     /// 租约属主。`None` = 由 [`Self::drive_claimed_run`] 按上游
     /// `runtime:{run_id}` 前缀兜底生成（`runtime-driver.ts:680`）。**只有 sweep
     /// 会预先生成** `sweep:{now}`（上游 `:416`）——那是批次标识，不是 per-run 的。
@@ -1358,7 +1358,7 @@ mod driver_tests {
     use crate::WorkflowRunStoreAdapterStore;
     use crate::in_memory_store::InMemoryExecutionStore;
     use aa_workflow_core::{
-        CreateWorkflowConfig, ReexecuteFrom, RunState, RunStatus, StepCtx, WaitForState,
+        CreateWorkflowConfig, ReseedRun, RunState, RunStatus, StepCtx, WaitForState,
         WorkflowCtx, create_workflow,
     };
 
@@ -2471,11 +2471,11 @@ mod driver_tests {
     }
 
     /// startRun 的两个 f2-lite 参数（f2-lite `runtime/types.ts:425/430`）经 runtime 透传到 core：
-    /// interimGoals 泊车 + 重复 start_run 续驱；reexecuteFrom redo。名单语义
+    /// interimGoals 泊车 + 重复 start_run 续驱；reseedRun redo。名单语义
     /// 本身（fresh-only / 转移检查 / 封闭性归调用者）在 core 有专测，这里只证
     /// 「runtime 门带得动参数」。
     #[tokio::test]
-    async fn start_run_passthrough_interim_goals_and_reexecute_from() {
+    async fn start_run_passthrough_interim_goals_and_reseed_run() {
         let log: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
         let log_for_handler = Arc::clone(&log);
         let wf = create_workflow(CreateWorkflowConfig::new("w").input::<serde_json::Value>())
@@ -2548,14 +2548,14 @@ mod driver_tests {
             "三步各执行一次"
         );
 
-        // 3) reexecuteFrom redo：失效 a → a 重跑，b/c 导入短路
+        // 3) reseedRun redo：失效 a → a 重跑，b/c 导入短路
         let redo = fixture
             .rt
             .start_run(WorkflowRuntimeStartRunArgs {
                 workflow_id: "w".into(),
                 run_id: "redo:rt".into(),
                 input: serde_json::json!({}),
-                reexecute_from: Some(ReexecuteFrom::new("goal:rt").with_invalidate(vec!["a".into()])),
+                reseed_run: Some(ReseedRun::new("goal:rt").with_invalidate(vec!["a".into()])),
                 ..Default::default()
             })
             .await

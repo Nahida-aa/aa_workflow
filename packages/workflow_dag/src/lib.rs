@@ -3,20 +3,20 @@
 //! 结构化编排层（对齐 TS 侧 `workflow-dag` 包的定位）：**形状声明
 //! （aa_graph）→ 闭包展开 → 引擎名单透传**。core 不知道任何 DAG——本
 //! crate 是「DAG 术语」唯一合法的驻地：把使用者声明的形状图和源 run 日志
-//! 折算成引擎能理解的失效名单，再交给 `run_workflow` 的 `reexecute_from`。
+//! 折算成引擎能理解的失效名单，再交给 `run_workflow` 的 `reseed_run`。
 //!
 //! 分层契约（对齐 TS 侧已验证的分工）：
 //!
 //! | 层 | 收什么 | 计算 |
 //! | --- | --- | --- |
-//! | core `reexecute_from` | 展开后的名单 | 无（名单透传，不校验封闭性） |
+//! | core `reseed_run` | 展开后的名单 | 无（名单透传，不校验封闭性） |
 //! | 本 crate | `from`（种子）；缺省 = 源日志未成功节点 | `种子 ∪ descendants_from(种子)` |
 //!
 //! demo 测试见 `tests/dag_recovery_demo.rs`（五个场景：四个引擎原语 +
 //! 形状图合龙）。
 
 use aa_graph::dag::{builder::DagBuilder, error::DagError, static_dag::StaticDag};
-use aa_workflow_core::{ReexecuteFrom, WorkflowEvent};
+use aa_workflow_core::{ReseedRun, WorkflowEvent};
 use std::collections::{BTreeSet, HashMap};
 
 /// 形状/名单计算的错误。
@@ -115,7 +115,7 @@ impl DagShape {
         Ok(set.into_iter().collect())
     }
 
-    /// redo 计划：把 `from` 折算成引擎的 [`ReexecuteFrom`]。
+    /// redo 计划：把 `from` 折算成引擎的 [`ReseedRun`]。
     ///
     /// - `from = Some(seeds)`：种子即失效起点，展开为 `种子 ∪ 后继闭包`；
     /// - `from = None`：缺省 = 源日志里**未成功**的节点（没有
@@ -124,12 +124,12 @@ impl DagShape {
     ///
     /// `source_log` 传源 run 的持久化事件（`store.get_events(source_run_id)`）；
     /// 导入的 checkpoint 也带 `STEP_FINISHED`，所以 redo 源同样适用。
-    pub fn reexecute_plan(
+    pub fn reseed_plan(
         &self,
         source_run_id: impl Into<String>,
         source_log: &[WorkflowEvent],
         from: Option<Vec<String>>,
-    ) -> Result<ReexecuteFrom, ShapeError> {
+    ) -> Result<ReseedRun, ShapeError> {
         let seeds = match from {
             Some(f) => f,
             None => {
@@ -149,7 +149,7 @@ impl DagShape {
         };
         let seeds: Vec<&str> = seeds.iter().map(String::as_str).collect();
         let invalidate = self.invalidation_set(&seeds)?;
-        Ok(ReexecuteFrom::new(source_run_id).with_invalidate(invalidate))
+        Ok(ReseedRun::new(source_run_id).with_invalidate(invalidate))
     }
 }
 
@@ -222,7 +222,7 @@ mod tests {
         // 源 run：a、c 成功（b 失败 → d 没跑到）→ 缺省种子 {b, d}
         let log = vec![step_finished("a"), step_finished("c")];
         let plan = shape
-            .reexecute_plan("src-run", &log, None)
+            .reseed_plan("src-run", &log, None)
             .unwrap();
         assert_eq!(plan.source_run_id, "src-run");
         assert_eq!(plan.unsafe_invalidate, vec!["b", "d"]);
@@ -233,7 +233,7 @@ mod tests {
         let shape = diamond();
         let log = vec![step_finished("a"), step_finished("c")];
         let plan = shape
-            .reexecute_plan("src-run", &log, Some(vec!["b".into()]))
+            .reseed_plan("src-run", &log, Some(vec!["b".into()]))
             .unwrap();
         assert_eq!(plan.unsafe_invalidate, vec!["b", "d"]);
     }

@@ -47,7 +47,7 @@ pub struct StepAttempt {
 }
 
 /// `STEP_FINISHED` 的可选元数据槽（对齐上游事件上的 `meta`）。目前只承载
-/// 一种事实：checkpoint 从源 run 导入（`reexecute_from` 的 INVALIDATE 侧）。
+/// 一种事实：checkpoint 从源 run 导入（`reseed_run` 的 INVALIDATE 侧）。
 /// 引擎自己产生的 checkpoint 恒为 `None`——序列化时整个省略，旧日志反序
 /// 列化为 `None`，日志形状前后兼容。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -65,6 +65,37 @@ pub struct ImportedFrom {
     pub index: usize,
 }
 
+/**
+ * The shape of every event the engine appends to a run's log.
+ *
+ * Two consumers, one shape:
+ *
+ *   - **Durability**: the engine appends events to the run's log.
+ *     Replay reads the log and short-circuits primitives that have
+ *     a matching CHECKPOINT event by `stepId`.
+ *   - **Observability**: the engine emits the same events through
+ *     `runWorkflow`'s `AsyncIterable<WorkflowEvent>` and (if wired)
+ *     through stream subscribers. A browser/UI subscribes to the
+ *     same log a Durable Streams URL would expose.
+ *
+ * Events fall into two categories internally:
+ *
+ *   - **Checkpoint events** — replay uses these to skip already-
+ *     completed work. Indexed by `stepId`. STEP_FINISHED,
+ *     STEP_FAILED, SIGNAL_RESOLVED, APPROVAL_RESOLVED, NOW_RECORDED,
+ *     UUID_RECORDED, RUN_FINISHED, RUN_ERRORED.
+ *
+ *   - **Coordination events** — persisted so hosts and resume calls
+ *     can identify the pending wait. SIGNAL_AWAITED,
+ *     APPROVAL_REQUESTED.
+ *
+ *   - **Observability events** — engine emits but replay ignores.
+ *     RUN_STARTED, STEP_STARTED, STATE_DELTA, CUSTOM.
+ *
+ * The optional `audience` field is engine-ignored. Adapters/views
+ * (e.g., a Durable Streams projection layer) may filter on it to
+ * produce internal vs client vs admin views of the same log.
+ */
 /// Append-only persisted events. Each event is immutable; the log is the
 /// engine's source of truth and doubling as the resume checkpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,7 +140,7 @@ pub enum WorkflowEvent {
         step_id: String,
         result: Option<serde_json::Value>,
         attempts: Vec<StepAttempt>,
-        /// 元数据槽（上游 `meta`）；`reexecute_from` 导入的 checkpoint 在
+        /// 元数据槽（上游 `meta`）；`reseed_run` 导入的 checkpoint 在
         /// 这里带 [`ImportedFrom`] 溯源，引擎自己产生的恒为 `None`。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         meta: Option<StepMeta>,

@@ -84,8 +84,8 @@ pub type PublisherFn =
 /// newtype 内部持 `Arc<WorkflowDefinition>`：`previous_versions` 是 `Vec`、另有
 /// 若干 `Arc`，按值持有会让每次 run 都 deep-copy 一遍；`Arc` 让 clone 变引用计数自增，
 /// 也避免给结构体引入生命周期参数（那会让 builder 链很难写）。
-/// re-execute 计划（INVALIDATE 侧，`reexecuteFrom`——**f2-lite 自有，上游未采纳**；
-/// 引用自 `f2-lite` 分支 `run-workflow.ts:71-84`。以**全新 run** 启动，把源 run 幸存
+/// re-seed 计划（INVALIDATE 侧，`reseedRun`——**f2-lite 自有，上游未采纳**；
+/// 引用自 `f2-lite` 分支 `run-workflow.ts`。以**全新 run** 启动，把源 run 幸存
 /// 的 checkpoint 导入本 run 的日志——每条 stepId 不在 [`Self::unsafe_invalidate`]
 /// 名单里的 `STEP_FINISHED`（失败的 step 不导入、按设计重跑）。溯源写进事件的
 /// `meta.imported_from`。
@@ -94,8 +94,12 @@ pub type PublisherFn =
 /// 调用者的不变量**（`unsafe` 之名由此而来：b 消费 a 的结果而你只失效 a，
 /// 导入的 b 会拿着 a 的旧结果短路）。上层（DAG 编排）负责算出闭包名单，
 /// 引擎只透传名单本身。
+///
+/// 命名 `reseedRun`：它落到**新 run**（从源 run 幸存 checkpoint 重新播种）。
+/// `re-` 前缀保留（增量播种 + redo 词族）。
+/// deprecated alias 一版。
 #[derive(Debug, Clone)]
-pub struct ReexecuteFrom {
+pub struct ReseedRun {
     /// checkpoint 的来源 run。
     pub source_run_id: String,
     /// 强制重跑的 stepId 名单（引擎透传、不校验封闭性）。空 = 全部导入、
@@ -103,7 +107,7 @@ pub struct ReexecuteFrom {
     pub unsafe_invalidate: Vec<String>,
 }
 
-impl ReexecuteFrom {
+impl ReseedRun {
     pub fn new(source_run_id: impl Into<String>) -> Self {
         Self {
             source_run_id: source_run_id.into(),
@@ -135,11 +139,11 @@ pub struct RunWorkflowOptions {
     pub input: serde_json::Value,
     /// 命中即停（本地扩展；上游用 handler 内 early `return`）。
     pub interim_goals: Option<Vec<String>>,
-    /// re-execute 计划（INVALIDATE 侧，`reexecuteFrom`，f2-lite 自有）。只在**全新
+    /// re-seed 计划（INVALIDATE 侧，`reseedRun`，f2-lite 自有）。只在**全新
     /// run 的 start 路径**生效：resume 驱动忽略它（重放短路已覆盖旧
     /// checkpoint，重复导入会双写）；`source_run_id == run_id`、或源 run
-    /// 不存在时报错（`run_lost`）。语义见 [`ReexecuteFrom`]。
-    pub reexecute_from: Option<ReexecuteFrom>,
+    /// 不存在时报错（`run_lost`）。语义见 [`ReseedRun`]。
+    pub reseed_run: Option<ReseedRun>,
     /// 只读回放一个已存在的 run（上游 `attach`，`run-workflow.ts:48` / `:371`）。
     ///
     /// 不碰 handler、不写日志、不改 `RunState`——把日志里已有的事件原样重放
@@ -243,7 +247,7 @@ impl RunWorkflowOptions {
             run_id: None,
             input: serde_json::Value::Null,
             interim_goals: None,
-            reexecute_from: None,
+            reseed_run: None,
             attach: false,
             deadline: None,
             min_yield_remaining_ms: None,
@@ -277,12 +281,13 @@ impl RunWorkflowOptions {
         self
     }
 
-    /// re-execute 计划（INVALIDATE 侧）：新 run 起步时导入源 run 幸存的
-    /// checkpoint。语义见 [`ReexecuteFrom`]；只在全新 run 的 start 路径生效。
-    pub fn reexecute_from(mut self, rf: ReexecuteFrom) -> Self {
-        self.reexecute_from = Some(rf);
+    /// re-seed 计划（INVALIDATE 侧）：新 run 起步时导入源 run 幸存的
+    /// checkpoint。语义见 [`ReseedRun`]；只在全新 run 的 start 路径生效。
+    pub fn reseed_run(mut self, plan: ReseedRun) -> Self {
+        self.reseed_run = Some(plan);
         self
     }
+
 
     /// 只读回放已存在的 run（上游 `attach`）。见 [`RunWorkflowOptions::attach`]。
     pub fn attach(mut self) -> Self {
@@ -719,7 +724,7 @@ async fn drive(
         });
     }
 
-    // reexecute_from 只在全新 run 的 start 路径生效（resume 忽略——见字段
+    // reseed_run 只在全新 run 的 start 路径生效（resume 忽略——见字段
     // 文档）；fresh 与否在这里判定一次。
     let is_fresh = persisted.is_none();
     let run_state = match persisted {
@@ -804,7 +809,7 @@ async fn drive(
         return Err(error_persisted(&store, run_state, &run_id, &e, RunErrorCode::Validation));
     }
 
-    // F2-lite re-execute 计划（INVALIDATE 侧，f2-lite 分支 run-workflow.ts:269-295）：
+    // F2-lite re-seed 计划（INVALIDATE 侧，f2-lite 分支 `reseedRun`）：
     // 首驱前把源 run 幸存的 checkpoint 导入本 run 的日志——只导
     // `STEP_FINISHED`，且 stepId 不在失效名单里（失败的 step 不导入、按设
     // 计重跑）。溯源 `meta.imported_from` 的 `index` 以**源 run 的持久化日
@@ -812,19 +817,20 @@ async fn drive(
     // `get_events` 之前完成，折叠出的 lives / log_len / interim-goal 检查
     // 因此天然包含导入的 checkpoint。
     let mut imported_events: Vec<WorkflowEvent> = Vec::new();
-    if let Some(rf) = opts.reexecute_from.as_ref()
+    // `reseed_run`：首驱前把源 run 幸存 checkpoint 导入本 run 的日志。
+    if let Some(rf) = opts.reseed_run.as_ref()
         && is_fresh
     {
         if rf.source_run_id == run_id {
             let e = anyhow::anyhow!(
-                "reexecute_from: source run `{}` is the run being started",
+                "reseed_run: source run `{}` is the run being started",
                 rf.source_run_id
             );
             return Err(error_persisted(&store, run_state, &run_id, &e, RunErrorCode::Validation));
         }
         if store.get_run_state(&rf.source_run_id).ok().flatten().is_none() {
             let e =
-                anyhow::anyhow!("reexecute_from: source run `{}` not found", rf.source_run_id);
+                anyhow::anyhow!("reseed_run: source run `{}` not found", rf.source_run_id);
             return Err(error_persisted(&store, run_state, &run_id, &e, RunErrorCode::RunLost));
         }
         let source_log = match store.get_events(&rf.source_run_id) {
@@ -2832,7 +2838,7 @@ mod tests {
     }
 
     // ========================================================
-    // reexecuteFrom（INVALIDATE 侧）——镜像 f2-lite engine.rerun.test.ts 的
+    // reseedRun（INVALIDATE 侧）——镜像 f2-lite engine.rerun.test.ts 的
     // 两个场景 + 本仓补的源缺失用例
     // ========================================================
 
@@ -2879,7 +2885,7 @@ mod tests {
     /// c 短路于导入的 checkpoint（**拿着 a 的旧结果**——封闭性是调用者的
     /// 不变量）；导入事件带 `meta.imported_from`，新执行不带。
     #[tokio::test]
-    async fn reexecute_from_imports_surviving_checkpoints_and_reruns_invalidated() {
+    async fn reseed_run_imports_surviving_checkpoints_and_reruns_invalidated() {
         let store = Arc::new(InMemoryStore::new());
         let src_log = Arc::new(Mutex::new(TestLog::default()));
         let first = run_workflow(
@@ -2896,8 +2902,8 @@ mod tests {
             RunWorkflowOptions::new(abc_wf(&rerun_log), store.clone())
                 .input(serde_json::json!({}))
                 .run_id("rerun-1")
-                .reexecute_from(
-                    ReexecuteFrom::new(source_run_id.clone())
+                .reseed_run(
+                    ReseedRun::new(source_run_id.clone())
                         .with_invalidate(vec!["a".into(), "b".into()]),
                 ),
         )
@@ -2943,7 +2949,7 @@ mod tests {
 
     /// 上游场景 2：只给 sourceRunId（名单缺省）→ 全部导入、零重跑。
     #[tokio::test]
-    async fn reexecute_from_imports_everything_without_invalidate_list() {
+    async fn reseed_run_imports_everything_without_invalidate_list() {
         let store = Arc::new(InMemoryStore::new());
         let src_log = Arc::new(Mutex::new(TestLog::default()));
         let first = run_workflow(
@@ -2959,7 +2965,7 @@ mod tests {
             RunWorkflowOptions::new(abc_wf(&rerun_log), store.clone())
                 .input(serde_json::json!({}))
                 .run_id("rerun-all")
-                .reexecute_from(ReexecuteFrom::new(source_run_id.clone())),
+                .reseed_run(ReseedRun::new(source_run_id.clone())),
         )
         .outcome()
         .await
@@ -2988,14 +2994,14 @@ mod tests {
     /// 本仓补充：源 run 不存在 → run_lost（上游 in-memory getEvents 对缺失
     /// run 返回空数组、静默导入零条；我们显式报错——attach 的同款约定）。
     #[tokio::test]
-    async fn reexecute_from_missing_source_fails_run_lost() {
+    async fn reseed_run_missing_source_fails_run_lost() {
         let store = Arc::new(InMemoryStore::new());
         let log = Arc::new(Mutex::new(TestLog::default()));
         let out = run_workflow(
             RunWorkflowOptions::new(abc_wf(&log), store.clone())
                 .input(serde_json::json!({}))
                 .run_id("rerun-lost")
-                .reexecute_from(ReexecuteFrom::new("no-such-run")),
+                .reseed_run(ReseedRun::new("no-such-run")),
         )
         .outcome()
         .await
@@ -3007,7 +3013,7 @@ mod tests {
             RunWorkflowOptions::new(abc_wf(&log), store.clone())
                 .input(serde_json::json!({}))
                 .run_id("rerun-lost-2")
-                .reexecute_from(ReexecuteFrom::new("no-such-run")),
+                .reseed_run(ReseedRun::new("no-such-run")),
         )
         .collect()
         .await;
@@ -3139,11 +3145,11 @@ mod tests {
         assert_eq!(l.runs.get("d").copied().unwrap_or(0), 0, "下游不推进");
     }
 
-    /// 场景 2（redo）：因错误停止的 run 的恢复路 = reexecuteFrom——失败的
+    /// 场景 2（redo）：因错误停止的 run 的恢复路 = reseedRun——失败的
     /// checkpoint 不导入（缺席即待续），幸存 a/b 导入短路；修复版 handler
     /// 里 c 真实重跑 → Finished。
     #[tokio::test]
-    async fn reexecute_from_errored_source_reruns_failed_step() {
+    async fn reseed_run_errored_source_reruns_failed_step() {
         let store = Arc::new(InMemoryStore::new());
         let src_log = Arc::new(Mutex::new(TestLog::default()));
         let first = run_workflow(
@@ -3163,7 +3169,7 @@ mod tests {
             RunWorkflowOptions::new(chain_wf(&fixed_log, None), store.clone())
                 .input(serde_json::json!({}))
                 .run_id("err:fixed")
-                .reexecute_from(ReexecuteFrom::new(source_run_id.clone())),
+                .reseed_run(ReseedRun::new(source_run_id.clone())),
         )
         .outcome()
         .await
@@ -3180,7 +3186,7 @@ mod tests {
     /// 泊车（d 缺席），续驱补齐。goals_done_at_drive_start 的转移检查以
     /// **导入后**的 lives 计算：c 起步时缺席 → 不跳过泊车。
     #[tokio::test]
-    async fn reexecute_from_errored_source_with_interim_goals_parks_at_goal() {
+    async fn reseed_run_errored_source_with_interim_goals_parks_at_goal() {
         let store = Arc::new(InMemoryStore::new());
         let src_log = Arc::new(Mutex::new(TestLog::default()));
         let first = run_workflow(
@@ -3199,7 +3205,7 @@ mod tests {
             RunWorkflowOptions::new(chain_wf(&fixed_log, None), store.clone())
                 .input(serde_json::json!({}))
                 .run_id("err:goal-fixed")
-                .reexecute_from(ReexecuteFrom::new(source_run_id.clone()))
+                .reseed_run(ReseedRun::new(source_run_id.clone()))
                 .interim_goals(vec!["c".into()]),
         )
         .outcome()
