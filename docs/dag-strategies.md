@@ -167,7 +167,7 @@ const [a, b] = await Promise.all([branchA(), branchB()])
 | 能力 | upstream 0971b4c 位置 | 本仓 |
 | --- | --- | --- |
 | interim goals (`interimGoals`, per-drive, 不落盘) | research memo 指向；core-side equivalent | F3 已实现 |
-| redo：`reexecuteFrom` 开新 run + `unsafeInvalidate` | `engine/run-workflow.ts` reexecuteFrom path | F2 已实现 |
+| redo：`reseedRun` 开新 run + `unsafeInvalidate` | `engine/run-workflow.ts` reseedRun path | F2 已实现 |
 | 同 run resume + 失效名单 (`invalidateSteps`) | **未发布**（0971b4c 无；f2-lite 内部 note 提议） | F1 设计中，未实现 |
 | 耐久 INVALIDATED 事件 | **明确不做**（upstream + F6） | F6 已评估：不做 |
 | signal 收件箱 (`bufferSignals`) | 0971b4c ships (`0001_signal_inbox.sql`) | F4 已实现 |
@@ -177,7 +177,7 @@ const [a, b] = await Promise.all([branchA(), branchB()])
 
 **强信号**：upstream 自己把 "继续 = 同 run resume" 当成第一优先
 (f2-lite note §1：官方 ai-orchestration 用法全部 continuation 走同一 run_id；
-新 run 仅服务 `reexecuteFrom` 那类需求)。因此 **F1 不会落进分歧清单**——跟进上游
+新 run 仅服务 `reseedRun` 那类需求)。因此 **F1 不会落进分歧清单**——跟进上游
 自然语义风险低。
 
 动议：

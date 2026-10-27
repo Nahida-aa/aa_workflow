@@ -19,7 +19,7 @@
 | 信号 | bufferSignals 收件箱（**runtime 层 opt-in**，早到持久化 + 原子消费 + signalId 去重；需 store `bufferSignal`/`consumeBufferedSignal`，`__timer` 双闸豁免） | ✅ 已对齐：`buffer_signals` 开关 + 三 adapter 收件箱 + 等待点消费落账；core 直投原语已过闸 | 无（Phase 3 已收官，剩余三项为有意设计分歧） |
 | step 重试 | `retry.durable`（attempt/deadline 持久化，sweep 恢复；`STEP_ATTEMPT_STARTED` 事件） | ✅ `RetryPolicy.durable` + `StepRetryScheduled` 泊车/续驱 + `StepAttemptStarted`，`__retry:` timer 键同上游 | 无 |
 | 补偿 | `ctx.compensate` + `COMPENSATION_REGISTERED` + `COMPENSATION_STARTED{error}` + 逆序 undo；重复 id 报错 | ✅ `ctx.compensate` + `CompensationRegistered/Started/Completed/Failed` + 逆序 undo + 重复 id 报错 | 无（仅一处键名分歧，见 §0.4） |
-| checkpoint 导入/泊车 | reexecuteFrom / interimGoals（**f2-lite 自有，上游未采纳**；`f2-lite` 分支 `run-workflow.ts:71-84`） | ✅ 已实现（`reexecute_from` + `StepFinished.meta.imported_from` 溯源；`interim_goals` 泊车 a9a7424） | 无 |
+| checkpoint 导入/泊车 | reseedRun / interimGoals（**f2-lite 自有，上游未采纳**；`f2-lite` 分支 `run-workflow.ts:71-84`） | ✅ 已实现（`reseed_run` + `StepFinished.meta.imported_from` 溯源；`interim_goals` 泊车 a9a7424） | 无 |
 
 > **本表 2026-10-15 逐行实测过**（此前四行「无差距」是未验证声明，且同表已出过
 > provenance 错误）。下面四小节记每行的比对依据与已确认的差距；比对基线是
@@ -42,7 +42,7 @@
 >
 > `0971b4c` 是 `f2-lite` 的祖先、反向差 0 提交；fork 那支与基线**同 hash**。
 > 所以「f2-lite 里凡是 `0971b4c` 没有的，必是本地工作」这条判据成立。
-> 对 `reexecuteFrom` / `interimGoals` / `__interim-goal` 三个关键词核验：
+> 对 `reseedRun` / `interimGoals` / `__interim-goal` 三个关键词核验：
 > `origin/main`（`b928717`）**零命中**、`0971b4c`（基线本身）**也零命中**——
 > 不是"main 还没合"，是**基线上根本不存在**。只存在于 f2-lite 那 6 个提交。
 > （`run-workflow.ts:80` / `:91`，runtime 侧 `runtime/types.ts:425` / `:430`），
@@ -66,7 +66,7 @@ StepFinished{result, attempts}——耐久重试与补偿的持久化挂载点�
 
 | 方法 | 结论 |
 | --- | --- |
-| `startRun` | ✅ 全对齐。Rust 多 `interim_goals` / `reexecute_from`（f2-lite 自有，已标注） |
+| `startRun` | ✅ 全对齐。Rust 多 `interim_goals` / `reseed_run`（f2-lite 自有，已标注） |
 | `deliverApproval` | ✅ 全对齐 |
 | `sweep` | ✅ 全对齐（含 `limit` 一次性设三类上限） |
 | `deliverSignal` | ⚠️ **少 `meta`** |
@@ -337,7 +337,7 @@ emit 即 append）再放行；`None` 回落既有 `find_resume` 全日志扫描�
 
 **现状**（2026-10）：redo / 临时目标两半都已落地——
 
-- `reexecute_from(source_run_id, unsafe_invalidate)`：全新 run 首驱前导入
+- `reseed_run(source_run_id, unsafe_invalidate)`：全新 run 首驱前导入
   源 run 幸存 checkpoint（只导 `STEP_FINISHED`、失败 step 按设计重跑），
   溯源 `meta.imported_from`（index 以源 run 持久化日志为基准）。参考
   `f2-lite` 分支 `run-workflow.ts:269-295`（**本仓自有，上游未采纳**）；

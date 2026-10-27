@@ -20,7 +20,7 @@
 | 你想做什么 | 应该的路 | 不应做的路 |
 | --- | --- | --- |
 | 同一个 run 里“把某几步作废，再跑几步” | **F1：drive 参数 `invalidateSteps`** (same run, no persistence) | — |
-| 换整个世界 (new input, immutably audit) | **F2：`reexecuteFrom` 开新 run，seeding 幸存 checkpoint** | — |
+| 换整个世界 (new input, immutably audit) | **F2：`reseedRun` 开新 run，seeding 幸存 checkpoint** | — |
 | run 完成后 retroactively “作废某 fact 并使作废持久” | **application 层 externalize**（记录 sourceref + downstream 只读） | `INVALIDATED` 耐久原语（F6: 明确不做） |
 
 结论：拖入 INVALIDATED 作为耐久 event 需要新 machinery；**新 run + seed survivors** 不动 engine core，把 decision 放在 drive boundary。
@@ -38,13 +38,13 @@
 
 ### 1.2 new world, clean audit (F2)
 
-- 解法：显式 `reexecuteFrom(sourceRunId, unsafeInvalidate)` → 全新 run id,
+- 解法：显式 `reseedRun(sourceRunId, { unsafeInvalidate })` → 全新 run id,
   ingest survivors, new StepFinished append `meta.importedFrom` 作为 sourcing.
 - old log immutable, new log 从 `RUN_STARTED` 开始; list two runs to audit.
 
 ### 1.3 "invalidated 作废 fact durable" (F6, out of scope)
 
-- 上游 fn-orchestration 也没有 INVALIDATED event; `reexecuteFrom` 公开 doc 也说
+- 上游 fn-orchestration 也没有 INVALIDATED event; 上游 `reexecuteFrom` 公开 doc 也说
   "only usable on the start path of a fresh run"。本库的 F6 = "已评估：不做"。
 - 需要时 externalize at app layer（SKU mapping, versioned pointer）。
 
@@ -67,7 +67,7 @@ Aggregate result: INVALIDATED makes every discipline in AGENTS.md
 
 ## 3. Redo pattern (the right default):
 
-1. call `reexecuteFrom({ sourceRunId, unsafeInvalidate })` with fresh `runId`;
+1. call `reseedRun({ sourceRunId, { unsafeInvalidate } })` with fresh `runId`;
 2. survivors (`STEP_FINISHED`) ingest as seed checkpoints (append with `meta.importedFrom`);
 3. FAILed steps not seeded → re-run automatically;
 4. old log stays immutable, new log provides clean audit line.
@@ -80,7 +80,7 @@ Invariant: old run logs remain queryable by `sourceRunId`; application layer hol
 ```
 await runWorkflow({
   workflow, runStore,
-  reexecuteFrom: { sourceRunId: oldRun, unsafeInvalidate: ['step-b'] },
+  reseedRun: { sourceRunId: oldRun, unsafeInvalidate: ['step-b'] },
 });
 ```
 
@@ -108,10 +108,9 @@ replay converges to expected.
 
 None of these trade-offs violate AGENTS constraints; they just live downstream.
 
-## 6. 命名：`reexecuteFrom` 应叫 `reseedRun`
+## 6. 命名：`reseedRun`（原 `reexecuteFrom`，已改名）
 
-`reexecuteFrom` 这个名字**没体现"落到一个新 run 里"**——"re-execute from" 字面只说
-了"从哪重放"，没说结果是一个新 run。读代码的人容易误以为是在**同一个 run 里**重放。
+原 `reexecuteFrom` 这个名字**没体现"落到一个新 run 里"**——"re-execute from" 字面只说了"从哪重放"，没说结果是一个新 run。读代码的人容易误以为是在**同一个 run 里**重放。**已改名 `reseedRun`**（f2-lite 引擎 + aa-workflow Rust 两侧，0.x 阶段直接换新名、不留 alias）。
 
 **建议改名 `reseedRun(sourceRunId, { unsafeInvalidate })`**，并保留 `re-` 前缀：
 
@@ -131,10 +130,10 @@ None of these trade-offs violate AGENTS constraints; they just live downstream.
 3. **不撞术语**：`reseed` 在 PostgreSQL / Kafka / Rails 都没被占；分布式圈偶见
    `reseed follower`（从已有数据重同步 follower），语义同向不冲突。
 
-> 注意：改名只动**新 API 的命名**，不影响机制。`reexecuteFrom` 在 f2-lite 引擎已落地
-> （`run-workflow.ts:269-295`），Rust 侧已镜像（`057a0c6`）。若采纳 `reseedRun`，
-> 应在**下一版 API** 落地时改名，旧 `reexecuteFrom` 留 alias 一版再删（对齐上游
-> 的 version routing 不变量 `core-runtime-map.md` §4 #9：不静默回退）。
+> 落地范围：f2-lite 引擎（`run-workflow.ts` 的 `reseedRun` 字段 + `runtime` 透传）
+> 与 aa-workflow Rust（`ReseedRun` struct + `RunWorkflowOptions.reseed_run` +
+> `workflow_dag` 的 `reseed_plan`）**两侧同步、直接删旧名**（0.x 未稳定，
+> 用户 2026-10 明确不留向后兼容）。机制不变，只换名字。
 
 ## 7. Decision tree (use in docs)
 
@@ -151,7 +150,7 @@ mutate a few steps in a run?
 - ai-orchestration official uses same-run resume + redo split per F2-lite note §1
   (all continuations on same run_id; new run only for reexecuteFrom-class need);
 - upstream `reexecuteFrom` public doc also says start-path-only.
-- more: reexecuteFrom still inored by TanStack as "future" public API in their docs
+- 注：upstream 语境里仍可能见到旧名 `reexecuteFrom`（改名是本仓 + f2-lite 引擎的决定，上游 0971b4c 主线本无此 API）
   (contract arms shipped, internal docs point out "future-proof schema primitives").
 
 ## 9. doc obligations (what must be published to avoid repeated questions)

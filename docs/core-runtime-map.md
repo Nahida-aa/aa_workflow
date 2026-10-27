@@ -20,7 +20,7 @@
 
 | 文件 | 行数 | 职责 | Rust 对应 |
 | --- | --- | --- | --- |
-| `engine/run-workflow.ts` | 1742 | 心脏：runWorkflow generator、四驱动模式分流、driveHandler、全部原语实现（engineStep/engineApprove/engineSleep/…）、reexecuteFrom 导入、middleware 组合、yield/deadline | `engine/run_workflow.rs` + `engine/mod.rs` |
+| `engine/run-workflow.ts` | 1742 | 心脏：runWorkflow generator、四驱动模式分流、driveHandler、全部原语实现（engineStep/engineApprove/engineSleep/…）、reseedRun 导入、middleware 组合、yield/deadline | `engine/run_workflow.rs` + `engine/mod.rs` |
 | `types.ts` | 721 | WorkflowEvent 联合 + 三分类注释（`:39-69`）、StepOptions/RetryOptions、RunState（`:572`）、`RunAwaitable`（`:549`）/ `waitingFor`（`:586`）、BaseCtx | `event.rs` + `run_store/mod.rs` + `define/mod.rs` |
 | `define/define-workflow.ts` | 206 | `createWorkflow(config)` 声明期入口（唯一公共构造门） | `define/define_workflow.rs` |
 | `telemetry.ts` | 182 | OTel span（`tanstack.workflow` 前缀）；记录 payload 默认不进属性 | 无（Rust 未做） |
@@ -58,7 +58,7 @@
   **以类型为准，别以注释为准**（本表列的是类型里的 12 个）。
 - **`NOW_RECORDED` / `UUID_RECORDED`**：确定性的外部性补丁——先掷骰子再记录，
   重放读记录不重新生成（`engineNow :1270` / `engineUuid :1299`）。
-- **`meta` 槽**：宿主元数据 + `importedFrom` 溯源（reexecuteFrom 导入的事件）；
+- **`meta` 槽**：宿主元数据 + `importedFrom` 溯源（reseedRun 导入的事件）；
   **`audience`**：引擎忽略，投影层过滤 internal/client/admin 视图用。
 - **resume 驱动里事件的出现顺序**（实测，`wf-demo` 测试
   `workflow-event-example.test.ts` 钉死）：resume 入口先解析宿主 delivery →
@@ -132,7 +132,7 @@ RunState 投影（resume/审计）、timer/schedule 索引（sweep 的捞取面�
    续驱）走 deliverSignal（或 recover 驱动），不是再 start 一次。
 8. **终态不可原地翻转**——errored/finished 的 run 没有「解除终态继续跑」；
    retry 在 step 内（durable retry 是「延迟终态」），修复后重开 =
-   reexecuteFrom 开新 run 播种。要原地翻案需要 INVALIDATED 原语（策略 C，未实现）。
+   reseedRun 开新 run 播种。要原地翻案需要 INVALIDATED 原语（策略 C，未实现）。
 9. **版本路由不回退**——run 持久化的 version 匹配不上 current/previous 时报错
    结束，绝不路由进新版代码（select-version.ts 的注释原话）。
 10. **core 只区分「哪些要持久化」，介质不在词汇里**——磁盘与否、连接池、租约

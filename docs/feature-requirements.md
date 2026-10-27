@@ -12,7 +12,7 @@
 | # | 功能 | f2-lite (TS) | aa-workflow (Rust) | 状态 |
 | --- | --- | --- | --- | --- |
 | F1 | 同 run 继续：resume + 失效名单 + 临时目标 | ❌ | ❌ | **设计中，未实现** |
-| F2 | redo：新 run 播种幸存 checkpoint | ✅ | ✅ | 已实现（命名待定：`reexecuteFrom` → `reseedRun`） |
+| F2 | redo：新 run 播种幸存 checkpoint | ✅ | ✅ | 已实现（原 `reexecuteFrom`，已改名 `reseedRun`） |
 | F3 | 临时目标泊车（interim goals） | ✅ | ✅ | 已实现 |
 | F4 | 信号收件箱（buffer_signals） | ✅（基线 taren 分支） | ✅ | 已实现（Rust 侧 `c536e03` 等） |
 | F5 | 耐久重试 + 补偿 | ✅ | ✅ | 已实现 |
@@ -30,13 +30,13 @@ resume 时可以选择：
 **为什么现有手段不够**：
 
 - `interim_goals`（F3）只管「停在哪」，不管「哪些重跑」；
-- `reexecute_from`（F2）能表达失效，但要**开新 run**：新 run id、外部引用断裂、
+- `reseed_run`（F2）能表达失效，但要**开新 run**：新 run id、外部引用断裂、
   input 重喂、审计跨两个 run 拼。为「换目标继续」付这些代价，收益是零——是 hack。
 
 **自然形态**：drive 参数 `invalidate_steps: Option<Vec<String>>`，与
 `interim_goals` 并列（core 的 `RunWorkflowOptions` 与 runtime 的
 `WorkflowRuntimeStartRunArgs` 各加一处，两侧同名同形）。语义与
-`reexecute_from.unsafe_invalidate` 是**同一个 unsafe 语义**（封闭性由调用者担保：
+`reseed_run.unsafe_invalidate` 是**同一个 unsafe 语义**（封闭性由调用者担保：
 失效 B 不失效下游 C，C 会拿旧结果短路），只是作用对象是一次 drive 而非新 run 导入。
 
 **机制**（已对 Rust 代码核实）：drive 启动时从折叠出的 `lives` 删掉被点名的
@@ -56,16 +56,15 @@ entry，step 回 `Pending` → 重跑 → 追加新 `StepFinished` → 重放时
 **落地顺序**：f2-lite 先行加 `invalidateSteps` 并写测试 → Rust 镜像 → 回本文件
 更新状态。
 
-## F2. redo：新 run 播种幸存 checkpoint（已实现，命名待定）
+## F2. redo：新 run 播种幸存 checkpoint（已实现，已改名 `reseedRun`）
 
-`reexecute_from(source_run_id, unsafe_invalidate)`：全新 run 首驱前导入源 run
+`reseed_run(source_run_id, unsafe_invalidate)`：全新 run 首驱前导入源 run
 幸存的 `STEP_FINISHED`（失败 step 按设计重跑），溯源 `meta.importedFrom`。
-两侧都有（f2-lite `reexecuteFrom` / Rust `057a0c6`、runtime 透传 `91111f3`）。
+两侧都有（f2-lite `reseedRun` / Rust `057a0c6`、runtime 透传 `91111f3`）。
 
-**命名待定**：`reexecuteFrom` 这个名字没体现"落到一个新 run 里"（字面只说"从哪
-重放"，没说结果是新 run）。建议下一版 API 改名 **`reseedRun(sourceRunId,
-{ unsafeInvalidate })`**——保留 `re-` 前缀（增量语义 + 词族对齐 redo），旧名留
-alias 一版再删。论证见 `docs/concepts/redo-vs-invalidation.md` §6。
+**已改名 `reseedRun`**（原 `reexecuteFrom`）：旧名没体现"落到一个新 run 里"，
+且 `re-` 前缀保留（增量播种 + redo 词族）。0.x 阶段两侧同步、直接换新名、
+不留 alias。论证见 `docs/concepts/redo-vs-invalidation.md` §6。
 
 **定位**：显式新开 run = 常规手段，服务于「换世界重来 + 旧日志原样不动」，
 不是继续手段。日志型代价（新 id / 引用断 / 审计跨 run）由它的问题域承担。
