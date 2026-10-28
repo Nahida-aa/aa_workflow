@@ -36,7 +36,8 @@ resume 时可以选择：
 **自然形态**：drive 参数 `invalidate_steps: Option<Vec<String>>`，与
 `interim_goals` 并列（core 的 `RunWorkflowOptions` 与 runtime 的
 `WorkflowRuntimeStartRunArgs` 各加一处，两侧同名同形）。语义与
-`reseed_run.unsafe_invalidate` 是**同一个 unsafe 语义**（封闭性由调用者担保：
+`reseed_run.redo_set` 是**同一个 advisory 语义**（引擎**不**校验名单对依赖方向
+封闭——不封闭**可能**让下游拿到旧 checkpoint，是否可接受由调用者业务判断：
 失效 B 不失效下游 C，C 会拿旧结果短路），只是作用对象是一次 drive 而非新 run 导入。
 
 **机制**（已对 Rust 代码核实）：drive 启动时从折叠出的 `lives` 删掉被点名的
@@ -58,7 +59,7 @@ entry，step 回 `Pending` → 重跑 → 追加新 `StepFinished` → 重放时
 
 ## F2. redo：新 run 播种幸存 checkpoint（已实现，已改名 `reseedRun`）
 
-`reseed_run(source_run_id, unsafe_invalidate)`：全新 run 首驱前导入源 run
+`reseed_run(source_run_id, redo_set)`：全新 run 首驱前导入源 run
 幸存的 `STEP_FINISHED`（失败 step 按设计重跑），溯源 `meta.importedFrom`。
 两侧都有（f2-lite `reseedRun` / Rust `057a0c6`、runtime 透传 `91111f3`）。
 

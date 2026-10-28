@@ -38,7 +38,7 @@
 
 ### 1.2 new world, clean audit (F2)
 
-- 解法：显式 `reseedRun(sourceRunId, { unsafeInvalidate })` → 全新 run id,
+- 解法：显式 `reseedRun(sourceRunId, { redoSet })` → 全新 run id,
   ingest survivors, new StepFinished append `meta.importedFrom` 作为 sourcing.
 - old log immutable, new log 从 `RUN_STARTED` 开始; list two runs to audit.
 
@@ -67,7 +67,7 @@ Aggregate result: INVALIDATED makes every discipline in AGENTS.md
 
 ## 3. Redo pattern (the right default):
 
-1. call `reseedRun({ sourceRunId, { unsafeInvalidate } })` with fresh `runId`;
+1. call `reseedRun({ sourceRunId, { redoSet } })` with fresh `runId`;
 2. survivors (`STEP_FINISHED`) ingest as seed checkpoints (append with `meta.importedFrom`);
 3. FAILed steps not seeded → re-run automatically;
 4. old log stays immutable, new log provides clean audit line.
@@ -80,7 +80,7 @@ Invariant: old run logs remain queryable by `sourceRunId`; application layer hol
 ```
 await runWorkflow({
   workflow, runStore,
-  reseedRun: { sourceRunId: oldRun, unsafeInvalidate: ['step-b'] },
+  reseedRun: { sourceRunId: oldRun, redoSet: ['step-b'] },
 });
 ```
 
@@ -112,13 +112,13 @@ None of these trade-offs violate AGENTS constraints; they just live downstream.
 
 原 `reexecuteFrom` 这个名字**没体现"落到一个新 run 里"**——"re-execute from" 字面只说了"从哪重放"，没说结果是一个新 run。读代码的人容易误以为是在**同一个 run 里**重放。**已改名 `reseedRun`**（f2-lite 引擎 + aa-workflow Rust 两侧，0.x 阶段直接换新名、不留 alias）。
 
-**建议改名 `reseedRun(sourceRunId, { unsafeInvalidate })`**，并保留 `re-` 前缀：
+**建议改名 `reseedRun(sourceRunId, { redoSet })`**，并保留 `re-` 前缀：
 
 | 候选 | 体现了什么 | 漏了什么 |
 | --- | --- | --- |
 | `reexecuteFrom(src, …)` | 源 run、失效名单 | **新 run** 这件事 |
 | `seedRun(src, …)` | 新 run + 播种 | "第二次播种"的增量语义 |
-| **`reseedRun(src, { unsafeInvalidate })`** | **新 run + 从源 run 幸存 checkpoint 选择性重新播种** | — |
+| **`reseedRun(src, { redoSet })`** | **新 run + 从源 run 幸存 checkpoint 选择性重新播种** | — |
 
 `re-` 不可省：
 
@@ -134,6 +134,29 @@ None of these trade-offs violate AGENTS constraints; they just live downstream.
 > 与 aa-workflow Rust（`ReseedRun` struct + `RunWorkflowOptions.reseed_run` +
 > `workflow_dag` 的 `reseed_plan`）**两侧同步、直接删旧名**（0.x 未稳定，
 > 用户 2026-10 明确不留向后兼容）。机制不变，只换名字。
+
+## 6.1 参数命名：`redoSet`（原 `unsafeInvalidate`，已改名）
+
+`reseedRun` 的入参原叫 `unsafeInvalidate`，**已改名 `redoSet`**，理由两层：
+
+1. **词族方向**。`reseed` 是"重新做"的方向，`invalidate`（作废）是反方向，两个词族
+   打架——读者容易飘到 INVALIDATED（持久失效原语）那一侧。`redoSet` 与 `reseedRun`
+   同词族（redo 族），方向一致。
+2. **`unsafe` 前缀强度偏重**。它暗示"用了就违反引擎不变量"（Rust `unsafe` 的硬
+   味道），但实际语义是 **advisory**：引擎**不校验**名单对依赖方向封闭，**不封闭
+   可能**让下游拿到旧 checkpoint——是否可接受取决于你的业务，引擎既不替你校验、也
+   不假设你不封。这是个软提示，不是硬 UB。用 `redoSet`（无 `unsafe`）+ 注释里的
+   advisory 说明，强度才匹配。
+
+**注释结构**（引擎 `run-workflow.ts` + Rust `run_workflow.rs` 两侧同形）：
+
+- **先理论**：一个 step 被重执行 iff 它的 checkpoint 没被导入；引擎只导入源 run 里
+  stepId **不在** `redo_set` 的 `STEP_FINISHED`；`STEP_FAILED` 永不导入（所以失败
+  step 默认重跑）。
+- **再注意事项**（由理论引出，引擎不替你校验）：若你**没**列进 `redo_set` 的 step
+  消费了**列了**的 step 的结果，它保留旧缓存值。例：链 A→B→C→D、`redo_set = [B, D]`：
+  C 不在名单 → 导入 C 旧 checkpoint、C 不重跑；D 重跑时读到 C 的旧结果。要强制封闭，
+  在 DAG 层用 `descendants(from)` 展开整个下游闭包。
 
 ## 7. Decision tree (use in docs)
 

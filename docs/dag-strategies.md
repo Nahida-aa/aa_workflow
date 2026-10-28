@@ -167,7 +167,7 @@ const [a, b] = await Promise.all([branchA(), branchB()])
 | 能力 | upstream 0971b4c 位置 | 本仓 |
 | --- | --- | --- |
 | interim goals (`interimGoals`, per-drive, 不落盘) | research memo 指向；core-side equivalent | F3 已实现 |
-| redo：`reseedRun` 开新 run + `unsafeInvalidate` | `engine/run-workflow.ts` reseedRun path | F2 已实现 |
+| redo：`reseedRun` 开新 run + `redoSet` | `engine/run-workflow.ts` reseedRun path | F2 已实现 |
 | 同 run resume + 失效名单 (`invalidateSteps`) | **未发布**（0971b4c 无；f2-lite 内部 note 提议） | F1 设计中，未实现 |
 | 耐久 INVALIDATED 事件 | **明确不做**（upstream + F6） | F6 已评估：不做 |
 | signal 收件箱 (`bufferSignals`) | 0971b4c ships (`0001_signal_inbox.sql`) | F4 已实现 |

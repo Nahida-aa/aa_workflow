@@ -50,7 +50,7 @@
 > 把「自己的注释」当成了上游（`f2-lite` 的注释字面写着 `F2-lite re-execute
 > plan`，被反向读成「上游引用 f2-lite」）。
 >
-> **实际影响**：redo / 泊车两轴**没有上游背书**——API 形状（`unsafe_invalidate`
+> **实际影响**：redo / 泊车两轴**没有上游背书**——API 形状（`redo_set`
 > 命名、`meta.imported_from` 的 index 语义）归本仓所有，可自由改；同时也没有
 > 上游测试兜底，`engine.rerun.test.ts` 是 `f2-lite` 自己的测试。
 > 上游至今**只有 undo 轴**（`taren/durable-recovery` 的 compensate），
@@ -326,7 +326,7 @@ emit 即 append）再放行；`None` 回落既有 `find_resume` 全日志扫描�
 **核心定位修正**：core 是自由涌现代码——处理器里的步骤不必然构成 DAG（可以
 有环、可以条件重入），core **不知道也不需要知道**步骤间的依赖结构。所以：
 
-- `unsafeInvalidate` / redo 名单 = **使用者自己提供的步骤列表，原样透传**；
+- `redoSet` / redo 名单 = **使用者自己提供的步骤列表，原样透传**；
   "unsafe" 前缀的含义正是：core 无法校验封闭性、无法推导消费者，后果由
   调用者承担；
 - **不依赖 DAG 算法**：失效的是步骤列表，不是图节点；aa_graph / 声明式层的
@@ -337,7 +337,7 @@ emit 即 append）再放行；`None` 回落既有 `find_resume` 全日志扫描�
 
 **现状**（2026-10）：redo / 临时目标两半都已落地——
 
-- `reseed_run(source_run_id, unsafe_invalidate)`：全新 run 首驱前导入
+- `reseed_run(source_run_id, redo_set)`：全新 run 首驱前导入
   源 run 幸存 checkpoint（只导 `STEP_FINISHED`、失败 step 按设计重跑），
   溯源 `meta.imported_from`（index 以源 run 持久化日志为基准）。参考
   `f2-lite` 分支 `run-workflow.ts:269-295`（**本仓自有，上游未采纳**）；
