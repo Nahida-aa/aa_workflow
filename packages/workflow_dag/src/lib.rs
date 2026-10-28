@@ -98,8 +98,9 @@ impl DagShape {
     /// 种子**自含**——aa_graph 的 `descendants_from` 不含起点，而 redo 语义
     /// 里种子自己必须重跑。返回值按字典序（确定性，方便断言与比对）。
     /// 引擎拿到的永远是这份展开后的名单；封闭性由本crate按声明的形状保证，
-    /// 形状与 handler 实际步骤不符时后果仍是调用者的（名单透传的 unsafe
-    /// 契约在引擎侧不变）。
+    /// 形状与 handler 实际步骤不符时后果仍是调用者的（`redo_set` 不校验封闭性：
+    /// 不封闭**可能**让下游拿到旧 checkpoint，是否可接受由调用者的业务判断——
+    /// 引擎侧的 advisory 契约在 Rust 侧同样成立）。
     pub fn invalidation_set(&self, from: &[&str]) -> Result<Vec<String>, ShapeError> {
         let mut ixs = Vec::with_capacity(from.len());
         for id in from {
@@ -149,7 +150,7 @@ impl DagShape {
         };
         let seeds: Vec<&str> = seeds.iter().map(String::as_str).collect();
         let invalidate = self.invalidation_set(&seeds)?;
-        Ok(ReseedRun::new(source_run_id).with_invalidate(invalidate))
+        Ok(ReseedRun::new(source_run_id).with_redo_set(invalidate))
     }
 }
 
@@ -225,7 +226,7 @@ mod tests {
             .reseed_plan("src-run", &log, None)
             .unwrap();
         assert_eq!(plan.source_run_id, "src-run");
-        assert_eq!(plan.unsafe_invalidate, vec!["b", "d"]);
+        assert_eq!(plan.redo_set, vec!["b", "d"]);
     }
 
     #[test]
@@ -235,6 +236,6 @@ mod tests {
         let plan = shape
             .reseed_plan("src-run", &log, Some(vec!["b".into()]))
             .unwrap();
-        assert_eq!(plan.unsafe_invalidate, vec!["b", "d"]);
+        assert_eq!(plan.redo_set, vec!["b", "d"]);
     }
 }

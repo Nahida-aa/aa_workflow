@@ -329,7 +329,7 @@ async fn demo_reseed_run_invalidate_rerun() {
             workflow_id: "w".into(),
             run_id: "demo:redo".into(),
             input: serde_json::json!({}),
-            reseed_run: Some(ReseedRun::new("demo:src").with_invalidate(vec!["b".into()])),
+            reseed_run: Some(ReseedRun::new("demo:src").with_redo_set(vec!["b".into()])),
             ..Default::default()
         })
         .await
@@ -406,7 +406,7 @@ async fn demo_dub_sf_ocr_shape_closure_redo() {
         .reseed_plan("dub:src", &source_events, None)
         .expect("from 缺省不引入未知 step");
     assert_eq!(
-        plan.unsafe_invalidate,
+        plan.redo_set,
         vec!["mix_audio", "mix_video", "split_audio", "translate", "tts"],
         "闭包展开 = 种子∪后继；无关分支不在名单"
     );

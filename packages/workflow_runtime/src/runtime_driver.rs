@@ -2555,7 +2555,7 @@ mod driver_tests {
                 workflow_id: "w".into(),
                 run_id: "redo:rt".into(),
                 input: serde_json::json!({}),
-                reseed_run: Some(ReseedRun::new("goal:rt").with_invalidate(vec!["a".into()])),
+                reseed_run: Some(ReseedRun::new("goal:rt").with_redo_set(vec!["a".into()])),
                 ..Default::default()
             })
             .await

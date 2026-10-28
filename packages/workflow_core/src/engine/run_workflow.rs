@@ -86,37 +86,45 @@ pub type PublisherFn =
 /// 也避免给结构体引入生命周期参数（那会让 builder 链很难写）。
 /// re-seed 计划（INVALIDATE 侧，`reseedRun`——**f2-lite 自有，上游未采纳**；
 /// 引用自 `f2-lite` 分支 `run-workflow.ts`。以**全新 run** 启动，把源 run 幸存
-/// 的 checkpoint 导入本 run 的日志——每条 stepId 不在 [`Self::unsafe_invalidate`]
+/// 的 checkpoint 导入本 run 的日志——每条 stepId 不在 [`Self::redo_set`]
 /// 名单里的 `STEP_FINISHED`（失败的 step 不导入、按设计重跑）。溯源写进事件的
 /// `meta.imported_from`。
 ///
-/// 引擎没有图：无法校验名单对依赖方向封闭——**保留被失效 step 的消费者是
-/// 调用者的不变量**（`unsafe` 之名由此而来：b 消费 a 的结果而你只失效 a，
-/// 导入的 b 会拿着 a 的旧结果短路）。上层（DAG 编排）负责算出闭包名单，
-/// 引擎只透传名单本身。
+/// **理论**：一个 step 会被重新执行，当且仅当它的 checkpoint 没被导入。
+/// 引擎只导入源 run 里 stepId **不在** `redo_set` 的 `STEP_FINISHED`；`STEP_FAILED`
+/// 永不导入（所以失败的 step 默认重跑）。除名单外，源 run 成功过的都缓存结转。
+///
+/// **由此在使用时要注意**（引擎**不**替你校验这些）：
+/// - 若某个「你**没**列进 redo_set」的 step 消费了「你**列了**的 step」的
+///   结果，它保留的是旧的缓存值。例：链 A→B→C→D、`redo_set = [B, D]`：
+///   C 不在名单 → 导入 C 的旧 checkpoint、C 不重跑；D 重跑时读到的是 C 的旧
+///   结果。是否可接受取决于你的业务——引擎既不校验名单对依赖方向封闭，也不假设
+///   它不封闭。
+/// - 要强制一个封闭的重做区，把下游闭包整体列出（DAG 层：`descendants(from)`）。
 ///
 /// 命名 `reseedRun`：它落到**新 run**（从源 run 幸存 checkpoint 重新播种）。
-/// `re-` 前缀保留（增量播种 + redo 词族）。
-/// deprecated alias 一版。
+/// `re-` 前缀保留（增量播种 + redo 词族）。参数名用 `redoSet`（非 `unsafeInvalidate`）：
+/// 词族与 `reseedRun` 对齐（重做方向，不是作废方向），且它表达的是「advisory：
+/// 不封闭**可能**有问题」，不宜用暗示硬不变量的 `unsafe`。
 #[derive(Debug, Clone)]
 pub struct ReseedRun {
     /// checkpoint 的来源 run。
     pub source_run_id: String,
     /// 强制重跑的 stepId 名单（引擎透传、不校验封闭性）。空 = 全部导入、
-    /// 零重跑（对齐上游 `unsafeInvalidate?` 缺省）。
-    pub unsafe_invalidate: Vec<String>,
+    /// 零重跑（对齐上游缺省）。
+    pub redo_set: Vec<String>,
 }
 
 impl ReseedRun {
     pub fn new(source_run_id: impl Into<String>) -> Self {
         Self {
             source_run_id: source_run_id.into(),
-            unsafe_invalidate: Vec::new(),
+            redo_set: Vec::new(),
         }
     }
 
-    pub fn with_invalidate(mut self, steps: Vec<String>) -> Self {
-        self.unsafe_invalidate = steps;
+    pub fn with_redo_set(mut self, steps: Vec<String>) -> Self {
+        self.redo_set = steps;
         self
     }
 }
@@ -838,7 +846,7 @@ async fn drive(
             Err(e) => return Err(err_event(&run_id, e, RunErrorCode::Error)),
         };
         let invalidate: std::collections::HashSet<&str> =
-            rf.unsafe_invalidate.iter().map(|s| s.as_str()).collect();
+            rf.redo_set.iter().map(|s| s.as_str()).collect();
         for (i, ev) in source_log.iter().enumerate() {
             let WorkflowEvent::StepFinished {
                 ts,
@@ -2904,7 +2912,7 @@ mod tests {
                 .run_id("rerun-1")
                 .reseed_run(
                     ReseedRun::new(source_run_id.clone())
-                        .with_invalidate(vec!["a".into(), "b".into()]),
+                        .with_redo_set(vec!["a".into(), "b".into()]),
                 ),
         )
         .outcome()
