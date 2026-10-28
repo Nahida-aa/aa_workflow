@@ -84,7 +84,7 @@ pub type PublisherFn =
 /// newtype 内部持 `Arc<WorkflowDefinition>`：`previous_versions` 是 `Vec`、另有
 /// 若干 `Arc`，按值持有会让每次 run 都 deep-copy 一遍；`Arc` 让 clone 变引用计数自增，
 /// 也避免给结构体引入生命周期参数（那会让 builder 链很难写）。
-/// re-seed 计划（INVALIDATE 侧，`reseedRun`——**f2-lite 自有，上游未采纳**；
+/// re-seed 计划（redo 侧，`reseedRun`——**f2-lite 自有，上游未采纳**；
 /// 引用自 `f2-lite` 分支 `run-workflow.ts`。以**全新 run** 启动，把源 run 幸存
 /// 的 checkpoint 导入本 run 的日志——每条 stepId 不在 [`Self::redo_set`]
 /// 名单里的 `STEP_FINISHED`（失败的 step 不导入、按设计重跑）。溯源写进事件的
@@ -147,7 +147,7 @@ pub struct RunWorkflowOptions {
     pub input: serde_json::Value,
     /// 命中即停（本地扩展；上游用 handler 内 early `return`）。
     pub interim_goals: Option<Vec<String>>,
-    /// re-seed 计划（INVALIDATE 侧，`reseedRun`，f2-lite 自有）。只在**全新
+    /// re-seed 计划（redo 侧，`reseedRun`，f2-lite 自有）。只在**全新
     /// run 的 start 路径**生效：resume 驱动忽略它（重放短路已覆盖旧
     /// checkpoint，重复导入会双写）；`source_run_id == run_id`、或源 run
     /// 不存在时报错（`run_lost`）。语义见 [`ReseedRun`]。
@@ -289,7 +289,7 @@ impl RunWorkflowOptions {
         self
     }
 
-    /// re-seed 计划（INVALIDATE 侧）：新 run 起步时导入源 run 幸存的
+    /// re-seed 计划（redo 侧）：新 run 起步时导入源 run 幸存的
     /// checkpoint。语义见 [`ReseedRun`]；只在全新 run 的 start 路径生效。
     pub fn reseed_run(mut self, plan: ReseedRun) -> Self {
         self.reseed_run = Some(plan);
@@ -817,7 +817,7 @@ async fn drive(
         return Err(error_persisted(&store, run_state, &run_id, &e, RunErrorCode::Validation));
     }
 
-    // F2-lite re-seed 计划（INVALIDATE 侧，f2-lite 分支 `reseedRun`）：
+    // F2-lite re-seed 计划（redo 侧，f2-lite 分支 `reseedRun`）：
     // 首驱前把源 run 幸存的 checkpoint 导入本 run 的日志——只导
     // `STEP_FINISHED`，且 stepId 不在失效名单里（失败的 step 不导入、按设
     // 计重跑）。溯源 `meta.imported_from` 的 `index` 以**源 run 的持久化日
@@ -2846,7 +2846,7 @@ mod tests {
     }
 
     // ========================================================
-    // reseedRun（INVALIDATE 侧）——镜像 f2-lite engine.rerun.test.ts 的
+    // reseedRun（redo 侧）——镜像 f2-lite engine.rerun.test.ts 的
     // 两个场景 + 本仓补的源缺失用例
     // ========================================================
 

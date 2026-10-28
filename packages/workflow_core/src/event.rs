@@ -47,7 +47,7 @@ pub struct StepAttempt {
 }
 
 /// `STEP_FINISHED` 的可选元数据槽（对齐上游事件上的 `meta`）。目前只承载
-/// 一种事实：checkpoint 从源 run 导入（`reseed_run` 的 INVALIDATE 侧）。
+/// 一种事实：checkpoint 从源 run 导入（`reseed_run` 的 redo 侧）。
 /// 引擎自己产生的 checkpoint 恒为 `None`——序列化时整个省略，旧日志反序
 /// 列化为 `None`，日志形状前后兼容。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

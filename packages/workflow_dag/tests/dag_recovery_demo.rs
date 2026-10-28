@@ -305,7 +305,7 @@ async fn demo_durable_retry_park_and_resume() {
     );
 }
 
-/// ④ redo（INVALIDATE 侧）：`reseedRun` 经 start_run 透传——源 run 幸存
+/// ④ redo（redo 侧）：`reseedRun` 经 start_run 透传——源 run 幸存
 ///    checkpoint 导入（带 imported_from 溯源），失效名单里的 b 重跑，a/c 短路。
 ///    名单封闭性是调用者的不变量（`unsafe` 之名由此而来）。
 #[tokio::test]

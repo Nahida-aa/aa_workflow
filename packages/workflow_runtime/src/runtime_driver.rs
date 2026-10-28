@@ -228,7 +228,7 @@ pub struct WorkflowRuntimeStartRunArgs {
     /// 名单（上游无 interimGoals 概念，deliverSignal args 自然没有），要扩展泊车边界走 core
     /// 直驱（名单是 per-drive 的，core 层有专测）。
     pub interim_goals: Option<Vec<String>>,
-    /// redo 计划（f2-lite 自有，上游未采纳；f2-lite `runtime/types.ts:425`，INVALIDATE 侧）：全新
+    /// redo 计划（f2-lite 自有，上游未采纳；f2-lite `runtime/types.ts:425`，redo 侧）：全新
     /// run 首驱前导入源 run 幸存 checkpoint，失效名单重跑。语义见
     /// [`aa_workflow_core::ReseedRun`]；resume 驱动被 core 忽略（fresh-only）。
     pub reseed_run: Option<aa_workflow_core::ReseedRun>,
