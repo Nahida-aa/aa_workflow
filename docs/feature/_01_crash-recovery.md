@@ -53,7 +53,18 @@ runId 再驱动一次，已完成的 step 不重跑、未完成的接着跑。
 
 ## 1. 崩溃发生在哪、靠什么兜住
 
-一次 drive 的完整生命周期（`driveClaimedRun`，`runtime-driver.ts:746`）：
+先答与路径无关的那半：**崩溃可能发生在一次 drive 的任何一步**——step 闭包执行到一半、两次 append 之间、事件发布时，任何地方。兜住它的不是「引擎优雅退出」，而是两件**与 runtime 无关**的事实：
+
+1. **日志已经落盘**：已 append 的事件在 store 里，进程死了不丢（in-memory store 除外，它随进程丢）；
+2. **重放幂等**：已 checkpoint 的 step 重放时短路不重跑，未 checkpoint 的保守重跑（§4）。
+
+引擎自身不需要「感知崩溃」——它连「对端死了」都无法知道。真正的路径分野在
+**「谁再来驱动一次」**：runtime 用 lease + sweep 自动发现（下图），纯 core 由宿主
+自己记账（§6）。
+
+### runtime 路径：一次 drive 的生命周期
+
+`driveClaimedRun`（`runtime-driver.ts:746`）：
 
 ```
 resolveLeaseMs → claimRun（原子 CAS 认领）
@@ -63,26 +74,20 @@ resolveLeaseMs → claimRun（原子 CAS 认领）
   → releaseRunLease（finally 语义）
 ```
 
-崩溃可能发生在 `runWorkflow` 的任何一步。兜住它的不是「引擎优雅退出」，而是 **lease 会过期**：
+在这条路径上，兜住崩溃的具体机制是 **lease 会过期**：
 
 - 引擎正常跑时，心跳每 `leaseMs/3` 续一次租约（`startLeaseHeartbeat`，`:1200`）；
 - 进程崩了 → 心跳停 → `lease.expiresAt` 到点后无人续 → 这个 run 变成 **stale lease**；
 - 下一轮宿主 sweep 调 `claimStaleRuns`：把 lease 过期的 run 交给新的 owner 重新驱动。
 
 所以**用 runtime 时**，「崩溃恢复」的自动化 = **lease 过期 + 下一轮 sweep 重新认领
-+ 重放日志续跑**。引擎自身不需要「感知崩溃」——它连「对端死了」都无法知道。
++ 重放日志续跑**。
 
-> ⚠️ **这句话只覆盖 runtime 路径，别当成「崩溃恢复」的全部**：
-> **lease 是 runtime + execution store 的概念，`workflow-core` 里没有它**。
-> core 对 lease 只有三处「被动知晓」——`run-workflow.ts:45` 的 recover 注释
-> （「宿主 reclaim 过期 lease 之后用这个」）、`telemetry.ts:17` 的可选透传字段
-> `leaseOwner`、`types.ts:641` 的可选宿主守卫钩子——**没有 lease 状态、没有
-> 过期、没有认领**。纯 core 路径（§6）连 lease 都没有：宿主自己记「哪些 run
-> 要恢复」，崩溃后自己再调 `runWorkflow({ recover: true })`。
->
-> 两条路径共享的「本质」只有一句：**日志可重放 + 已 checkpoint 的 step 会短路**。
-> 「谁发现该恢复了」（runtime 的 lease/sweep，或宿主自己的账）是这条本质之上的
-> 自动化，不是本质本身。
+> 📎 **证据（core 无 lease）**：lease 是 runtime + execution store 的概念，
+> `workflow-core` 里没有它——core 只有三处「被动知晓」：`run-workflow.ts:45` 的
+> recover 注释（「宿主 reclaim 过期 lease 之后用这个」）、`telemetry.ts:17` 的
+> 可选透传字段 `leaseOwner`、`types.ts:641` 的可选宿主守卫钩子。**没有 lease
+> 状态、没有过期、没有认领。**
 
 ---
 
@@ -163,7 +168,10 @@ interface ClaimStaleRunsArgs {
 
 ---
 
-## 5. 4 种「崩溃后状态」× 恢复路径（速查）
+## 5. 4 种「崩溃后状态」× 恢复路径（runtime 路径速查）
+
+前两列（崩在什么状态）与路径无关；**后两列是 runtime 的答案**——纯 core 路径的
+状态分类完全相同，只是「谁发现该恢复」换成宿主自己（§6）。
 
 | run 崩在 | lease | 下一轮 sweep 做什么 | 结果 |
 | --- | --- | --- | --- |
