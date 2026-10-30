@@ -12,12 +12,15 @@
 > ```bash
 > cd /home/aa/repos/lib_ls/learn_ls/workflow
 > node node_modules/.bin/vitest run packages/workflow-core   # 128 全绿
+> # 跑 workflow-runtime 的测试前先构建 core（跨包引 dist 产物）：
+> #   cd packages/workflow-core && node ../../node_modules/.bin/tsdown
 > ```
 >
 > ⚠️ **必须用 `node` 跑，不要用 `bun` 跑 vitest**：bun 跑 vitest 时 zod v4 的
 > `import * as z … export { z }` 在 interop 层丢名字（namespace 里 236 个键都在，
 > 唯独没有 `z`），症状是 36 个测试假红（`z.object is undefined`）。这是 runner
 > 问题，不是代码问题——用 bun 的 `bun test` 则反过来丢 2 个 `vi.*` 测试。
+> 完整记录见 `workflow` 仓 `docs/internal/test-runner.md`。
 
 
 ## 0. 一句话总览
