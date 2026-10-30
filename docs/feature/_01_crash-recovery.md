@@ -25,15 +25,22 @@
 
 ## 0. 一句话总览
 
-崩溃恢复 = **租约（lease）+ 认领闸（claim）+ 重放（replay）+ 宿主定期 sweep** 四件套：
+**崩溃恢复的本质只有一件：日志可重放 + 已 checkpoint 的 step 按 `stepId` 短路**
+（耐久性来自重放，不来自挂起）。进程死了，日志还在 store 里；任何人拿同一个
+runId 再驱动一次，已完成的 step 不重跑、未完成的接着跑。
+
+在此之上，**用 runtime 时**多一套自动化四件套：
 
 1. **lease**：每个 drive 给 run 发一个 lease token（`{ owner, expiresAt }`），写 store 时 fence（过期即拒写）。
 2. **claim**：sweep 把「lease 过期 / 卡在 queued」的 run **原子认领**给自己（CAS 抢 lease 所有权），拿到所有权才驱动。
-3. **replay**：drive 入口 = 重放持久化日志；已 checkpoint 的 step 按 `stepId` 短路不重跑（耐久性来自重放，不来自挂起）。
+3. **replay**：drive 入口 = 重放持久化日志（这本身就是 core 的能力，runtime 只是调用它）。
 4. **宿主 sweep**：引擎**不自己活着**——宿主 cron / scheduled function 定期调 `runtime.sweep()`，sweep 把到期 timer + 过期 lease 的 run + 待 materialize 的 schedule 捞出来驱动。
 
+> ⚠️ **lease / claim / sweep 都不在 `workflow-core` 里**（core 只有注释、遥测字段、
+> 可选守卫钩子三处「被动知晓」，见 §1 末）。纯 core 路径没有 lease——宿主自己记
+> 「哪些 run 要恢复」。四件套是 runtime 栈，不是崩溃恢复的定义。
+
 > 关键设计：**「挂起即返回」+ 日志可重放**（见 `core-runtime-map.md` §4 不变量 #5 / #1）。
-> 所以崩溃 = 进程死了，但日志还在 store 里；新进程 sweep 捞到 → 认领 → 重放 → 续跑。
 
 > **注意区分「引擎」与「运行时」**：
 > - **崩溃恢复的实质（重放 + checkpoint 短路）在 `workflow-core`**，宿主**可以只用 core** 实现：
@@ -62,7 +69,20 @@ resolveLeaseMs → claimRun（原子 CAS 认领）
 - 进程崩了 → 心跳停 → `lease.expiresAt` 到点后无人续 → 这个 run 变成 **stale lease**；
 - 下一轮宿主 sweep 调 `claimStaleRuns`：把 lease 过期的 run 交给新的 owner 重新驱动。
 
-所以「崩溃恢复」本质上 = **lease 过期 + 下一轮 sweep 重新认领 + 重放日志续跑**。引擎自身不需要「感知崩溃」。
+所以**用 runtime 时**，「崩溃恢复」的自动化 = **lease 过期 + 下一轮 sweep 重新认领
++ 重放日志续跑**。引擎自身不需要「感知崩溃」——它连「对端死了」都无法知道。
+
+> ⚠️ **这句话只覆盖 runtime 路径，别当成「崩溃恢复」的全部**：
+> **lease 是 runtime + execution store 的概念，`workflow-core` 里没有它**。
+> core 对 lease 只有三处「被动知晓」——`run-workflow.ts:45` 的 recover 注释
+> （「宿主 reclaim 过期 lease 之后用这个」）、`telemetry.ts:17` 的可选透传字段
+> `leaseOwner`、`types.ts:641` 的可选宿主守卫钩子——**没有 lease 状态、没有
+> 过期、没有认领**。纯 core 路径（§6）连 lease 都没有：宿主自己记「哪些 run
+> 要恢复」，崩溃后自己再调 `runWorkflow({ recover: true })`。
+>
+> 两条路径共享的「本质」只有一句：**日志可重放 + 已 checkpoint 的 step 会短路**。
+> 「谁发现该恢复了」（runtime 的 lease/sweep，或宿主自己的账）是这条本质之上的
+> 自动化，不是本质本身。
 
 ---
 
@@ -112,7 +132,7 @@ interface ClaimStaleRunsArgs {
 默认 `DEFAULT_SWEEP_LIMIT`）+ deadline + 背压（`shouldStopForDeadline`）。宿主只负责
 **定期 wake-up tick**，真正「能不能捞到」是 store 的活。
 
-> sweep 是崩溃恢复的主通道：**用 runtime 时宿主必须定期跑 sweep**（上游
+> sweep 是 **runtime 路径**崩溃恢复的主通道：**用 runtime 时宿主必须定期跑 sweep**（上游
 > `durable-recovery.md` 升级指南第 4 条「Keep regular sweeps enabled, including
 > maxRecoveredRuns and maxTimers」）。in-memory store 数据随进程丢，但它的 sweep
 > 语义与 D1/Postgres 一致，测试时用 in-memory 验证行为。
