@@ -4,6 +4,22 @@
 > （TanStack PR #19「Add durable signals, retries, and compensation」源分支）。
 > 本文件回答一个问题：**一个跑了一半就崩了的 run，TS 引擎/宿主怎么把它捞回来继续跑**。
 
+> **关于代码片段的约定**：本文每个代码块都从真实测试裁剪而来（裁剪 = 删掉
+> 与主题无关的断言和脚手架，**不改写语义**）。每个块下方的「对端测试」给出
+> `文件:行` + 测试名，点击即可跳去核对——**片段与测试不一致时，以测试为准**，
+> 并回来修文档。路径相对 `learn_ls/workflow`；跑法：
+>
+> ```bash
+> cd /home/aa/repos/lib_ls/learn_ls/workflow
+> node node_modules/.bin/vitest run packages/workflow-core   # 128 全绿
+> ```
+>
+> ⚠️ **必须用 `node` 跑，不要用 `bun` 跑 vitest**：bun 跑 vitest 时 zod v4 的
+> `import * as z … export { z }` 在 interop 层丢名字（namespace 里 236 个键都在，
+> 唯独没有 `z`），症状是 36 个测试假红（`z.object is undefined`）。这是 runner
+> 问题，不是代码问题——用 bun 的 `bun test` 则反过来丢 2 个 `vi.*` 测试。
+
+
 ## 0. 一句话总览
 
 崩溃恢复 = **租约（lease）+ 认领闸（claim）+ 重放（replay）+ 宿主定期 sweep** 四件套：
@@ -60,6 +76,11 @@ interface ClaimStaleRunsArgs {
 }
 // 返回 RunClaim[] = { run, lease }
 ```
+
+> 对端测试：`packages/workflow-runtime/tests/contracts/workflow-execution-store.contract.ts:110`
+> "claims stale running leases"（同文件 `:74` "claims, blocks, and reclaims run leases"
+> 覆盖认领/阻塞/抢占全路径）。该契约套件被 in-memory / D1 / Postgres 三个 adapter
+> 共用——**store 的 lease 语义以它为准**。
 
 `in-memory-store.ts:497` 的参考实现逻辑（其他 store 照此语义）：
 
@@ -141,17 +162,19 @@ interface ClaimStaleRunsArgs {
 
 ```ts
 import { runWorkflow, inMemoryRunStore } from '@tanstack/workflow-core'
+import { collect } from './test-utils'   // = 把 AsyncIterable 抽干的助手（tests/test-utils.ts:5）
 
 const store = inMemoryRunStore()   // 生产换 D1 / Postgres RunStore
 const workflow = createWorkflow({ id: 'order', ... }).handler((ctx) => { /* ... */ })
 
 // —— 正常驱动（start）——
-await drain(runWorkflow({ workflow, runStore: store, runId: 'o-1', input: {...} }))
+// runWorkflow 返回 async generator：不 drain 就不会执行，所以测试里统一 collect()
+await collect(runWorkflow({ workflow, runStore: store, runId: 'o-1', input: {...} }))
 // 进程在这里崩了；日志已落 store（D1/Postgres），in-memory 则丢
 
 // —— 新进程起来，宿主自己知道「o-1 还卡在 __timer / 外部信号」——
 // 崩溃恢复 = 重新调 runWorkflow，带 runId + 该 run 当前挂起点需要的 delivery：
-await drain(runWorkflow({
+await collect(runWorkflow({
   workflow,
   runStore: store,
   runId: 'o-1',
@@ -164,6 +187,12 @@ await drain(runWorkflow({
   // approval: { approvalId: 'appr-1', approved: true },
 }))
 ```
+
+> 对端测试：`packages/workflow-core/tests/engine.durability.test.ts:23`
+> "recovers an interrupted running execution from checkpoints"（`recover: true` +
+> 同 runId 重驱，断言「已 checkpoint 的 step 零重跑」）；`:62` "does not re-execute
+> step fns on replay" 是同一机制的裸形式。注意 `collect` 是**测试脚手架**，
+> 生产宿主等价物 = 「把返回的 async iterable 消费完」（否则 generator 不推进）。
 
 要点：
 
@@ -201,6 +230,14 @@ await runtime.sweep({ maxRecoveredRuns: 25, maxTimers: 25, maxDurationMs: 55_000
 //   2) claimDueTimers 把到期 __timer 自动 deliverSignal 唤醒 sleep
 //   3) claimDueScheduleBuckets 把到期 cron 物化成新 run
 ```
+
+> 对端测试：`packages/workflow-runtime/tests/runtime-driver.test.ts:701`
+> "sweeps due timers and resumes sleeping workflows"（第 2 条）、`:734` "sweeps due
+> schedule buckets into deterministic runs"（第 3 条）、`:661` "delivers a signal
+> and resumes a paused workflow"（信号恢复）。三段合起来的端到端在
+> `packages/workflow-runtime/tests/examples.durable-recovery.test.ts:5`
+> "fulfills an order with an early payment and a durable shipping retry"
+> （早到信号 + 耐久重试 + sweep 恢复的完整订单流）。
 
 runtime 比「仅 core」多做了三件事：
 
@@ -249,3 +286,21 @@ runtime 比「仅 core」多做了三件事：
 | `startLeaseHeartbeat`（lease/3 续租） | `runtime-driver.ts:1200` |
 | `syncTimerFromRunState`（__timer 登记） | `runtime-driver.ts:941` |
 | `bufferSignals` 升级指南 | `docs/guide/durable-recovery.md`（本基线新增） |
+
+## 10. 测试位置索引（0971b4c）
+
+上面每个论断的「对端测试」。路径相对 `learn_ls/workflow`，跑法见顶部约定
+（`node node_modules/.bin/vitest run <文件>`）。
+
+| 主题 | 测试文件 : 行（测试名） |
+| --- | --- |
+| **仅 core 崩溃恢复**（recover + checkpoint 短路） | `packages/workflow-core/tests/engine.durability.test.ts:23` "recovers an interrupted running execution from checkpoints" |
+| 重放不重跑 step 闭包 | 同文件 `:62` "does not re-execute step fns on replay" |
+| 挂起/恢复的 payload 过墙 | `packages/workflow-core/tests/engine.smoke.test.ts:70` "pauses on approval — stream ends without RUN_FINISHED" |
+| lease 认领 / 阻塞 / 抢占 | `packages/workflow-runtime/tests/contracts/workflow-execution-store.contract.ts:74` "claims, blocks, and reclaims run leases" |
+| stale lease 认领（`claimStaleRuns` 本体） | 同文件 `:110` "claims stale running leases" |
+| 信号投递恢复挂起的 run | `packages/workflow-runtime/tests/runtime-driver.test.ts:661` "delivers a signal and resumes a paused workflow" |
+| sweep 唤醒到期 timer | 同文件 `:701` "sweeps due timers and resumes sleeping workflows" |
+| sweep 物化到期 schedule | 同文件 `:734` "sweeps due schedule buckets into deterministic runs" |
+| **端到端**：早到信号 + 耐久重试 + sweep 恢复 | `packages/workflow-runtime/tests/examples.durable-recovery.test.ts:5` "fulfills an order with an early payment and a durable shipping retry" |
+| `collect`（抽干 async iterable 的助手） | `packages/workflow-core/tests/test-utils.ts:5` |
