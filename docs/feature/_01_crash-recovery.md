@@ -235,14 +235,39 @@ await collect(runWorkflow({
 > step fns on replay" 是同一机制的裸形式。注意 `collect` 是**测试脚手架**，
 > 生产宿主等价物 = 「把返回的 async iterable 消费完」（否则 generator 不推进）。
 
+> ⚠️ **陷阱：`input` 和 `signalDelivery` 同时传，`input` 被静默忽略。**
+> `drive` 的分流顺序（`run-workflow.ts:165-182`）是 attach → recover →
+> **delivery** → input → start：只要带了 `runId + signalDelivery`（或
+> `approval`），就进 `resumeRun`（:173-174）——**`options.input` 从此不被
+> 读取**（resume 只用 store 里的 `persistedState.input`），且 **run 必须已
+> 存在**：fresh runId 直接 `RUN_ERRORED(run_lost)`（:336-346），不会静默开
+> 新 run。所以这是个**响亮的错**——但「input 没了」本身没有任何提示。
+> 正确形状二选一：
+>
+> - 恢复驱动 = `runId` + `recover: true`（+ 需要的 delivery），**不带 input**；
+> - 带 input = 开新 run，投递等 run 跑起来再单独做。
+>
+> 对端测试：`packages/workflow-core/tests/engine.smoke.test.ts`
+> "a signalDelivery outranks input on the dispatch — and the run must exist"
+> （钉死两半：fresh runId → `run_lost` 且不留 run 状态；已存在的 run →
+> input 被忽略、delivery 被消费、`ctx.input` 仍是 start 时那份）。
+
 要点：
 
 - **core 不知道「哪些 run 该被恢复」**——它只接受「给我这个 runId + 它的 delivery，我重放续跑」。
   「哪个 run 卡住了、卡在哪、delivery 是什么」是**宿主的账**（宿主自己存 run 状态 / 挂起点）。
 - `recover: true` 只是告诉引擎「这是 recovery 驱动」（sweep 与 deliverSignal 未等待时的
   推一把都走它，`core-runtime-map.md` §3）。实际重放逻辑 = 从 store 拿日志 + 短路。
+  **它和「带 delivery 的 resume」走同一个 `resumeRun`**（分流 :169 与 :173 都进它），
+  区别只是有没有 seed delivery。
+- **resume 改不了 input**：`resumeRun` 的 input 永远取 store 里的 `persistedState.input`，
+  `options.input` 被忽略。想换输入只能开新 run——input 是 run 身份的一部分。
 - **没有租约、没有自动 sweep、没有 timer 自动注入**——这些都靠宿主自己实现。
   sleep 的 `__timer` 要宿主 cron 到期后**手动**构造 `signalDelivery` 投进去。
+- **两个隐性 redirect 合起来是幂等边界**：`startRun` 遇到已存在的 runId 转 attach
+  （带 input 重驱老 run 得到的是只读回放，不是重跑）；`resumeRun` 遇到终态
+  （finished/errored/aborted）也转 attach。即：**一个 run 只能被 start 一次，
+  终态后只能被读**。
 
 > 适合：宿主已有调度框架（平台帮你 sweep）、或短命单进程「崩了直接开新 run 重跑」
 > 的场景。核心语义够用，不想要 runtime 的自动化，就停在这。
