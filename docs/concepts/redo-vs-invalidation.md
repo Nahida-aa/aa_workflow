@@ -44,8 +44,9 @@
 
 ### 1.3 "invalidated 作废 fact durable" (F6, out of scope)
 
-- 上游 fn-orchestration 也没有 INVALIDATED event; 上游 `reexecuteFrom` 公开 doc 也说
-  "only usable on the start path of a fresh run"。本库的 F6 = "已评估：不做"。
+- 上游 fn-orchestration 也没有 INVALIDATED event; **f2-lite 引擎的** `reseedRun`
+  也限定 "only usable on the start path of a fresh run"（start-path-only，上游主线
+  本无此 API）。本库的 F6 = "已评估：不做"。
 - 需要时 externalize at app layer（SKU mapping, versioned pointer）。
 
 ## 2. 为什么 INVALIDATED 会 complicated core
@@ -163,18 +164,19 @@ None of these trade-offs violate AGENTS constraints; they just live downstream.
 ```
 mutate a few steps in a run?
  ├─ want same run id / no log split → F1 invalidateSteps (drive param)
- ├─ want clean audit / new identity → F2 reseedRun (redo: 新 run + seed 幸存 checkpoint，即原 reexecuteFrom，见 §6 命名)
+ ├─ want clean audit / new identity → F2 reseedRun (redo: 新 run + seed 幸存 checkpoint，见 §6)
  └─ want durable fact "this step is invalidated universally" → no engine prim; app externalize
 ```
 
 ## 8. upstream signals (supporting no INVALIDATED)
 
 - TanStack `f2-lite-feature-points.md` §6: explicit "INVALIDATED 不做", matches F6;
-- ai-orchestration official uses same-run resume + redo split per F2-lite note §1
-  (all continuations on same run_id; new run only for reexecuteFrom-class need);
-- upstream `reexecuteFrom` public doc also says start-path-only.
-- 注：upstream 语境里仍可能见到旧名 `reexecuteFrom`（改名是本仓 + f2-lite 引擎的决定，上游 0971b4c 主线本无此 API）
-  (contract arms shipped, internal docs point out "future-proof schema primitives").
+- ai-orchestration official uses same-run recovery + redo split per F2-lite note §1
+  (all continuations resume the same runId — driven by the `recover`/delivery params
+  into `resumeRun`; a new run only for `reseedRun`-class needs);
+- **f2-lite 引擎的** `reseedRun` 文档限定 start-path-only（上游主线无此 API——
+  `b928717` / `0971b4c` 两个 base 都没有 redo/reseed，它是本仓 f2-lite 引擎的 diff；
+  故 upstream 语境里见到的 `reexecuteFrom` 等旧名，都是引用本仓 f2-lite 侧）。
 
 ## 9. doc obligations (what must be published to avoid repeated questions)
 
