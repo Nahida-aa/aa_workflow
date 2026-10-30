@@ -21,6 +21,16 @@
 > 唯独没有 `z`），症状是 36 个测试假红（`z.object is undefined`）。这是 runner
 > 问题，不是代码问题——用 bun 的 `bun test` 则反过来丢 2 个 `vi.*` 测试。
 > 完整记录见 `workflow` 仓 `docs/internal/test-runner.md`。
+>
+> **关于层/路径归属的约定**（本系列每节都要遵守）：
+> 1. **每节开头标明适用路径**（`workflow-core` / `workflow-runtime` / 两者）——
+>    不标就等于声称"两者都适用"，而本系列最容易犯的错就是把 runtime 的机制
+>    （lease / claim / sweep）写成普遍本质（_01 初版连犯两次，见 §0/§1 的修正）。
+> 2. **层归属断言附证据**：说「X 在 core / runtime」时，给 `文件:行` 或一条
+>    可复跑的 grep。2026-10-30 的修正案例：core 对 lease 只有三处被动知晓
+>    （§1 末证据块），lease 机制全在 runtime。
+> 3. **先本质后自动化**：能写在 core 层的答案不要推迟到 runtime 节；runtime
+>    节开头回指本质节。
 
 
 ## 0. 一句话总览
