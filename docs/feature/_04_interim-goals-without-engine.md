@@ -233,3 +233,160 @@ core 没有 step 清单（`WorkflowDefinition` 只有 `id`/`version`/`previousVe
 要「一定停」，就得在库层用图校验（f2-lite 与 main 的 `rerunDag` 都这么做了），
 或者采用「只调度子集」的形态（main 的 `to` 语义——这时没有「停」这回事，只有
 「这段跑完了」）。
+
+---
+
+## 7. 中间件方案（2026-11-02 实测）：不用引擎改动也能做到
+
+### 7.1 形态
+
+中间件给 `ctx` 加东西是上游**支持的路径**（`next({ context })`），
+`ai-orchestration` 的 `ctx.ai` 就是这么来的。临时目标不需要新字段，只需要
+**包装两个已有原语**：
+
+```ts
+function interimGoalsMiddleware() {
+  return createMiddleware().server(async ({ ctx, next }) => {
+    let goals: string[] = (ctx.input as any).__interimGoals ?? []   // 首驱初值
+    const origStep = ctx.step
+    const origWait = ctx.waitForEvent
+    const done = new Set<string>()
+
+    // ① 唤醒时更新目标：payload 带 __interimGoals
+    ;(ctx as any).waitForEvent = async (name: string, o?: any) => {
+      const r = await origWait(name, o)
+      if (name === '__interim-goal' && Array.isArray((r as any)?.__interimGoals)) {
+        goals = (r as any).__interimGoals
+      }
+      return r
+    }
+
+    // ② 每次 step 完成后检查目标是否达成
+    ;(ctx as any).step = (id: string, fn: any, o?: any) =>
+      (async () => {
+        const r = await origStep(id, fn, o)
+        if (goals.includes(id)) done.add(id)
+        if (goals.length > 0 && goals.every((g) => done.has(g))) {
+          done.clear()                                  // 开始新的一段
+          await (ctx.waitForEvent as any)('__interim-goal', {
+            id: `__interim-goal-${id}`,                 // 每段泊位 id 唯一
+            meta: { __interimGoals: goals },
+          })
+        }
+        return r
+      })()
+
+    return next({ context: {} })
+  })
+}
+```
+
+用法与续驱：
+
+```ts
+createWorkflow({ id, input: z.object({ __interimGoals: z.array(z.string()).optional() }) })
+  .middleware([interimGoalsMiddleware()])
+  .handler(...)
+
+// 首驱：目标来自 input
+runWorkflow({ workflow, runStore, runId, input: { __interimGoals: ['b'] } })
+// 续驱：每次可换目标（空数组 = 跑到终点）
+runWorkflow({ workflow, runStore, runId,
+  signalDelivery: { name: '__interim-goal', signalId, payload: { __interimGoals: ['d'] } } })
+```
+
+实测三段（`workflow-core/tests/engine.interim-middleware.test.ts`）：
+
+```text
+D1: {a:1, b:1}                paused      input.__interimGoals = ['b']
+D2: {a,b,c,d}                 paused      payload.__interimGoals = ['d']
+D3: 全部完成                   finished    payload.__interimGoals = []
+```
+
+**零引擎改动、零 store 依赖、零额外状态字段。**
+
+### 7.2 三个必须做对的地方（每个都实测验证过）
+
+| 坑 | 后果 | 正确做法 |
+| --- | --- | --- |
+| 在 `ctx.step` 的**闭包内部**泊车 | `WorkflowPaused` 被记成 `STEP_FAILED`，续驱时 rethrow | 在 `orig()` **返回之后**再泊 |
+| 泊完不清 `done` | 目标累积只增不减，本 drive 内不再停，**换目标也无效** | 泊完 `done.clear()` |
+| 泊位 id 不带区分 | 多段泊车时 `findCheckpoint` 分不清 | id 带 step 名或计数器 |
+
+另外两条与前面 §4 呼应：
+
+- **续驱必须投信号**（`signalDelivery`），不能用 `recover: true`——后者不产生
+  `SIGNAL_RESOLVED`，重放时 `waitForEvent` 匹配不到，会再泊一次。
+- **目标从 payload 更新**而不是从 input 改：`resumeRun` 用 `persistedState.input`
+  （`run-workflow.ts:432`），续驱传新 input 会被忽略。
+
+### 7.3 它继承了 §4 的三条局限，但没有引入新的
+
+| §4 的问题 | 中间件方案 |
+| --- | --- |
+| 目标拼写错 → 静默跑完 | **同样**（无图），但 `goals` 就在用户手里，可以自己先校验 |
+| 目标被 reseed 导入 → 不泊车 | **同样**（导入的 `STEP_FINISHED` 也会让 `done` 命中），语义一致 |
+| 目标运行时不可达 → 静默跑完 | **同样**（分支走开，`every(...)` 永不成立） |
+
+**中间件方案不是「绕过问题」，是「同一个软围栏，换个地方实现」**——所以它的
+能力边界与引擎版一致，区别只在谁来维护（中间件 vs 引擎）和依赖什么（守卫未覆盖
+的行为 vs 自己维护的参数）。
+
+### 7.4 风险：依赖一个未承诺的实现细节
+
+§7.1 的 `ctx.step = ...` 能生效，靠的是两件事：
+
+**① 中间件拿到的是同一个 `ctx` 对象引用**
+
+```text
+composeMiddlewares (run-workflow.ts:1468)
+  await m.server({ ctx, next })     ← ctx 是 baseCtx 本体（:606），不是拷贝
+```
+
+所以直接属性赋值对后续中间件与 handler 可见。
+
+**② 保留字段的守卫只覆盖 `next({ context })` 这条路径**
+
+```ts
+// :1488-1499（next() 内部）
+for (const key of Object.keys(ext)) {
+  if (reservedCtxFields.has(key)) throw new Error('may not shadow reserved ctx field')
+}
+Object.assign(ctx, ext)             // 只检查 ext 的 key
+```
+
+`reservedCtxFields`（`:1451-1466`）**包含 `step` 与 `waitForEvent`**，但只挡
+`next({ context: { step } })`。全仓没有 `Object.freeze(ctx)` / `defineProperty`。
+
+**上游先例核查**（`b711b51`，grep `packages/ examples/ docs/ research/`）：
+
+```text
+ctx.step = ...            → 零命中
+origStep / wrapStep       → 零命中
+Object.assign(ctx, ...)   → 只有引擎自己那一处（:1499）
+```
+
+`ai-orchestration` 的 `agentMiddleware` 也只是**调用** `ctx.step`（在 `ctx.ai.agent`
+内部），**没有包装或改写**。
+
+**所以准确的说法是**：这不是「另一条合法路径」，而是**守卫未覆盖的行为**。
+上游文档明说「Middleware extensions cannot shadow reserved ctx fields」——语境虽
+指 `next({context})`，但意图是保留字段不被动。因此：
+
+- 现在能用（有测试背书），适合**原型与自研工具**；
+- 上游一旦 `Object.freeze(ctx)` 或补上直接赋值的守卫，**中间件会静默失效**（不报错）；
+- 要作为长期契约，最终应落到 **drive 参数**（`RunWorkflowOptions.interimGoals`，
+  见 `_02`）或**新原语**（如 `ctx.park()`），而不是中间件包装。
+
+### 7.5 与引擎方案的取舍
+
+| | 中间件方案 | 引擎参数（f2-lite `interimGoals`） |
+| --- | --- | --- |
+| core 改动 | 0 | 47 行 + 3 字段 |
+| 首驱指定目标 | `input.__interimGoals` | `RunWorkflowOptions.interimGoals` |
+| 续驱换目标 | `signalDelivery.payload.__interimGoals` | 同参数 per-drive |
+| 需要 `inputSchema` 声明 | **是**（否则被剥离） | 否 |
+| 续驱通道 | **必须 `signalDelivery`** | `recover` 或 `signalDelivery` 均可 |
+| 依赖上游承诺 | ❌（守卫未覆盖的行为） | ✅（自己维护） |
+| 适合 | 原型、自研工具、不想动 core | 长期契约 |
+
