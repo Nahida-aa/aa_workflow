@@ -155,7 +155,8 @@ return ctx.step(id, async () => {
 
 core 没有 step 清单（`WorkflowDefinition` 只有 `id`/`version`/`previousVersions`/
 `defaultStepRetry`/`middlewares`/`handler`，没有 `steps`），所以引擎**判不了**以下三种误用。
-这些都是机制层面的事实，用 `interimGoals` 的人必须知道：
+前两条（4.1 拼写错、4.3 运行时不可达）是**已确定**的机制事实；4.2 涉及
+`reseedRun`，**待定**。
 
 ### 4.1 目标拼写错误 → 静默跑完
 
@@ -166,6 +167,14 @@ core 没有 step 清单（`WorkflowDefinition` 只有 `id`/`version`/`previousVe
 但库层**有图所以能查**（`rerunDag` 的 `:412-416` 就是这么做的）。
 
 ### 4.2 目标在 reseed 闭包外 → 泊车机制整体失效
+
+> **状态：待定（2026-11-02）。** `reseedRun` 是可选参数，所以泊车语义必须在
+> **不给它**时也正确——那一半已经确定（见 4.1/4.3）。给了它时「导入的
+> checkpoint 算不算目标达成」是**未决策的问题**，引擎注释里标为 TBD
+> （`run-workflow.ts` 的 `interimGoals` 文档）。下面是**当前行为**，不是
+> 推荐用法。
+
+
 
 `reseedRun: { redoSet: ['translate'] }` + `interimGoals: ['load']`：
 
