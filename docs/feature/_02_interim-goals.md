@@ -1,6 +1,6 @@
 # 临时目标（interim goals，TS 版本实现）
 
-> 基线：`learn_ls/workflow` **f2-lite 分支** HEAD = `4cc7a46`。
+> 基线：`learn_ls/workflow` **f2-lite 分支** HEAD = `b711b51`。
 > ⚠️ **这个功能不在 `taren/durable-recovery`（`0971b4c`）上**——它与 redo
 > （`reseedRun`）同为 **f2-lite 自有设计**，引入提交 `b9eebed`。核验命令：
 >
@@ -33,7 +33,7 @@ engineStep 成功 append STEP_FINISHED 之后
 
 ---
 
-## 1. 声明（`run-workflow.ts:89-96`）
+## 1. 声明（`run-workflow.ts:105-112`）
 
 ```ts
 /**
@@ -54,7 +54,7 @@ interimGoals?: ReadonlyArray<string>
 
 ---
 
-## 2. 三个字段：谁在什么时候初始化（`run-workflow.ts:532-544`）
+## 2. 三个字段：谁在什么时候初始化（`run-workflow.ts:548-562`）
 
 `driveHandler` 在跑 handler 之前把这些塞进 `EngineRuntime`：
 
@@ -87,7 +87,7 @@ goalsDoneAtDriveStart: options.interimGoals
 
 ---
 
-## 3. 泊车检查：`engineStep` 成功返回之前（`run-workflow.ts:1119-1139`）
+## 3. 泊车检查：`engineStep` 成功返回之前（`run-workflow.ts:1135-1155`）
 
 ```ts
 // F2-lite interim goal: park when every goal is checkpointed and
@@ -138,8 +138,8 @@ recover drive 开始
 
 两道保险：
 
-- **短路路径不进检查块**：`engineStep` 的 `cached` 分支在 `:863-886` 就 `return`，
-  根本走不到 `:1119`。所以「重放到目标 step」本身不会触发第二次泊车。
+- **短路路径不进检查块**：`engineStep` 的 `cached` 分支在 `:879-902` 就 `return`，
+  根本走不到 `:1135`。所以「重放到目标 step」本身不会触发第二次泊车。
 - **`goalsDoneAtDriveStart` 闸**：即便某次 drive 要让目标 step 真跑（例如
   `reseedRun` 的新 run 把目标列进了 `redoSet`），闸也挡着不会重挂。
 
@@ -185,6 +185,14 @@ handler 返回之前——run 停成 `paused` 而不是 `finished`，需要再�
 引擎这一层**没有图**：静态可达 ≠ 运行时可达（条件分支、`fail()` 短路径），
 所以只能软。库层愿意承担这个判断，就变成了硬校验。
 
+**core 不校验的三种具体后果、以及「不进引擎 API 时怎么实现」**：
+见 `_04_interim-goals-without-engine.md`（含 wf-demo `main` 分支的库层做法，
+以及两套 `to` 语义的分歧）。
+
+**core 不校验的三种具体后果、以及「不进引擎 API 时怎么实现」**：
+见 `_04_interim-goals-without-engine.md`（含 wf-demo `main` 分支的库层做法，
+以及两套 `to` 语义的分歧）。
+
 ---
 
 ## 7. 续驱的两种写法
@@ -200,17 +208,17 @@ handler 返回之前——run 停成 `paused` 而不是 `finished`，需要再�
 
 ---
 
-## 8. 代码位置索引（f2-lite `4cc7a46`）
+## 8. 代码位置索引（f2-lite `b711b51`）
 
 | 主题 | 文件 : 行 |
 | --- | --- |
-| 参数声明 + 语义注释 | `packages/workflow-core/src/engine/run-workflow.ts:89-96` |
-| 三个字段初始化 | `run-workflow.ts:532-544` |
-| 泊车检查块 | `run-workflow.ts:1119-1139` |
-| `goalParks` 计数器 | `run-workflow.ts:523` / `:741` |
+| 参数声明 + 语义注释 | `packages/workflow-core/src/engine/run-workflow.ts:105-112` |
+| 三个字段初始化 | `run-workflow.ts:548-562` |
+| 泊车检查块 | `run-workflow.ts:1135-1155` |
+| `goalParks` 计数器 | `run-workflow.ts:539` / `:757` |
 | runtime 透传（`startRun` args） | `packages/workflow-runtime/src/runtime-driver.ts:130` / `:884` |
 | runtime 类型声明 | `workflow-runtime/src/types.ts:435` |
-| 短路分支（不进检查块） | `run-workflow.ts:863-886` |
+| 短路分支（不进检查块） | `run-workflow.ts:879-902` |
 
 ## 9. 测试位置索引
 
@@ -222,6 +230,6 @@ handler 返回之前——run 停成 `paused` 而不是 `finished`，需要再�
 跑法：
 
 ```bash
-cd /home/aa/repos/lib_ls/learn_ls/workflow   # f2-lite 分支，HEAD 4cc7a46
+cd /home/aa/repos/lib_ls/learn_ls/workflow   # f2-lite 分支，HEAD b711b51
 node node_modules/.bin/vitest run packages/workflow-core/tests/engine.rerun.test.ts
 ```
