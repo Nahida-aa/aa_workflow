@@ -179,3 +179,85 @@ STATUS: paused（应 finished）
 2. 续驱必须投信号，不能用 `recover`
 3. 包装层需要自己的 replay 感知状态（`parked`），不能依赖引擎的快照
 4. redo 拿不到事件级溯源
+
+---
+
+## 6. 上游对中间件的定位（读 `b711b51` 文档）
+
+判断「中间件方案能不能长期用」，要看上游怎么定位它。三份文档的结论：
+
+### `docs/concepts/middleware.md`：只扩 ctx，不承担引擎语义
+
+全文的 Rules 只有三条：
+
+- `.middleware([a, b])` 顺序执行，每个必须调 `next()` 恰好一次
+- **扩展不能遮蔽保留字段**（`input`/`state`/`runId`/`signal`/`step`/`sleep`/
+  `sleepUntil`/`waitForEvent`/`approve`/`now`/`uuid`/`emit`）——「Type system
+  rejects them; runtime guards too」
+- 代码在 handler 前后包裹
+
+示例全是横切关注点：`requireUser` / `startTrace` / `requirePro` / `sendReceipt`。
+**没有任何一例是「改变引擎控制流」**。
+
+### `research/API_CANDIDATES.md`：扩展走「原语」，不走中间件
+
+八个 non-negotiable 的第 2 条：
+
+> **Composable primitives.** `step`, `sleep`, `waitForEvent`, `invoke`,
+> `parallel`, `race`, `compensate` are first-class units. They can be defined
+> once and reused across workflows.
+
+注意 **`invoke`（子工作流）、`parallel`、`race`** —— 上游把「能力」设计成**原语**，
+不是让用户拿中间件去拼。中间件在这份文档里没有出现。
+
+### `research/COMPETITOR_GAP_ANALYSIS_2026-05-25.md`：缺的是运维面
+
+> The biggest gap is **not workflow syntax**. It is the operational surface
+> around long-lived runs: list due timers, claim wakeups, list schedules,
+> pause/resume schedules, backfill missed ticks, search runs, retry/redrive
+> failed runs, and inspect version drain.
+
+Takeaway 2 点明了扩展形式：
+
+> Keep the headless shape, but name capabilities explicitly. Avoid
+> `vercelAdapter`/`netlifyAdapter`/`cloudflareAdapter`. Prefer **capability
+> packages** like `RunStore`, `TimerDriver`, `ScheduleStore`, `ScheduleDriver`,
+> `EventIngress`, and `QueueLimiter`.
+
+`docs/comparison.md` 的能力矩阵同样是按「capability」列（schedules、queues、
+version routing、run search、devtools），**中间件不在任何一行**。
+
+### 上游规划的能力清单（都不是中间件）
+
+| 方向 | 载体 |
+| --- | --- |
+| 存储 | `RunStore` + store adapters（Postgres 参考实现 / D1） |
+| 调度 | `TimerDriver` / `ScheduleStore` / `ScheduleDriver` |
+| 事件 | `EventIngress` |
+| 并发 | `QueueLimiter` |
+| 组合 | `invoke` / `parallel` / `race` 原语 |
+| 运维面 | run search、replay、retry/redrive、retention、devtools |
+
+---
+
+## 7. 风险：本文的中间件方案依赖一个未承诺的实现细节
+
+本文 §2 说「可以直接改写 `ctx.step`」，实测可行——但**这是实现细节，不是上游
+契约**：
+
+- 上游文档明确说保留字段「不能遮蔽」，虽然语境是 `next({ context })` 这条路径；
+- `composeMiddlewares` 传同一个 `ctx` 对象引用（`:1468`），所以直接赋值生效；
+- 上游随时可以加固：`Object.freeze(ctx)`、把 `step` 改成 getter、或在 `engineStep`
+  内部记录原始引用。**任一加固都会让中间件静默失效**（不报错，只是不生效）。
+
+### 与上游规划方向对照
+
+| 我们的中间件方案 | 上游会走的路 |
+| --- | --- |
+| 包装 `ctx.step` 实现「跑到某步停」 | 加一个**原语**（像 `sleep`/`waitForEvent`）或 **drive 参数** |
+| 包装 `ctx.step` + 查源 run 实现 redo | `invoke` 语义 / store 层的 checkpoint 复用 |
+| 靠 `parked` 布尔做 replay 感知 | 引擎内部状态（`interimGoalsDone` 那类） |
+
+**结论**：中间件方案适合**原型验证**和**不依赖上游承诺的工具**（如我们自己发包），
+不适合作为**长期 API 契约**。若这个能力要留在产品里，最终应落到：
+① drive 参数（`RunWorkflowOptions`），或 ② 新原语，而不是中间件包装。
