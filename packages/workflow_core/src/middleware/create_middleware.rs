@@ -69,9 +69,21 @@ pub struct Middleware {
     /// from the log, exactly as the engine's own `goals_done_at_drive_start`
     /// does.
     pub on_step_finished: Option<StepFinishedHook>,
+    /// **Before-step hook**: runs before the step's closure, can
+    /// [`Skip`](StepHookOutcome::Skip) with a cached result or
+    /// [`Park`](StepHookOutcome::Park) at the boundary.
+    ///
+    /// This is what makes `reseed` (redo) expressible as a middleware: the
+    /// hook answers "this step's result is already known" and the engine
+    /// commits that result without calling the closure.
+    ///
+    /// Not consulted for steps that replay short-circuits — a step with a
+    /// recorded checkpoint never reaches the hook, matching the
+    /// `on_step_finished` convention.
+    pub on_before_step: Option<BeforeStepHook>,
 }
 
-/// What a [`StepFinishedHook`] decides after a step commits.
+/// What a step hook decides at a step boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepHookOutcome {
     /// Continue driving.
@@ -82,6 +94,10 @@ pub enum StepHookOutcome {
         signal_name: String,
         meta: Option<serde_json::Value>,
     },
+    /// **Before-step only**: don't run the step's closure. Commit `result` as
+    /// the step's own `STEP_FINISHED` instead (a replayed/cached result).
+    /// Ignored by after-step hooks (the step already ran by then).
+    Skip { result: serde_json::Value },
 }
 
 /// Erased step-boundary hook: `(run_id, step_id, result)` → outcome.
@@ -91,6 +107,21 @@ pub enum StepHookOutcome {
 /// handle when constructing the middleware.
 pub type StepFinishedHook =
     Arc<dyn Fn(&StepFinishedEvent<'_>) -> anyhow::Result<StepHookOutcome> + Send + Sync>;
+
+/// Erased **before-step** hook: decides before the step's closure runs.
+/// Can [`Skip`](StepHookOutcome::Skip) with a cached result, or
+/// [`Park`](StepHookOutcome::Park) at the boundary.
+pub type BeforeStepHook =
+    Arc<dyn Fn(&BeforeStepEvent<'_>) -> anyhow::Result<StepHookOutcome> + Send + Sync>;
+
+/// The data a [`BeforeStepHook`] sees.
+#[derive(Debug)]
+pub struct BeforeStepEvent<'a> {
+    pub run_id: &'a str,
+    pub step_id: &'a str,
+    /// The step's declared `meta`, if any (free-form, caller-provided).
+    pub meta: Option<&'a serde_json::Value>,
+}
 
 /// The data a [`StepFinishedHook`] sees.
 #[derive(Debug)]
@@ -121,6 +152,7 @@ impl Middleware {
             produce: None,
             wrap: None,
             on_step_finished: None,
+            on_before_step: None,
         }
     }
 
@@ -162,6 +194,17 @@ impl Middleware {
         F: Fn(&StepFinishedEvent<'_>) -> anyhow::Result<StepHookOutcome> + Send + Sync + 'static,
     {
         self.on_step_finished = Some(Arc::new(f));
+        self
+    }
+
+    /// Set the **before-step hook** — runs before the step's closure.
+    /// Return [`StepHookOutcome::Skip`] to commit a cached result instead of
+    /// running the closure (this is how `reseed` / redo is expressed).
+    pub fn on_before_step<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&BeforeStepEvent<'_>) -> anyhow::Result<StepHookOutcome> + Send + Sync + 'static,
+    {
+        self.on_before_step = Some(Arc::new(f));
         self
     }
 }

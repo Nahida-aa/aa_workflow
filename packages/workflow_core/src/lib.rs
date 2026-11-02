@@ -61,7 +61,8 @@ pub use event::{
     fold_step_states,
 };
 pub use middleware::{
-    CtxProducer, CtxWrapper, Middleware, StepFinishedEvent, StepFinishedHook, StepHookOutcome,
+    BeforeStepEvent, BeforeStepHook, CtxProducer, CtxWrapper, Middleware, StepFinishedEvent,
+    StepFinishedHook, StepHookOutcome,
 };
 pub use resource::{Gate, GateGuard, ResourceKey};
 pub use run_store::{DeleteReason, InMemoryStore, PendingApproval, RunAwaitable, RunState, RunStore, WaitForState};

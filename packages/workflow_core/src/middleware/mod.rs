@@ -2,5 +2,6 @@
 
 mod create_middleware;
 pub use create_middleware::{
-    CtxProducer, CtxWrapper, Middleware, StepFinishedEvent, StepFinishedHook, StepHookOutcome,
+    BeforeStepEvent, BeforeStepHook, CtxProducer, CtxWrapper, Middleware, StepFinishedEvent,
+    StepFinishedHook, StepHookOutcome,
 };

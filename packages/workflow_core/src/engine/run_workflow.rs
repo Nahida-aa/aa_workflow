@@ -961,6 +961,11 @@ async fn drive(
             .iter()
             .filter_map(|m| m.on_step_finished.clone())
             .collect(),
+        before_step_hooks: active
+            .middlewares
+            .iter()
+            .filter_map(|m| m.on_before_step.clone())
+            .collect(),
     });
     inner.publish(&WorkflowEvent::RunStarted {
         ts,

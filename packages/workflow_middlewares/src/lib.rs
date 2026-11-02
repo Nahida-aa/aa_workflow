@@ -45,5 +45,7 @@
 //! [`Middleware::wrap`]: aa_workflow_core::middleware::Middleware::wrap
 
 mod interim_goals;
+mod reseed;
 
-pub use interim_goals::{interim_goals, INTERIM_GOAL_SIGNAL, INTERIM_GOALS_FIELD, GetEvents};
+pub use interim_goals::{interim_goals, GetEvents, INTERIM_GOAL_SIGNAL, INTERIM_GOALS_FIELD};
+pub use reseed::{reseed, LoadResults, ReseedPlan};

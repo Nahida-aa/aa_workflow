@@ -269,6 +269,9 @@ pub struct EngineRuntime {
     /// `Park` 即在该 step 边界停下。策略（临时目标、选择性作废等）放在
     /// middlewares 包里，引擎只提供这一层机制。
     pub step_finished_hooks: Vec<crate::middleware::StepFinishedHook>,
+    /// **Before-step hooks**：在 step 闭包执行前调用，可 `Skip { result }`
+    /// 直接提交缓存结果（redo 用），或在边界 `Park`。
+    pub before_step_hooks: Vec<crate::middleware::BeforeStepHook>,
     /// F2-lite 临时目标（INTERIM_GOAL）：名单内步骤全部 checkpoint 后经保留
     /// 信号 `__interim-goal` 泊车（run → paused，宿主以 recover 续驱扩展边界）。
     /// 转移检查防重挂；未到达的 goal 永不触发（best-effort fence）。
@@ -478,6 +481,79 @@ where
     // Cancelled run → stop driving at this boundary.
     if is_cancelled(&inner.store, &inner.run_id) {
         return Err(WorkflowCancelled.into());
+    }
+
+    // **Before-step hooks**（本仓有意扩展，与 on_step_finished 对称）。
+    //
+    // 在**执行闭包之前**调用，因此可以 `Skip { result }`：不跑 `run`，直接把这个
+    // 结果当作本 step 的结果落 `STEP_FINISHED`（redo / 缓存复用需要的正是这个）。
+    // 重放路径（下面的 live 短路）**先于**这里，所以已 checkpoint 的 step 不会
+    // 再问钩子——与 on_step_finished 的约定一致：钩子只作用于「本来要真跑」的 step。
+    if !inner.before_step_hooks.is_empty() {
+        let mut skipped: Option<serde_json::Value> = None;
+        for hook in &inner.before_step_hooks {
+            match hook(&crate::middleware::BeforeStepEvent {
+                run_id: &inner.run_id,
+                step_id,
+                meta: None,
+            })? {
+                crate::middleware::StepHookOutcome::Continue => {}
+                crate::middleware::StepHookOutcome::Skip { result } => {
+                    skipped = Some(result);
+                    break;
+                }
+                crate::middleware::StepHookOutcome::Park { signal_name, meta } => {
+                    let _ = crate::engine::exec_pause_with(
+                        inner,
+                        step_id,
+                        &signal_name,
+                        "parked before a middleware step boundary",
+                        None,
+                        meta,
+                        None,
+                    )
+                    .await;
+                    return Err(WorkflowParked.into());
+                }
+            }
+        }
+        if let Some(result) = skipped {
+            // 与正常完成同样落账：STEP_FINISHED + live 状态 + publish。
+            let ts = now_ms();
+            let ev = WorkflowEvent::StepFinished {
+                ts,
+                run_id: inner.run_id.clone(),
+                step_id: step_id.to_string(),
+                result: Some(result.clone()),
+                attempts: vec![StepAttempt {
+                    attempt: 1,
+                    started_at: ts,
+                    finished_at: ts,
+                    result: Some(result.clone()),
+                    error: None,
+                }],
+                meta: None,
+            };
+            inner.append(&ev)?;
+            inner.set_live(
+                step_id,
+                StepState {
+                    status: StepStatus::Success,
+                    result: Some(result.clone()),
+                    error: None,
+                    started_at: Some(ts),
+                    finished_at: Some(ts),
+                },
+            );
+            inner.publish(&ev);
+            return serde_json::from_value(result).map_err(|e| {
+                anyhow::anyhow!(
+                    "step `{step_id}`: a middleware Skip result does not deserialize into \
+                     `{}`: {e}",
+                    std::any::type_name::<T>()
+                )
+            });
+        }
     }
 
     // F2-lite 耐久重试：上次驱动留下的待重试状态——未到期则泊车（__timer +
