@@ -335,3 +335,86 @@ core 没有 step 清单（`WorkflowDefinition` 不含 `steps`），step 是 hand
 2. 目标被 `reseedRun` 导入 → 算已达成、不泊车（**符合 reseed「部分重跑」的意图**；
    `redoSet` 才是「哪些目标该真跑」的开关）
 3. 目标运行时不可达 → 静默跑完（静态可达 ≠ 运行时可达）
+
+---
+
+## 机制事实：中间件改不了 `inputSchema`（2026-11-02 实测）
+
+问：「中间件能不能改 inputSchema？」**不能**，三处证据：
+
+| 实测 | 结果 |
+| --- | --- |
+| 中间件能否拿到 `workflow` | ❌ `ctx` 的 14 个键里没有（`runId`,`input`,`state`,`signal`,`runtime` + 9 原语），`'workflow' in ctx === false` |
+| 校验失败时中间件是否运行 | ❌ **不运行**——`startRun` 在 `run-workflow.ts:252` 校验后直接 `RUN_ERRORED(validation_error)` 返回 |
+| 运行期改 `workflow.inputSchema` | 字段可写，但校验已发生，只影响下一次 drive（且跨 run 污染） |
+
+时序（`run-workflow.ts`）：
+
+```text
+drive → startRun
+  :252  validateWorkflowInput(workflow, options.input)   ← 校验
+  :253  buildInitialState
+  :301  driveHandler
+          :610  composeMiddlewares                        ← 中间件在这里
+                  → handler
+```
+
+**中间件在校验的下游**，结构上不可能影响它。唯一能定义 `inputSchema` 的时机是
+`createWorkflow({ input })` 构建期。想在运行时换 schema 只能换一个 workflow 对象，
+但同 `id` 的两个对象在 runtime 注册表里会互相覆盖——**不是「按 run 换 schema」**。
+
+---
+
+## 方案：`input.__interimGoals`（中间件读 input，用户自己传）
+
+既然中间件改不了 schema，那就**在定义期就把它写进 schema**，由用户自己带值。
+实测可行：
+
+```ts
+const schema = z.object({
+  doc: z.string(),
+  __interimGoals: z.array(z.string()).optional(),   // ← 定义时声明
+})
+
+const mw = createMiddleware().server(async ({ ctx, next }) => {
+  const goals = (ctx.input as any).__interimGoals ?? []
+  if (goals.length === 0) return next({ context: {} })
+  // …包 ctx.step，达标后 waitForEvent('__interim-goal', { id: '__interim-goal-0' })
+})
+
+const wf = createWorkflow({ id: 'x', input: schema })
+  .middleware([mw])
+  .handler(...)
+
+// 首次 drive 带目标
+runWorkflow({ workflow: wf, runStore, runId, input: { doc, __interimGoals: ['b'] } })
+// 续驱：投 __interim-goal（不是 recover）
+runWorkflow({ workflow: wf, runStore, runId, signalDelivery: { name: '__interim-goal', signalId } })
+```
+
+实测结果：`D1 {a:1,b:1} paused` → `D2 {a:1,b:1,c:1} finished`，泊车恰好一次。
+
+### 对用户的四条约定（使用这个中间件就要遵守）
+
+| # | 约定 | 违反的后果 |
+| --- | --- | --- |
+| ① | 在 `input` schema 里**声明** `__interimGoals?: string[]` | 被 schema 校验拒绝或剥离，中间件读不到 |
+| ② | 目标**只能在 run 创建时**通过 input 给 | 续驱时传新 input 不生效（`resumeRun` 用 `persistedState.input`，`run-workflow.ts:432`） |
+| ③ | 续驱投 `__interim-goal` 信号，**不用** `recover: true` | 没有 `SIGNAL_RESOLVED`，重放时长匹配不到，会**重复泊车** |
+| ④ | `__` 前缀避开业务字段 | 与用户自己的字段重名 |
+
+### 能力边界：不能「每次 resume 换目标」
+
+实测：run 建好后 `persistedState.input` 是 `{doc, __interimGoals:['b']}`；续驱时传
+`input: { __interimGoals: ['c'] }` **被忽略**，仍按 `['b']` 执行。
+
+| 载体 | 每次 resume 能换目标 |
+| --- | --- |
+| `input.__interimGoals` | ❌ 固定在 run 的 input 里 |
+| 中间件闭包传 goals | ❌ 构建期固定 |
+| 外部可变对象（`let goals`） | ⚠️ 能读到新值，但**不可重放**（重放与日志不一致） |
+| **`RunWorkflowOptions.interimGoals`**（引擎参数） | ✅ per-drive，不落盘 |
+
+最后一行是引擎参数方案的**独有价值**：目标是「本次 drive 的参数」，不是「run 的属性」。
+`_02` §1 记的正是这一点。所以两者不是替代关系——`input.__interimGoals` 适合
+「目标在 run 生命周期内固定」，引擎参数适合「每次续驱可能换目标」。
