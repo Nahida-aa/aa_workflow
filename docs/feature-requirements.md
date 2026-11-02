@@ -403,10 +403,22 @@ runWorkflow({ workflow: wf, runStore, runId, signalDelivery: { name: '__interim-
 | ③ | 续驱投 `__interim-goal` 信号，**不用** `recover: true` | 没有 `SIGNAL_RESOLVED`，重放时长匹配不到，会**重复泊车** |
 | ④ | `__` 前缀避开业务字段 | 与用户自己的字段重名 |
 
-### 能力边界：不能「每次 resume 换目标」
+### ⚠️ 悬而未决：「续驱传新 input 不生效」（TODO，待讨论）
 
 实测：run 建好后 `persistedState.input` 是 `{doc, __interimGoals:['b']}`；续驱时传
-`input: { __interimGoals: ['c'] }` **被忽略**，仍按 `['b']` 执行。
+`input: { __interimGoals: ['c'] }` **被忽略**，仍按 `['b']` 执行（`resumeRun` 用
+`persistedState.input`，`run-workflow.ts:432`）。
+
+**待讨论**（2026-11-02 用户标记）：
+
+- 这是设计（input 是 run 身份的一部分，换了就是另一个 run）还是要松动的约束？
+- 若松动，影响面：`buildInitialState` 每次 resume 重新执行（`state` 从
+  `initialize(input)` 重建）——换 input 会让**已重放的 state 与历史不一致**。
+  这条是核心难点，不是简单放开参数就行。
+- 绕开方式现状：换目标走 `RunWorkflowOptions.interimGoals`（per-drive 不落盘），
+  但那是引擎参数，中间件层拿不到。
+
+**在此之前不依赖「续驱换 input」**。
 
 | 载体 | 每次 resume 能换目标 |
 | --- | --- |
