@@ -343,6 +343,7 @@ impl<TInput, TOutput, TState, TCtxExt> WorkflowBuilder<TInput, TOutput, TState, 
                 let typed = BaseCtx {
                     run_id: ctx.run_id,
                     input,
+                    meta: ctx.meta.clone(),
                     state: crate::define::StateHandle::new(
                         state,
                         ctx.state.mirror(),

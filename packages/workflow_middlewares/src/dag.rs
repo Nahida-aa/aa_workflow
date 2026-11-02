@@ -7,7 +7,7 @@
 //! 策略，调度仍由用户 handler 负责。这与 TS 版 `dag(spec)`（接管 handler）是
 //! 两种语言下的各自自然形态。
 //!
-//! # 行为（读 `ctx.input.__dagPlan`）
+//! # 行为（读 `RunWorkflowOptions.meta.__dagPlan`）
 //!
 //! ```json
 //! { "__dagPlan": {
@@ -84,10 +84,11 @@ pub fn dag_policies(shape: Arc<DagShape>, get_events: Arc<GetEvents>) -> Middlew
             let shape = shape_for_wrap.clone();
             let state = state_for_wrap.clone();
             Box::pin(async move {
-                // 前置：解析 input.__dagPlan → PlanState。
+                // 前置：解析 RunWorkflowOptions.meta.__dagPlan → PlanState。
                 let plan = ctx
-                    .input
-                    .get(DAG_PLAN_FIELD)
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.get(DAG_PLAN_FIELD))
                     .and_then(|v| v.as_object())
                     .cloned();
 

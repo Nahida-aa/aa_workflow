@@ -261,6 +261,9 @@ pub struct EngineRuntime {
     pub compensations: Mutex<Vec<Compensation>>,
     /// F2-lite 耐久重试：驱动启动时从日志折叠的待重试状态（按 step）。
     /// 空表 = 无待重试。exec_step 据此泊车（未到期）或续跑（到期）。
+    /// **Run 级参数**（`RunWorkflowOptions.meta`，本仓有意扩展）。中间件的
+    /// wrap 前置与 step 钩子经此读取策略参数；不参与 handler、不落 \`RunState\`。
+    pub meta: Option<serde_json::Value>,
     pub pending_retries: Mutex<std::collections::HashMap<String, PendingRetry>>,
     /// **Step-boundary hooks**，按中间件注册顺序收集（本仓有意扩展：TS 靠覆盖
     /// `ctx.step` 达到同样能力，Rust 的 `ctx.step` 是方法、不可替换）。
@@ -496,6 +499,7 @@ where
                 run_id: &inner.run_id,
                 step_id,
                 meta: None,
+                run_meta: inner.meta.as_ref(),
             })? {
                 crate::middleware::StepHookOutcome::Continue => {}
                 crate::middleware::StepHookOutcome::Skip { result } => {
@@ -741,6 +745,7 @@ where
                             step_id,
                             result: &recorded,
                             attempts: attempts.len(),
+                            run_meta: inner.meta.as_ref(),
                         })?;
                         if let crate::middleware::StepHookOutcome::Park { signal_name, meta } =
                             outcome

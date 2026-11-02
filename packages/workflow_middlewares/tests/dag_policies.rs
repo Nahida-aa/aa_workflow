@@ -99,7 +99,8 @@ async fn redo_reuse_and_goal_park_via_dag_plan() {
     exec.lock().unwrap().clear();
     let out = run_workflow(
         RunWorkflowOptions::new(Arc::new(mk()), store.clone())
-            .input(serde_json::json!({
+            .input(serde_json::json!({}))
+            .meta(serde_json::json!({
                 "__dagPlan": {
                     "source_run_id": "r1",
                     "from": ["translate"],

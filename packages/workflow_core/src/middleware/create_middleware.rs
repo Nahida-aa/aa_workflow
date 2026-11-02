@@ -121,6 +121,8 @@ pub struct BeforeStepEvent<'a> {
     pub step_id: &'a str,
     /// The step's declared `meta`, if any (free-form, caller-provided).
     pub meta: Option<&'a serde_json::Value>,
+    /// Run-level params from `RunWorkflowOptions.meta` (strategy input).
+    pub run_meta: Option<&'a serde_json::Value>,
 }
 
 /// The data a [`StepFinishedHook`] sees.
@@ -131,6 +133,8 @@ pub struct StepFinishedEvent<'a> {
     pub result: &'a serde_json::Value,
     /// Attempts consumed by this step (1 for a plain success).
     pub attempts: usize,
+    /// Run-level params from `RunWorkflowOptions.meta` (strategy input).
+    pub run_meta: Option<&'a serde_json::Value>,
 }
 
 /// Erased ctx-extension producer: `&WorkflowCtx` → JSON ext value.

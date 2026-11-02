@@ -31,6 +31,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aa_workflow_middlewares"
+version = "0.1.0"
+dependencies = [
+ "aa_workflow_core",
+ "aa_workflow_dag",
+ "anyhow",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "aa_workflow_runtime"
 version = "0.1.0"
 dependencies = [

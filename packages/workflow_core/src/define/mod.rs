@@ -111,6 +111,10 @@ impl StepCtx {
 /// clone (or move) values as needed across `await` points.
 #[derive(Clone)]
 pub struct BaseCtx<TInput = serde_json::Value, TState = serde_json::Value, TCtxExt = ()> {
+    /// **Run 级参数**（`RunWorkflowOptions.meta`，本仓有意扩展）——中间件的
+    /// wrap 前置与策略钩子读取；handler 不消费、不落 `RunState`。与 `input`
+    /// 的分工：input 是业务数据（不可变、handler 消费），meta 是策略参数
+    /// （每次 drive 可换、中间件消费）。
     /// `runId: string`
     pub run_id: String,
     /// `input: TInput` — frozen run input (typed or `Value`)
@@ -124,6 +128,12 @@ pub struct BaseCtx<TInput = serde_json::Value, TState = serde_json::Value, TCtxE
     /// the middleware's `produce` and re-deserialized on every drive, so it is
     /// deterministic across resume.
     pub ext: TCtxExt,
+    /// **Run 级参数**（`RunWorkflowOptions.meta`，本仓有意扩展）——中间件的
+    /// wrap 前置与策略钩子读取；handler 不消费、不落 `RunState`。与 `input`
+    /// 的分工：input 是业务数据（不可变、handler 消费），meta 是策略参数
+    /// （每次 drive 可换、中间件消费）。
+    #[doc(hidden)]
+    pub meta: Option<serde_json::Value>,
     /// Engine-side runtime, mirror of TanStack's closure-captured `engine`.
     /// Not part of the public API.
     #[doc(hidden)]
@@ -152,6 +162,7 @@ impl BaseCtx<serde_json::Value, serde_json::Value, ()> {
         Self {
             run_id: engine.run_id.clone(),
             input: engine.input.clone(),
+            meta: engine.meta.clone(),
             state,
             ext: (),
             engine,
