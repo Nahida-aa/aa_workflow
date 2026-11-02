@@ -120,3 +120,108 @@ F1/F2/F6 对齐）。
    在 `docs/tanstack-alignment.md` 记档。
 4. **功能以自然形态落地**：如果实现需要调用方做「本来不该由它做」的事
    （如手工拼新 run 续跑），先回来改引擎，不要在上层堆补丁。
+
+---
+
+## 设计取舍记录：临时目标与 redo 该放哪一层
+
+**决策日期**：2026-11-02。**状态**：临时目标 → core；redo → core 给机制、图校验留 dag。
+
+讨论过三个选项（「都进 core」/「都只在 dag」/「都不做，教用户手写」）。下面是
+结论与**被否决的理由**，以及一次论证的推翻过程——后者比结论更值得留。
+
+### 结论
+
+| 功能 | 放哪 | 理由 |
+| --- | --- | --- |
+| **临时目标**（`interimGoals`） | **core** | 是 workflow 的**控制语义**，与图无关；手写代价高（见下） |
+| **redo 机制**（`reseedRun` 导入循环） | **core**（20 行） | 与图无关：读源日志、按名单过滤、抄进新日志 |
+| **redo 的闭包校验** | **dag 层**（`rerunDag`） | 只有图能算 `descendants` / 闭包；core 只能给裸名单 `redoSet`（advisory） |
+| **「停」的替代形态**（不调度子集） | dag 层可选 | main 分支的做法，run 正常 `finished`，无续驱 |
+
+### 为什么临时目标该进 core
+
+一度认为「dag 库调 `ctx.waitForEvent` 只需 2 行，不必进引擎」。**该论证错了**：
+
+`waitForEvent` 那一行只是**引擎内部**的样子。用户要手写等价物，需要：
+
+```ts
+const done = new Set<string>()
+let parks = 0
+const wrapped = (id: string, run: () => Promise<T>) => ctx.step(id, async () => {
+  const r = await run()
+  if (goals.includes(id)) done.add(id)
+  if (goals.every(x => done.has(x))) {
+    await ctx.waitForEvent('__interim-goal', {
+      id: `__interim-goal-${parks++}`,   // 不计数则 findCheckpoint 分不清第几次泊车
+      meta: { goals },
+    })
+  }
+  return r
+})
+```
+
+即：**约 10 行 + 改写所有 `ctx.step` 调用点**，还要自己想到「id 要带计数器」
+这类细节。绝大多数用户直接写 `ctx.step('a', run)`，不会包装它。
+
+**而且上面这个写法是错的**（2026-11-02 实测）。在 `ctx.step` 的闭包**内部**调
+`waitForEvent`，`WorkflowPaused` 会被当成 step 的业务失败记进日志：
+
+```
+原始日志：RUN_STARTED, STEP_STARTED, SIGNAL_AWAITED, STEP_FAILED(a, WorkflowPaused)
+```
+
+后果：续驱重放时 a 是 `STEP_FAILED` 而不是 `STEP_FINISHED` → 被 rethrow，
+整个 run 无法继续。**泊车必须发生在 step 成功结束之后**：
+
+```ts
+const a = await ctx.step('a', run)                 // step 先正常收尾
+if (goals.includes('a') && /* 全齐 */) {
+  await ctx.waitForEvent('__interim-goal', { ... })  // 再在 step 之外泊
+}
+```
+
+但这样**就没法写成一个包住 `ctx.step` 的通用 wrapper 了**——每个 step 调用点
+后面都要就地加检查。引擎版之所以能做成「对用户透明」，正是因为它在
+`engineStep` 的**成功返回之前、闭包之外**做判断（`run-workflow.ts:1135-1155`）。
+
+所以省的不是「一行」，是**一次结构性改造 + 一个不容易自己发现的坑**。
+这是「功能以自然形态落地」（通用约束 #4）的直接应用。
+
+### 为什么 redo 的校验不能进 core
+
+core 没有 step 清单（`WorkflowDefinition` 不含 `steps`），step 是 handler 运行时
+通过 `ctx.step` 动态出现的。于是 core **判不了**：
+
+- 目标/名单里的名字**是否存在**
+- 名单**是否封闭**（被作废的 step 的下游有没有跟着作废）
+
+它能做的只有「按名单过滤」——所以 `redoSet` 是 **advisory**：引擎既不校验也不假设。
+图校验必须在上层做（`rerunDag` 的 `descendants(from)` + 闭包 throw）。
+
+> 引擎侧已把这个差异写进注释：`run-workflow.ts` 的 `interimGoals` 文档
+> （目标可能永远达不到、与 `reseedRun` 的交互）与 `reseedRun` 文档（封闭性不校验）。
+
+### 为什么不「只在 dag 里做」
+
+- **临时目标**：dag 层只能「不调度」（run 正常 finished），那样就没有「停住等宿主
+  决定」的能力，也没有同 run 续驱。要保留泊车就得在 handler 里手写上面那 10 行。
+- **不用 DAG 的用户**：手写 workflow 同样需要「跑到某步停下」。这不是图能力，
+  是 workflow 的控制能力。
+
+### 被否决的选项
+
+| 选项 | 否决理由 |
+| --- | --- |
+| 都只在 dag | 临时目标退化成「不调度」，丢失泊车/续驱；非 DAG 用户没有 |
+| 都不做，教用户手写 | 手写代价是 10 行 + 改写所有 step 调用点（见上），不是 1 行 |
+| 把闭包校验也塞进 core | core 无图，只能做名字存在性检查，做不到封闭性检查；做了会给人「已校验」的错觉 |
+
+### 已知的 core 局限（机制事实，不是缺陷）
+
+三条，细节见 `docs/feature/_04_interim-goals-without-engine.md` §4：
+
+1. 目标拼写错 → 静默跑完（引擎不知道有哪些 step）
+2. 目标被 `reseedRun` 导入 → 算已达成、不泊车（**符合 reseed「部分重跑」的意图**；
+   `redoSet` 才是「哪些目标该真跑」的开关）
+3. 目标运行时不可达 → 静默跑完（静态可达 ≠ 运行时可达）
