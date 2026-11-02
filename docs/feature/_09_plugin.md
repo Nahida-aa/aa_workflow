@@ -92,14 +92,37 @@ WorkflowTelemetryOptions  →  plugins: Plugin[]
 
 ### 3.3 插件会长什么样（推断）
 
-从 `WorkflowTelemetryOptions` 的形态外推：
-
-| 维度 | 推断 | 依据 |
+| 维度 | 推断 | 依据 / 置信度 |
 | --- | --- | --- |
-| 挂载点 | `RunWorkflowOptions.plugins`（与 telemetry 同级） | telemetry 就是这么挂的 |
-| 粒度 | 引擎事件级（run / step / signal / timer 的开始与结束） | telemetry 的 span 就是这个粒度 |
-| 是否可改变执行 | **大概率只读观察**，改动执行仍留给 primitive | `mapStepMeta` 是纯函数 |
-| 与 middleware 的关系 | 并存：middleware 扩 ctx，plugin 观察/介入引擎事件 | 两者正交 |
+| **挂载点** | **定义期与运行期都支持**：`createWorkflow().plugins([...])` 设默认，`runWorkflow({ plugins })` 本次追加/覆盖 | 见 §3.4（**中高**） |
+| 合并规则 | 定义期在前、运行期在后（后者覆盖同名），与 middleware 的 `Object.assign` 累加同构 | 中 |
+| 粒度 | 引擎事件级（run / step / signal / timer 的开始与结束） | 高（telemetry 的 span 就是这个粒度） |
+| 是否可改变执行 | **大概率只读观察**，改动执行仍留给 primitive | 中（`mapStepMeta` 是纯函数） |
+| 与 middleware 的关系 | 并存：middleware 扩 ctx，plugin 观察/介入引擎事件 | 高 |
+
+### 3.4 为什么是「两处都能传」（修正）
+
+`telemetry` **只有运行期一处**（`run-workflow.ts:62` 的 `RunWorkflowOptions.telemetry`；
+`createWorkflow` 侧完全没有）。按现状外推，应该只有 `RunWorkflowOptions`。
+
+但这个形态**本身就可疑**：tracing 是「这个 workflow 长期都要」的横切关注点，却要
+**每次 drive 都传一遍**。合理猜测是早期实现随手挂在了最近的位置。
+
+因此更可能的设计是**两处都支持**：
+
+```ts
+// 定义期：默认插件（这个 workflow 长期生效）
+createWorkflow({ id }).plugins([metrics(), tracing()])
+
+// 运行期：本次 drive 追加/覆盖（局部调试、一次性采集）
+runWorkflow({ workflow, runStore, plugins: [debugTrace()] })
+```
+
+| 形态 | 概率（本仓判断） | 说明 |
+| --- | --- | --- |
+| **定义期 + 运行期** | **最高** | 兼顾「长期默认」与「本次特化」，与 telemetry 的现状不矛盾（后者只是还没补定义期） |
+| 仅运行期 | 次之 | 跟 telemetry 现状一致，但形态别扭 |
+| 仅定义期 | 较低 | 放弃「本次特殊处理」的能力 |
 
 ---
 
@@ -132,8 +155,10 @@ pub type StepFinishedHook =
 | 不凭空造新概念（上游连插件雏形都没有） | 若上游将来把「插件」与「中间件」分成两个概念，我们要搬家 |
 | 与既有 API 连续（`.middleware(mw)` 已存在） | — |
 
-**搬家成本低**：`StepFinishedEvent` / `StepHookOutcome` 的类型签名**独立于挂载点**，
-真要挪到 `RunWorkflowOptions.plugins` 只是换个收集位置。
+**搬家成本低**：`StepFinishedEvent` / `StepHookOutcome` 的类型签名**独立于挂载点**。
+本仓的收集点只有一处（`run_workflow.rs` 构造 `EngineRuntime` 时从
+`definition.middlewares` 取），无论上游最终选「定义期 / 运行期 / 两者」，都只是
+换个来源再合并，不涉及类型与语义改动。
 
 ### 4.3 一个自觉的越界
 
