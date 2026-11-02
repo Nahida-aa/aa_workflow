@@ -1,82 +1,99 @@
-//! 临时目标的中间件版——**Rust 形态**。
+//! 临时目标的中间件版——基于 **step 边界钩子**（`Middleware::on_step_finished`）。
 //!
-//! # 与 TS 版的差别（先读这段）
+//! 语义与 TS 版（`@wf-demo/workflow-middlewares` 的 `interimGoals`）**等价**：
+//! 目标全部 checkpoint 后，在**目标所在的那个 step 边界**停下，后面的 step 不跑。
 //!
-//! TS 版包装 `ctx.step`，能在**每个 step 完成后**检查「目标是否达成」，达成即泊车。
-//! Rust 侧办不到，卡在两个硬约束上：
+//! # 为什么需要钩子
 //!
-//! 1. **`ctx.step` 是方法，不是可替换的字段** —— 中间件没有「包装单次 step 调用」
-//!    的入口；[`Middleware::wrap`] 只能包裹整个 handler future。
-//! 2. **`ctx` 上没有 store** —— 即便在 `wrap` 里想知道「跑过哪些 step」，也读不到
-//!    日志（TS 侧中间件可以自己持有 store 引用，Rust 的 `wrap` 闭包可以在构造时
-//!    捕获，但 `ctx` 拿不到 run 的日志）。
+//! TS 能做到是因为 `ctx.step` 是可覆盖的函数属性；Rust 的 `ctx.step` 是方法，
+//! 中间件原本只有 `wrap`（包裹整个 handler），只能「跑完再停」。step 边界钩子
+//! 补上了这个能力，且它是**机制**（任何策略都能用），不绑定「临时目标」这一个用法。
 //!
-//! 所以本实现**不做目标检查**，它只提供「handler 跑完后无条件泊一次」：
+//! # 转移检查
 //!
-//! | | TS 版 | 本实现 |
-//! | --- | --- | --- |
-//! | 检查时机 | 每个 step 完成后 | 无检查 |
-//! | 「目标达成才停」 | ✅ | ❌ **无条件停** |
-//! | 后面的 step 不跑 | ✅ | ❌ handler 已全跑完 |
-//! | 泊车后可续驱 | ✅ | ✅ |
-//!
-//! # 什么时候它有用
-//!
-//! 语义是「**跑完这条 workflow，停一下等确认，再续驱**」——比如跑完一天的数据
-//! 处理、等人工验收后再发布。这时「无条件停」正是想要的。
-//!
-//! # 想要 TS 那种「达成即停」
-//!
-//! 用引擎参数 [`RunWorkflowOptions::interim_goals`]：它在 `engineStep` 内部检查，
-//! 天然是「每个 step 完成后」的时机，且能区分「导入的 checkpoint」等细节。
-//! **这是推荐路径**，本中间件只在不便改引擎参数时作为退路。
-//!
-//! [`Middleware::wrap`]: aa_workflow_core::middleware::Middleware::wrap
-//! [`RunWorkflowOptions::interim_goals`]: aa_workflow_core::engine::RunWorkflowOptions
+//! 与引擎内建版一致：若本 drive 启动时目标**已全部达成**（续驱、或 reseed 导入），
+//! 则不泊车。这需要读日志——钩子只拿到 `run_id`，所以要**构造时注入
+//! `get_events`**（与 TS 版 `reseed({ getEvents })` 的做法一致）。
 
-use aa_workflow_core::define::WorkflowCtx;
-use aa_workflow_core::middleware::Middleware;
+use std::collections::HashSet;
+use std::sync::Mutex;
+
+use aa_workflow_core::middleware::{Middleware, StepFinishedEvent, StepHookOutcome};
 
 /// 保留信号名（与 `__timer` 同族）。
 pub const INTERIM_GOAL_SIGNAL: &str = "__interim-goal";
 
-/// input 里的字段名（保留，供宿主约定使用）。
+/// input 里的字段名（宿主约定，供调用方在自己的 input 里放目标）。
 pub const INTERIM_GOALS_FIELD: &str = "__interimGoals";
 
-/// **handler 跑完后泊车一次**；宿主投 `__interim-goal` 信号续驱。
-///
-/// `key` 是这次泊车的稳定 id——同一个 run 里多次泊车请给不同的 key，
-/// 否则重放时 `findCheckpoint` 会匹配到同一个 `SignalResolved`。
+/// 读某个 run 的日志里已完成的 step id。返回值即「已 checkpoint 的 step」。
+pub type GetEvents = dyn Fn(&str) -> anyhow::Result<Vec<String>> + Send + Sync;
+
+/// 目标全部 checkpoint 后，在目标所在的 step 边界泊车。
 ///
 /// # 行为
 ///
-/// 1. 跑完整个 handler（拿它的返回值）；
-/// 2. `wait_for_event(key, "__interim-goal")` 泊车；
-/// 3. 宿主投信号后续驱：重放时该 `wait_for_event` 命中缓存直接返回，
-///    **不会重复泊车**。
+/// 1. 每个 step 的 `STEP_FINISHED` 落盘后，钩子被调用；
+/// 2. 把该 step 记入「本 drive 已达成」；
+/// 3. 若目标全部达成 → 返回 `Park`，引擎在该 step 边界停下，后续 step 不跑；
+/// 4. 宿主投 `__interim-goal` 信号续驱；重放时已完成的 step 短路，
+///    不会再触发钩子（它们不产生新的 checkpoint），也就不会重复泊车。
 ///
 /// # 例
 ///
 /// ```ignore
-/// create_workflow(CreateWorkflowConfig::new("daily").input::<Value>())
-///     .middleware::<()>(park_after_handler("daily-review"))
-///     .handler(|ctx: WorkflowCtx| async move { /* steps */ Ok(Value::Null) });
+/// let mw = interim_goals(
+///     vec!["merge".into()],
+///     |run_id| {
+///         // 从 store 读日志，收集 STEP_FINISHED 的 step_id
+///         Ok(vec![])
+///     },
+/// );
 /// ```
-pub fn park_after_handler(key: impl Into<String>) -> Middleware {
-    let key = key.into();
-    Middleware::new().wrap(move |ctx: WorkflowCtx, next| {
-        let key = key.clone();
-        Box::pin(async move {
-            // 先跑完 handler，再泊车。
-            let out = next.await?;
-            let _ = ctx.wait_for_event(key, INTERIM_GOAL_SIGNAL).await?;
-            Ok(out)
+pub fn interim_goals<F>(goals: Vec<String>, get_events: F) -> Middleware
+where
+    F: Fn(&str) -> anyhow::Result<Vec<String>> + Send + Sync + 'static,
+{
+    let goals = std::sync::Arc::new(goals);
+    let get_events = std::sync::Arc::new(get_events);
+    let done: std::sync::Arc<Mutex<HashSet<String>>> =
+        std::sync::Arc::new(Mutex::new(HashSet::new()));
+    // 每个 run 只在第一次达成时泊一次；同 run 多次 drive 由转移检查兜住。
+    let parked: std::sync::Arc<Mutex<HashSet<String>>> =
+        std::sync::Arc::new(Mutex::new(HashSet::new()));
+
+    Middleware::new().on_step_finished(move |ev: &StepFinishedEvent<'_>| {
+        if goals.is_empty() {
+            return Ok(StepHookOutcome::Continue);
+        }
+
+        // 转移检查：目标是否在本 step **之前**就已全部完成？
+        // 是 → 续驱 / reseed 导入的旧 checkpoint，不该为它再泊（否则重复泊车）。
+        // 本次刚完成的 step 也在日志里，所以判断时要把它本身排除。
+        let finished_before: HashSet<String> = get_events(ev.run_id)?
+            .into_iter()
+            .filter(|id| id != ev.step_id)
+            .collect();
+        if goals.iter().all(|g| finished_before.contains(g)) {
+            return Ok(StepHookOutcome::Continue);
+        }
+
+        // 本 drive 内累积
+        let mut d = done.lock().expect("interim goals lock");
+        d.insert(ev.step_id.to_string());
+        if !goals.iter().all(|g| d.contains(g)) {
+            return Ok(StepHookOutcome::Continue);
+        }
+
+        // 已经为这个 run 泊过就不再泊（防御：正常由转移检查兜住）
+        let mut p = parked.lock().expect("interim park lock");
+        if !p.insert(ev.run_id.to_string()) {
+            return Ok(StepHookOutcome::Continue);
+        }
+
+        Ok(StepHookOutcome::Park {
+            signal_name: INTERIM_GOAL_SIGNAL.to_string(),
+            meta: Some(serde_json::json!({ INTERIM_GOALS_FIELD: *goals })),
         })
     })
-}
-
-/// 别名：语义上就是「按目标停车」，但 Rust 侧只能做到「跑完再停」。
-/// 保留了 TS 侧的命名，便于对照；**行为不同**，见模块文档。
-pub fn interim_goals() -> Middleware {
-    park_after_handler("__interim-goal-0")
 }

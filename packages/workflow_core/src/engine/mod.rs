@@ -262,6 +262,13 @@ pub struct EngineRuntime {
     /// F2-lite 耐久重试：驱动启动时从日志折叠的待重试状态（按 step）。
     /// 空表 = 无待重试。exec_step 据此泊车（未到期）或续跑（到期）。
     pub pending_retries: Mutex<std::collections::HashMap<String, PendingRetry>>,
+    /// **Step-boundary hooks**，按中间件注册顺序收集（本仓有意扩展：TS 靠覆盖
+    /// `ctx.step` 达到同样能力，Rust 的 `ctx.step` 是方法、不可替换）。
+    ///
+    /// `exec_step` 在每个 step 的 `STEP_FINISHED` append 之后调用它们；任一返回
+    /// `Park` 即在该 step 边界停下。策略（临时目标、选择性作废等）放在
+    /// middlewares 包里，引擎只提供这一层机制。
+    pub step_finished_hooks: Vec<crate::middleware::StepFinishedHook>,
     /// F2-lite 临时目标（INTERIM_GOAL）：名单内步骤全部 checkpoint 后经保留
     /// 信号 `__interim-goal` 泊车（run → paused，宿主以 recover 续驱扩展边界）。
     /// 转移检查防重挂；未到达的 goal 永不触发（best-effort fence）。
@@ -627,26 +634,55 @@ where
                     result: Some(recorded.clone()),
                     error: None,
                 });
-                let ev = WorkflowEvent::StepFinished {
+                let step_finished_event = WorkflowEvent::StepFinished {
                     ts: now_ms(),
                     run_id: inner.run_id.clone(),
                     step_id: step_id.to_string(),
                     result: Some(recorded.clone()),
-                    attempts,
+                    attempts: attempts.clone(),
                     meta: None,
                 };
-                inner.append(&ev)?;
+                inner.append(&step_finished_event)?;
                 inner.set_live(
                     step_id,
                     StepState {
                         status: StepStatus::Success,
-                        result: Some(recorded),
+                        result: Some(recorded.clone()),
                         error: None,
                         started_at: Some(started_at),
                         finished_at: Some(finished_at),
                     },
                 );
-                inner.publish(&ev);
+                inner.publish(&step_finished_event);
+                // **Step-boundary hook**（本仓有意扩展；TS 靠覆盖 ctx.step
+                // 达到同样能力，Rust 方法不可替换）。
+                // 在 STEP_FINISHED 已 append、live 状态已更新之后调用——
+                // 此刻该 step 已持久完成，返回 Park 即在本 step 边界停下。
+                if !inner.step_finished_hooks.is_empty() {
+                    for hook in &inner.step_finished_hooks {
+                        let outcome = hook(&crate::middleware::StepFinishedEvent {
+                            run_id: &inner.run_id,
+                            step_id,
+                            result: &recorded,
+                            attempts: attempts.len(),
+                        })?;
+                        if let crate::middleware::StepHookOutcome::Park { signal_name, meta } =
+                            outcome
+                        {
+                            let _ = crate::engine::exec_pause_with(
+                                inner,
+                                step_id,
+                                &signal_name,
+                                "parked at a middleware step boundary",
+                                None,
+                                meta,
+                                None,
+                            )
+                            .await;
+                            return Err(WorkflowParked.into());
+                        }
+                    }
+                }
                 // F2-lite interim goal：goal 全 checkpoint 且本 drive 启动时
                 // 尚未全齐 → 经保留信号 __interim-goal 泊车（宿主以 recover
                 // 续驱扩展边界；转移检查防重挂）。

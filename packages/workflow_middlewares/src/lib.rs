@@ -46,6 +46,4 @@
 
 mod interim_goals;
 
-pub use interim_goals::{
-    interim_goals, park_after_handler, INTERIM_GOAL_SIGNAL, INTERIM_GOALS_FIELD,
-};
+pub use interim_goals::{interim_goals, INTERIM_GOAL_SIGNAL, INTERIM_GOALS_FIELD, GetEvents};

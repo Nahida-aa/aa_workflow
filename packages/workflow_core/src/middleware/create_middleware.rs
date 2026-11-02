@@ -53,6 +53,53 @@ pub struct Middleware {
     /// (inner middlewares, then the typed handler). The first-listed middleware
     /// is outermost, like TanStack's `composeMiddlewares`.
     pub wrap: Option<CtxWrapper>,
+    /// **Step-boundary hook** (this crate's deliberate extension — TS gets the
+    /// same reach by overwriting `ctx.step`, which Rust methods don't allow).
+    ///
+    /// Runs **after** a step's `STEP_FINISHED` is appended and its live state is
+    /// set — i.e. the step is durably complete — and **before** control returns
+    /// to the handler. Return [`StepHookOutcome::Park`] to stop the drive right
+    /// there; the engine appends a `SIGNAL_AWAITED` and unwinds.
+    ///
+    /// Runs on **every** drive, including replay: replayed steps short-circuit
+    /// out of `STEP_FINISHED` and never reach this hook (they produce no new
+    /// checkpoint), so a strategy keyed on "did I just finish this step" sees
+    /// only genuinely-executed steps. Strategies that need drive-wide state
+    /// (like "were the goals already done at drive start") should derive it
+    /// from the log, exactly as the engine's own `goals_done_at_drive_start`
+    /// does.
+    pub on_step_finished: Option<StepFinishedHook>,
+}
+
+/// What a [`StepFinishedHook`] decides after a step commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepHookOutcome {
+    /// Continue driving.
+    Continue,
+    /// Stop this drive here: the engine persists a `SIGNAL_AWAITED` on
+    /// `signal_name` (with `meta`) and returns as paused.
+    Park {
+        signal_name: String,
+        meta: Option<serde_json::Value>,
+    },
+}
+
+/// Erased step-boundary hook: `(run_id, step_id, result)` → outcome.
+///
+/// Takes the run id rather than the whole ctx because the ctx's store is
+/// crate-private; a strategy that needs the log should capture its own store
+/// handle when constructing the middleware.
+pub type StepFinishedHook =
+    Arc<dyn Fn(&StepFinishedEvent<'_>) -> anyhow::Result<StepHookOutcome> + Send + Sync>;
+
+/// The data a [`StepFinishedHook`] sees.
+#[derive(Debug)]
+pub struct StepFinishedEvent<'a> {
+    pub run_id: &'a str,
+    pub step_id: &'a str,
+    pub result: &'a serde_json::Value,
+    /// Attempts consumed by this step (1 for a plain success).
+    pub attempts: usize,
 }
 
 /// Erased ctx-extension producer: `&WorkflowCtx` → JSON ext value.
@@ -73,6 +120,7 @@ impl Middleware {
         Self {
             produce: None,
             wrap: None,
+            on_step_finished: None,
         }
     }
 
@@ -97,6 +145,23 @@ impl Middleware {
             + 'static,
     {
         self.wrap = Some(Arc::new(f));
+        self
+    }
+
+    /// Set the **step-boundary hook** — runs after each step durably commits,
+    /// before control returns to the handler. Return [`StepHookOutcome::Park`]
+    /// to stop the drive at this step.
+    ///
+    /// This is this crate's deliberate extension over TanStack (see the field
+    /// docs on [`Middleware::on_step_finished`]). Use it for strategies that
+    /// need "did this specific step just finish" — temporary goals, selective
+    /// invalidation, progress gates. Keep the concrete policy in a middlewares
+    /// package, not in `RunWorkflowOptions`.
+    pub fn on_step_finished<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&StepFinishedEvent<'_>) -> anyhow::Result<StepHookOutcome> + Send + Sync + 'static,
+    {
+        self.on_step_finished = Some(Arc::new(f));
         self
     }
 }

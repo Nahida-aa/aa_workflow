@@ -955,6 +955,12 @@ async fn drive(
         compensations: std::sync::Mutex::new(Vec::new()),
         interim_goal_parks: AtomicUsize::new(0),
         pending_retries: Mutex::new(pending_retries),
+        // 收集中间件的 step 边界钩子（注册顺序 = 声明顺序）。
+        step_finished_hooks: active
+            .middlewares
+            .iter()
+            .filter_map(|m| m.on_step_finished.clone())
+            .collect(),
     });
     inner.publish(&WorkflowEvent::RunStarted {
         ts,

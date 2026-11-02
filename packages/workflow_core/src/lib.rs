@@ -60,6 +60,8 @@ pub use event::{
     ImportedFrom, RunStatus, StepAttempt, StepMeta, StepState, StepStatus, WorkflowEvent,
     fold_step_states,
 };
-pub use middleware::{CtxProducer, CtxWrapper, Middleware};
+pub use middleware::{
+    CtxProducer, CtxWrapper, Middleware, StepFinishedEvent, StepFinishedHook, StepHookOutcome,
+};
 pub use resource::{Gate, GateGuard, ResourceKey};
 pub use run_store::{DeleteReason, InMemoryStore, PendingApproval, RunAwaitable, RunState, RunStore, WaitForState};
