@@ -206,17 +206,37 @@ function interimGoals(store, goals) {
 | core 改动 | **0 行** | 47 行 + 3 个字段 |
 | 用户成本 | `.middleware([interimGoals(store, ['b'])])` | `.interimGoals(['b'])` 参数 |
 | 语义 | 实测等价 | — |
-| 需要 `store` | **是**（读日志做转移检查，`ctx` 上没有 store） | 否（引擎内部就有） |
+| 需要 `store` | **是**（`ctx` 上不暴露；工厂多一个参数） | 否（引擎内部就有） |
 | 谁维护 | 提供中间件的人 | 引擎 |
 | 是否进公开 API | 否（组合式，可被替换） | 是（一等参数） |
 
-**中间件方案的一个真实代价**：转移检查要读日志，而 `ctx` 上没有 store ——中间件
-必须**从外部闭包捕获 store**，而 workflow 定义（`.middleware([...])`）通常是
-**静态声明**的，store 可能在运行时才确定。这会逼出一层「把 store 传进中间件工厂」
-的装配代码（上面样例里的 `interimGoals(store, goals)`）。
+**关于 `ctx` 上有没有 store（已核实）**：没有。
 
-> 这不是缺陷，是组合式设计的固有形状——ai-orchestration 的 `agentMiddleware()`
-> 不需要 store，所以没这个问题；需要读日志的中间件就会有。
+| 来源 | 含 store / history |
+| --- | --- |
+| `BaseCtx`（中间件拿到的） | ❌ 只有 `runId`/`input`/`state`/`signal`/`runtime` + 9 个原语 |
+| `ctx.runtime` | ❌ 只有 deadline / timeRemaining / shouldYield / yield |
+| `StepContext`（step 闭包内） | ❌ 只有 `id`/`attempt`/`runtime`/`signal` |
+| `engine` 对象 | ❌ 被闭包锁在 `ctx.step` 等函数里（`run-workflow.ts:571-601`），无处泄露 |
+
+所以要读日志（做转移检查、或实现 redo 的 lookup），中间件只能**从外部闭包捕获
+store**：`interimGoalsMiddleware(store, goals)`。
+
+**但这基本不是负担**：装配这个中间件的地方，本来就要拿到 store 去建 runtime
+（`defineWorkflowRuntime({ store, ... })`）。写成工厂 `makeWorkflow(store, goals)`
+即可——而这是测试里**已经在用**的形状（`makeWf(exec)` 到处是）。已实测：
+
+```ts
+function makeWorkflow(store, goals) {
+  const mw = interimGoalsMiddleware(store, goals)   // store 从闭包进
+  return createWorkflow({ id }).middleware([mw]).handler(...)
+}
+```
+
+跑通，`paused` 正常。**代价是一次函数签名的改动，不是架构问题。**
+
+> 对照：ai-orchestration 的 `agentMiddleware()` 不需要 store（它只包 step 调用、
+> 映射事件），所以没这个问题。需要读日志的中间件多一个参数而已。
 
 ### 为什么临时目标该进 core
 
