@@ -197,6 +197,17 @@ function interimGoals(store, goals) {
    续驱时 rethrow、run 无法继续。所以必须 `await orig(...)` 之后再泊。
 2. **中间件 `done` 每次 drive 新建** → 续驱重放时 a/b 短路返回、`done` 又齐了
    → **重复泊车**。需要 `doneAtStart` 那道闸（对应引擎的 `goalsDoneAtDriveStart`）。
+
+   两点澄清（2026-11-02 实测）：
+
+   - **换续驱方式没用。** `recover: true` 与 `signalDelivery` 进的是同一个
+     `resumeRun`（`run-workflow.ts:228` 与 `:232`），都会走到 `driveHandler`
+     重跑 handler。用 `signalDelivery` 续驱，实测**同样重复泊车**（日志尾部又出现
+     一条 `SIGNAL_AWAITED(__interim-goal)`，run 仍是 `paused`）。
+   - **根因在 replay，不在续驱通道。** 栈不能持久化，所以「恢复运行」= 重跑 handler
+     + 已完成的 step 短路返回。短路之后控制权**回到包装层**，包装层无从得知「这次
+     是短路返回的」，于是再判一次「目标齐了」。引擎能在短路分支直接 `return`
+     （`engineStep` 的 `cached` 分支），所以天然绕开。
 3. 泊车 id 必须带计数器，否则多次泊车时 `findCheckpoint` 分不清。
 
 ### 中间件方案 vs 引擎方案
