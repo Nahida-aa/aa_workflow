@@ -139,6 +139,85 @@ F1/F2/F6 对齐）。
 | **redo 的闭包校验** | **dag 层**（`rerunDag`） | 只有图能算 `descendants` / 闭包；core 只能给裸名单 `redoSet`（advisory） |
 | **「停」的替代形态**（不调度子集） | dag 层可选 | main 分支的做法，run 正常 `finished`，无续驱 |
 
+### 中间件方案：可行，且实测与引擎版等价（2026-11-02）
+
+用户提出：ai-orchestration 就是用中间件（`.middleware([agentMiddleware()])`）扩展
+`ctx`，而不是改 core——临时目标能不能也这么办？
+
+**能，实测通过。** 中间件拿到的是同一个 `ctx` 引用（`composeMiddlewares`
+`run-workflow.ts:1490`），虽然 `step` 在 `reservedCtxFields` 里（不能用
+`next({ context: { step } })` 覆盖），但可以**直接改写 `ctx.step`**。
+
+关键有两处，踩错任一处就退化成有缺陷的版本：
+
+```ts
+function interimGoals(store, goals) {
+  return createMiddleware().server(async ({ ctx, next }) => {
+    const orig = ctx.step
+    // ① 转移检查：开局前目标已全达成 ⇒ 本次 drive 不泊（否则续驱会重复泊）
+    const hist = await store.getEvents(ctx.runId)
+    const doneAtStart = goals.every(g =>
+      hist.some(e => e.type === 'STEP_FINISHED' && e.stepId === g))
+
+    const done = new Set<string>()
+    let parks = 0, parked = false
+
+    ctx.step = (id, fn, opts) => (async () => {
+      const r = await orig(id, fn, opts)          // ② step 先正常收尾
+      if (doneAtStart || parked) return r
+      if (goals.includes(id)) done.add(id)
+      if (goals.every(g => done.has(g))) {        // ③ 在闭包之外泊
+        parked = true
+        await ctx.waitForEvent('__interim-goal', {
+          id: `__interim-goal-${parks++}`, meta: { goals },
+        })
+      }
+      return r
+    })()
+
+    return next({ context: {} })
+  })
+}
+```
+
+实测结果（`a → b → c`，`goals: ['b']`；测试
+`packages/workflow-core/tests/engine.interim-middleware.test.ts`，含一条反向
+测试证明「去掉 `doneAtStart` 闸就会重复泊车」）：
+
+| | 首驱 | 续驱（`recover: true`） |
+| --- | --- | --- |
+| exec | `{a:1, b:1}`（c 未跑） | `{a:1, b:1, c:1}` |
+| status | `paused` | `finished` |
+| 日志里的泊车点 | 1 | **仍 1**（不重复泊） |
+| 假 `STEP_FAILED` | 无 | 无 |
+
+与引擎版逐项一致。踩过的三个坑（都实测确认过）：
+
+1. **在 `ctx.step` 的 fn 内部泊** → `WorkflowPaused` 被记成 `STEP_FAILED(a)`，
+   续驱时 rethrow、run 无法继续。所以必须 `await orig(...)` 之后再泊。
+2. **中间件 `done` 每次 drive 新建** → 续驱重放时 a/b 短路返回、`done` 又齐了
+   → **重复泊车**。需要 `doneAtStart` 那道闸（对应引擎的 `goalsDoneAtDriveStart`）。
+3. 泊车 id 必须带计数器，否则多次泊车时 `findCheckpoint` 分不清。
+
+### 中间件方案 vs 引擎方案
+
+| | 中间件（用户或库提供） | 引擎内建 |
+| --- | --- | --- |
+| core 改动 | **0 行** | 47 行 + 3 个字段 |
+| 用户成本 | `.middleware([interimGoals(store, ['b'])])` | `.interimGoals(['b'])` 参数 |
+| 语义 | 实测等价 | — |
+| 需要 `store` | **是**（读日志做转移检查，`ctx` 上没有 store） | 否（引擎内部就有） |
+| 谁维护 | 提供中间件的人 | 引擎 |
+| 是否进公开 API | 否（组合式，可被替换） | 是（一等参数） |
+
+**中间件方案的一个真实代价**：转移检查要读日志，而 `ctx` 上没有 store ——中间件
+必须**从外部闭包捕获 store**，而 workflow 定义（`.middleware([...])`）通常是
+**静态声明**的，store 可能在运行时才确定。这会逼出一层「把 store 传进中间件工厂」
+的装配代码（上面样例里的 `interimGoals(store, goals)`）。
+
+> 这不是缺陷，是组合式设计的固有形状——ai-orchestration 的 `agentMiddleware()`
+> 不需要 store，所以没这个问题；需要读日志的中间件就会有。
+
 ### 为什么临时目标该进 core
 
 一度认为「dag 库调 `ctx.waitForEvent` 只需 2 行，不必进引擎」。**该论证错了**：
