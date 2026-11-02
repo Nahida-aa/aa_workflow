@@ -155,8 +155,8 @@ return ctx.step(id, async () => {
 
 core 没有 step 清单（`WorkflowDefinition` 只有 `id`/`version`/`previousVersions`/
 `defaultStepRetry`/`middlewares`/`handler`，没有 `steps`），所以引擎**判不了**以下三种误用。
-前两条（4.1 拼写错、4.3 运行时不可达）是**已确定**的机制事实；4.2 涉及
-`reseedRun`，**待定**。
+三条都是**已确定**的机制事实：4.1 / 4.3 源于「引擎无图」，4.2 源于
+「reseed 是部分重跑」这一设计意图。
 
 ### 4.1 目标拼写错误 → 静默跑完
 
@@ -166,29 +166,31 @@ core 没有 step 清单（`WorkflowDefinition` 只有 `id`/`version`/`previousVe
 **替代实现也一样能错**（库层的 `ancestors('publsh')` 会返回空集或 throw，取决于实现），
 但库层**有图所以能查**（`rerunDag` 的 `:412-416` 就是这么做的）。
 
-### 4.2 目标在 reseed 闭包外 → 泊车机制整体失效
+### 4.2 导入的目标算「已达成」→ 不重跑、不泊车（**这是设计，不是缺陷**）
 
-> **状态：待定（2026-11-02）。** `reseedRun` 是可选参数，所以泊车语义必须在
-> **不给它**时也正确——那一半已经确定（见 4.1/4.3）。给了它时「导入的
-> checkpoint 算不算目标达成」是**未决策的问题**，引擎注释里标为 TBD
-> （`run-workflow.ts` 的 `interimGoals` 文档）。下面是**当前行为**，不是
-> 推荐用法。
+`reseedRun` 的目的是**部分重跑**，不是从头重跑。导入的 checkpoint 就是「已完成」，
+所以目标若被导入：
 
+- **不重跑**（导入即完成，符合 reseed 意图）；
+- **不泊车**（停在已完成的目标上，意味着「为了停在那里先把它重跑一遍」，
+  与 reseed 相反）。
 
+> 实测钉死：`engine.rerun.test.ts` "an imported goal counts as reached: no park,
+> no re-execution"——`redoSet: ['b']` + `interimGoals: ['a']` ⇒ `exec == {b: 1}`、
+> 无 `SIGNAL_AWAITED`、status `finished`。对照测试 "a goal that is not imported
+> still parks normally" 证明这不是「目标永远不泊」。
 
-`reseedRun: { redoSet: ['translate'] }` + `interimGoals: ['load']`：
+推论（用的人要知道）：**`redoSet` 才是「哪些目标该真跑」的开关**。想让目标真跑，
+就把它列进 `redoSet`；不列，导入会满足它。
 
-- `load` 不在 `redoSet` → 它的 `STEP_FINISHED` 被**导入**新日志（`_03` §2）；
-- drive 开始 → `goalsDoneAtDriveStart = true`（`load` 已在 `history` 里）；
-- **整块检查跳过**（`run-workflow.ts:1126` 的闸）→ run 一路跑到底。
+例：`reseedRun: { redoSet: ['translate'] }` + `interimGoals: ['load']`——
+`load` 是 `translate` 的上游、不在 `redoSet` 里，被导入；目标指向它 ⇒ 开局即达成
+⇒ 不泊车、run 跑到底。想让 `load` 真跑并停在它上面，就把它列进 `redoSet`。
 
-后果不是「忽略了这个目标」，而是「**这个目标让本次 drive 的泊车完全失效**」。
-
-> ⚠️ **core 其实有区分「导入」与「本地执行」的信息，只是没用**：
-> 导入的 checkpoint 带 `meta.importedFrom`（`_03` §2），而
-> `goalsDoneAtDriveStart` 的判断（`run-workflow.ts:542-544`）**只看 `type` 和
-> `stepId`，没看 `meta`**。所以「导入的目标算不算达成」在 core 里是**未定义**的——
-> 当前行为是「算达成（不泊车）」，理由是续驱时的合法场景（上次已停在目标上）也需要它。
+⚠️ **别把这理解成「泊车坏了」**：泊车只在「目标还没达成」时才有意义。
+若调用方确实希望「重跑到 load 并停在 load 之后」，那 `redoSet` 里就该有 load。
+库层 `rerunDag` 把这个矛盾变成硬校验（`outside the rerun closure`），因为
+在它那种「from 决定重跑区」的模型里，闭包外的目标一定是**写错了**。
 
 ### 4.3 目标运行时不可达 → 静默跑完
 
@@ -202,7 +204,7 @@ core 没有 step 清单（`WorkflowDefinition` 只有 `id`/`version`/`previousVe
 | 误用 | 引擎（core，f2-lite） | 库层 `rerunDag`（f2-lite） | 库层 `rerunDag`（main） |
 | --- | --- | --- | --- |
 | 节点名拼错 | 静默跑完 | **throw**（未声明） | **throw**（`to ∉ full`） |
-| `to` 不在重跑闭包内 | 静默跑完（泊车失效） | **throw**（`outside the rerun closure`） | **throw**（`not inside the rerun closure`） |
+| `to` 被 reseed 导入 | **静默跑完**（导入=已达成，符合设计） | **throw**（`outside the rerun closure`） | **throw**（`not inside the rerun closure`） |
 | `to` 运行时不可达 | 静默跑完（best-effort） | 静默 | **不适用**（截断重跑区，不是「停」） |
 | `to` 恰好是最后一步 | 停成 `paused`，需再驱一次 | 同上（引擎语义） | 正常 `finished`（region 内最后一个） |
 | `to` 存在但无后代 | — | 停在那里 | region = `full`（`beyond` 为空），等同不设 |
