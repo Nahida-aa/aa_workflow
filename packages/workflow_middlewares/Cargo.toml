@@ -6,6 +6,7 @@ description = "内置中间件清单（DAG 策略的 Rust 实现）"
 
 [dependencies]
 aa_workflow_core = { path = "../workflow_core" }
+aa_workflow_dag = { path = "../workflow_dag" }
 anyhow = "1"
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "sync"] }

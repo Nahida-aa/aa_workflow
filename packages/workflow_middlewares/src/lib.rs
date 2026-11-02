@@ -44,8 +44,10 @@
 //! [`Middleware::produce`]: aa_workflow_core::middleware::Middleware::produce
 //! [`Middleware::wrap`]: aa_workflow_core::middleware::Middleware::wrap
 
+mod dag;
 mod interim_goals;
 mod reseed;
 
-pub use interim_goals::{interim_goals, GetEvents, INTERIM_GOAL_SIGNAL, INTERIM_GOALS_FIELD};
+pub use dag::{dag_policies, GetEvents, DAG_PLAN_FIELD, INTERIM_GOAL_SIGNAL};
+pub use interim_goals::{interim_goals, INTERIM_GOALS_FIELD};
 pub use reseed::{reseed, LoadResults, ReseedPlan};

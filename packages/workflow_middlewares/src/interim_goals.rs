@@ -26,9 +26,6 @@ pub const INTERIM_GOAL_SIGNAL: &str = "__interim-goal";
 /// input 里的字段名（宿主约定，供调用方在自己的 input 里放目标）。
 pub const INTERIM_GOALS_FIELD: &str = "__interimGoals";
 
-/// 读某个 run 的日志里已完成的 step id。返回值即「已 checkpoint 的 step」。
-pub type GetEvents = dyn Fn(&str) -> anyhow::Result<Vec<String>> + Send + Sync;
-
 /// 目标全部 checkpoint 后，在目标所在的 step 边界泊车。
 ///
 /// # 行为
