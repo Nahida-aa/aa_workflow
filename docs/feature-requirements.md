@@ -430,3 +430,62 @@ runWorkflow({ workflow: wf, runStore, runId, signalDelivery: { name: '__interim-
 最后一行是引擎参数方案的**独有价值**：目标是「本次 drive 的参数」，不是「run 的属性」。
 `_02` §1 记的正是这一点。所以两者不是替代关系——`input.__interimGoals` 适合
 「目标在 run 生命周期内固定」，引擎参数适合「每次续驱可能换目标」。
+
+---
+
+## 有意扩展：Rust 中间件的能力钩子（2026-11-02 决定）
+
+### 问题：TS 能做的，Rust 做不到
+
+TS 的中间件可以把 `ctx.step` 当**函数属性**覆盖（`ctx.step = wrapped`），于是能在
+「每个 step 完成后」插入逻辑——`@wf-demo/workflow-middlewares` 的 `interimGoals` /
+`reseed` 正是这么实现的，**引擎零改动**。
+
+Rust 做不到，卡在两个硬约束（均已核实）：
+
+| 约束 | 说明 |
+| --- | --- |
+| `ctx.step` 是 `&self` 方法，不是可替换的字段 | 中间件没有「包装单次 step 调用」的入口 |
+| `ctx` 上没有 store / history | 即便在 `wrap` 里也读不到「跑过哪些 step」 |
+| `engine` 是 `pub(crate)` | 外部 crate（含中间件包）访问不到 |
+
+`Middleware::wrap` 只能包裹**整个 handler future**，所以 Rust 版只能做「跑完再停」，
+做不出 TS 的「达成即停」。
+
+### 决定：加**钩子**，不加**策略参数**
+
+这是**有意偏离上游**，但偏离的位置是「机制」不是「策略」：
+
+| | 加策略参数（**不做**） | 加钩子（**要做**） |
+| --- | --- | --- |
+| 形态 | `RunWorkflowOptions::interim_goals` / `reseed_run` | `Middleware::on_step_finished` 之类的回调 |
+| 绑定 | 绑死「临时目标」「redo」这两个**具体策略** | 中立，任何策略都能用 |
+| 上游会不会有 | 不太可能（三轮规划文档零提） | TS 的中间件本身就是这个能力，只是形态不同 |
+| 删掉后 | 能力消失 | 钩子仍在，换种策略实现即可 |
+
+**判据**：`interim_goals` / `reseed_run` 是**策略**（只有这一种用法）；钩子是**机制**
+（谁都能用）。引擎只该长出机制，策略放中间件包。
+
+### 现状与后续
+
+- 已删除/计划删除：`RunWorkflowOptions::interim_goals`、`RunWorkflowOptions::reseed_run`
+  （上游三个 ref 全部零命中，且 `research/` `docs/` 里连近义概念都没有）。
+- `aa_workflow_middlewares` 现有一个 `park_after_handler`（跑完再停），是在钩子落地前的
+  临时形态。
+- 钩子落地后，`aa_workflow_middlewares` 应能实现与 TS 版**语义等价**的
+  `interim_goals` / `reseed`，且 `workflow_core` 的公开面**不出现任何具体策略名**。
+
+### 待定：钩子的形状
+
+需要在设计文档里定清楚（本轮只记录决定，不实现）：
+
+| 问题 | 选项 |
+| --- | --- |
+| 粒度 | `on_step_finished(step_id, state)` / `on_before_step(step_id)` / 两者 |
+| 能否短路 | 只通知（观察）vs 返回值可改写（如「跳过这个 step」） |
+| 能否暂停 | 只能观察 vs 可以中止 drive（泊车需要后者） |
+| 与 `wrap` 的关系 | 独立字段 vs `wrap` 的子能力 |
+| 与 replay 的关系 | 重放时是否也触发（**大概率要触发**，否则策略状态不重建） |
+
+**注意**：钩子的「能否暂停」是关键——`interim_goals` 需要的正是「在 step 边界停下来」，
+这要求钩子能中断 handler 的执行，实现复杂度高于纯观察型回调。

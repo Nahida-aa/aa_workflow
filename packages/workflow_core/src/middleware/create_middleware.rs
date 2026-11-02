@@ -20,6 +20,16 @@
 //! 同样不给静态保证。所以 TS 侧 `UnionToIntersection` 的编译期交集不在移植范围，
 //! 别再加回来。
 
+//! ## 与 TS 的能力差异（有意保留，见 feature-requirements.md「有意扩展」）
+//!
+//! TS 的中间件可以覆盖 `ctx.step`（它是对象上的函数属性），因此能在每个 step
+//! 边界插入逻辑；Rust 的 `ctx.step` 是方法、不可替换，`wrap` 只能包裹整个
+//! handler future，且 `ctx` 上没有 store/history。
+//!
+//! 这导致「在 step 边界做策略」的中间件（如临时目标、redo）无法在本仓复刻。
+//! 计划的解法是给 [`Middleware`] 增加**钩子**（`on_step_finished` 一类），
+//! 让它成为**机制**而非某个具体策略——这样公开面不会长出自研的业务参数。
+
 use std::sync::Arc;
 
 use crate::define::{BoxFuture, WorkflowCtx};

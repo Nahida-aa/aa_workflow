@@ -22,6 +22,17 @@
 //! 因此本包提供的是 **Rust 能表达的等价形态**，语义与 TS 版**不完全相同**
 //! （见每个中间件的文档）。
 //!
+//! # 计划中的解法（有意扩展）
+//!
+//! 给 [`aa_workflow_core::middleware::Middleware`] 增加**钩子**，而不是往
+//! `RunWorkflowOptions` 里加策略参数。判据：
+//!
+//! - `interim_goals` / `reseed_run` 是**策略**（只有一种用法、上游也没有）——
+//!   **不放进引擎**（已计划删除）；
+//! - 钩子是**机制**（任何策略都能用）——引擎只该长出机制，策略放本包。
+//!
+//! 记录见 `docs/feature-requirements.md`「有意扩展：Rust 中间件的能力钩子」。
+//!
 //! # 更推荐的路径
 //!
 //! Rust 侧**引擎本身就有** `interim_goals` / `reseed_run`（`RunWorkflowOptions`
