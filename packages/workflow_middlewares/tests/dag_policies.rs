@@ -50,7 +50,7 @@ async fn redo_reuse_and_goal_park_via_dag_plan() {
             let exec = exec.clone();
             let store = store.clone();
             create_workflow(CreateWorkflowConfig::new("dag-pol").input::<serde_json::Value>())
-                .middleware::<()>(dag_policies(shape(), loader(store)))
+                .middleware([dag_policies(shape(), loader(store))])
                 .handler(move |ctx: WorkflowCtx| {
                     let exec = exec.clone();
                     async move {
@@ -176,7 +176,7 @@ async fn no_plan_means_no_behavior() {
     let exec: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
     let wf = create_workflow(CreateWorkflowConfig::new("no-plan").input::<serde_json::Value>())
-        .middleware::<()>(dag_policies(shape(), loader(store.clone())))
+        .middleware([dag_policies(shape(), loader(store.clone()))])
         .handler({
             let exec = exec.clone();
             move |ctx: WorkflowCtx| {

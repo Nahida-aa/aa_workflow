@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 
 use crate::define::{AnyWorkflowDefinition, WorkflowDefinition};
 use crate::engine::{DEFAULT_MIN_YIELD_REMAINING_MS, EngineRuntime, WorkflowCancelled, WorkflowParked, now_ms};
@@ -976,16 +976,8 @@ async fn drive(
         interim_goal_parks: AtomicUsize::new(0),
         pending_retries: Mutex::new(pending_retries),
         // 收集中间件的 step 边界钩子（注册顺序 = 声明顺序）。
-        step_finished_hooks: active
-            .middlewares
-            .iter()
-            .filter_map(|m| m.on_step_finished.clone())
-            .collect(),
-        before_step_hooks: active
-            .middlewares
-            .iter()
-            .filter_map(|m| m.on_before_step.clone())
-            .collect(),
+        step_interceptor: Mutex::new(None),
+        ext_extra: Mutex::new(serde_json::Value::Null),
     });
     inner.publish(&WorkflowEvent::RunStarted {
         ts,
@@ -1231,7 +1223,7 @@ fn error_persisted(
 /// 事件流在这里被**排干**：本函数的契约是「跑到终态并交出 outcome」，中间事件
 /// 不外泄。要逐条看事件就用 async 的 [`run_workflow`]。`publish` 回调仍然逐条
 /// 触发（它在 [`RunEventStream`] 里被 await，与 async 路径同一处）。
-pub fn run_workflow_sync(mut opts: RunWorkflowOptions) -> Result<RunOutcome, WorkflowError> {
+pub fn run_workflow_sync(opts: RunWorkflowOptions) -> Result<RunOutcome, WorkflowError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_time()
         .build()

@@ -7,13 +7,13 @@
 //! （`BaseCtx` / `StepCtx` / `StepOptions` / `RetryPolicy`）与 workflow 本体
 //! [`WorkflowDefinition`](super::WorkflowDefinition)；这里装的是把它们拼起来的
 //! 声明式入口。`createWorkflow(...).handler(...)` 产出的就是
-//! `WorkflowDefinition<TInput, TOutput, TState, TCtxExt>`。
+//! `WorkflowDefinition<TInput, TOutput, TState>`。
 
 use std::marker::PhantomData;
 use std::sync::Arc;
 
 use super::{AnyWorkflowDefinition, BaseCtx, InitializeFn, RetryPolicy, StateValidatorFn, WorkflowCtx, WorkflowDefinition, WorkflowHandler};
-use crate::middleware::Middleware;
+use crate::middleware::{AnyMiddleware, Middleware};
 
 /// The declaration config consumed by [`create_workflow`]. Mirrors TanStack's
 /// `createWorkflow(options)`; only `id` is required (`initialize` defaults to
@@ -223,54 +223,54 @@ impl<TInput, TOutput, TState> CreateWorkflowConfig<TInput, TOutput, TState> {
 /// is inferred from the closure return value.
 pub fn create_workflow<TInput, TOutput, TState>(
     config: CreateWorkflowConfig<TInput, TOutput, TState>,
-) -> WorkflowBuilder<TInput, TOutput, TState, ()> {
+) -> WorkflowBuilder<TInput, TOutput, TState> {
     WorkflowBuilder {
         config,
         middlewares: Vec::new(),
         previous: Vec::new(),
-        _ext: PhantomData,
     }
 }
 
 /// The typed builder — `TInput`/`TOutput`/`TState` mirror the workflow's schema
-/// at build time, `TCtxExt` is the ctx extension type declared by the last
-/// [`middleware`](Self::middleware) call (`()` when none).
-pub struct WorkflowBuilder<TInput, TOutput, TState, TCtxExt = ()> {
+/// at build time.
+///
+/// 没有 `TCtxExt`：扩展走 [`ExtBag`](crate::define::ExtBag) 的命名空间获取，
+/// 不参与类型层（见 `docs/decisions/0015`）。
+pub struct WorkflowBuilder<TInput, TOutput, TState> {
     config: CreateWorkflowConfig<TInput, TOutput, TState>,
     middlewares: Vec<Middleware>,
     previous: Vec<AnyWorkflowDefinition>,
-    _ext: PhantomData<TCtxExt>,
 }
 
-impl<TInput, TOutput, TState, TCtxExt> WorkflowBuilder<TInput, TOutput, TState, TCtxExt> {
-    /// Attach a runtime middleware and re-key `TCtxExt` to `PExt` — the type of
-    /// `ctx.ext` the handler reads. Every middleware's `produce` runs and its
-    /// JSON output shallow-merges into the bundle in registration order (later
-    /// keys win, matching TanStack's `Object.assign` accumulation), so with
-    /// several producing middlewares each returns its own part and the *last*
-    /// `.middleware::<PExt>()` call fixes the bundle type covering all parts;
-    /// [`Default`] applies when no middleware has a `produce`. TanStack's
-    /// intersection of extension types collapses to this single bundle, and a
-    /// `produce` cannot read earlier middlewares' extensions (upstream can, via
-    /// the shared ctx); extra `wrap`s still compose in registration order.
+impl<TInput, TOutput, TState> WorkflowBuilder<TInput, TOutput, TState> {
+    /// 注册中间件数组 —— 对齐上游
+    /// `middleware(middlewares: ReadonlyArray<AnyMiddleware>)`
+    /// （`types.ts:494`、`define-workflow.ts:149`）。
     ///
-    /// The collapse is deliberate: middleware lists are dynamic, so the wrap
-    /// chain is erased and extension-data flow is validated at runtime — the
-    /// same tradeoff as axum's `Router::layer` over erased `Route` services
-    /// (and axum's own extension injection is runtime-checked too). TS's
-    /// compile-time `UnionToIntersection` has no Rust equivalent worth
-    /// building; see `crate::middleware` for the full rationale.
-    pub fn middleware<PExt>(
+    /// ```ignore
+    /// let wf = create_workflow(cfg)
+    ///     .middleware([agent_middleware(), auth()])   // 不同来源也能混装
+    ///     .handler(|ctx| async move {
+    ///         let auth = ctx.ext.auth();              // 按命名空间取
+    ///         ...
+    ///     });
+    /// ```
+    ///
+    /// 与上游一致的地方：可多次调用叠加、元素可混装、顺序即注册顺序。
+    ///
+    /// 差异只有一处：**不需要写扩展类型**——上游靠 `TCtxExt & AccumulateExtensions`
+    /// 在编译期求交集（handler 的 `ctx` 多出字段）；这里扩展在运行期按命名空间
+    /// 存取（[`ExtBag`](crate::define::ExtBag)），所以没有「合并后的类型」这回事，
+    /// 使用者也不必自己定义 `Combined`。
+    pub fn middleware(
         mut self,
-        m: Middleware,
-    ) -> WorkflowBuilder<TInput, TOutput, TState, PExt> {
-        self.middlewares.push(m);
-        WorkflowBuilder {
-            config: self.config,
-            middlewares: self.middlewares,
-            previous: self.previous,
-            _ext: PhantomData,
+        middlewares: impl IntoIterator<Item = AnyMiddleware>,
+    ) -> Self {
+        // 对齐上游 `.middleware([...])`：收一个数组、可叠加。
+        for m in middlewares {
+            self.middlewares.push(m);
         }
+        self
     }
 
     /// Older versions of the same workflow to route resumed runs to (see
@@ -290,13 +290,12 @@ impl<TInput, TOutput, TState, TCtxExt> WorkflowBuilder<TInput, TOutput, TState, 
     pub fn handler<F, Fut, AOut>(
         self,
         handler: F,
-    ) -> WorkflowDefinition<TInput, AOut, TState, TCtxExt>
+    ) -> WorkflowDefinition<TInput, AOut, TState>
     where
         TInput: serde::de::DeserializeOwned + Send + Sync + 'static,
         TState: serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
-        TCtxExt: serde::de::DeserializeOwned + Default + Send + Sync + 'static,
         AOut: serde::Serialize + Send + Sync + 'static,
-        F: Fn(BaseCtx<TInput, TState, TCtxExt>) -> Fut + Send + Sync + 'static,
+        F: Fn(BaseCtx<TInput, TState>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = anyhow::Result<AOut>> + Send + 'static,
     {
         let CreateWorkflowConfig {
@@ -315,31 +314,23 @@ impl<TInput, TOutput, TState, TCtxExt> WorkflowBuilder<TInput, TOutput, TState, 
         } = self.config;
         let handler = Arc::new(handler);
         let middlewares = self.middlewares.clone();
-        let engine_middlewares = self.middlewares.clone();
         let workflow_middlewares = self.middlewares.clone();
         let validator = output_validator.clone();
-        let engine_validator = validator.clone();
-        let mut engine_handler: WorkflowHandler = Arc::new(move |ctx: WorkflowCtx| {
+        // 中间件折叠（对齐 TS `composeMiddlewares` 的洋葱模型）：
+        // 最内层 = typed ctx + handler；每个 middleware 的 `server` 包住内层。
+        // server 经 `MiddlewareServerFnArgs` 拿到完整 ctx，可 `next(ext)` /
+        // `set_step_interceptor` / `take_over`。
+        let innermost: WorkflowHandler = Arc::new(move |ctx: WorkflowCtx| {
             let handler = Arc::clone(&handler);
-            let produce_mw = engine_middlewares.clone();
-            let output_validator = engine_validator.clone();
+            let output_validator = output_validator.clone();
             Box::pin(async move {
                 let input = serde_json::from_value(ctx.input.clone())?;
                 let state = serde_json::from_value(ctx.state.snapshot())?;
-                // 所有 produce 按注册顺序执行、浅合并成 ctx.ext —— 对齐上游
-                // composeMiddlewares 的 Object.assign 累加（后者覆盖同名键）；
-                // 非对象输出不参与合并（上游 `typeof ext === 'object'` 守卫同义）。
-                let mut ext_map: Option<serde_json::Map<String, serde_json::Value>> = None;
-                for produce in produce_mw.iter().filter_map(|m| m.produce.as_ref()) {
-                    let value = produce(&ctx)?;
-                    if let serde_json::Value::Object(map) = value {
-                        ext_map.get_or_insert_with(Default::default).extend(map);
-                    }
-                }
-                let ext: TCtxExt = match ext_map {
-                    Some(map) => serde_json::from_value(serde_json::Value::Object(map))?,
-                    None => TCtxExt::default(),
-                };
+                // 各中间件 server 里经 `next(ext)` 合并进 `engine.ext_extra`
+                // （擦除层 Value；Object.assign 同义）。handler 侧按命名空间取。
+                let ext = crate::define::ExtBag::from_value(
+                    ctx.engine.ext_extra.lock().expect("ext lock").clone(),
+                );
                 let typed = BaseCtx {
                     run_id: ctx.run_id,
                     input,
@@ -362,21 +353,37 @@ impl<TInput, TOutput, TState, TCtxExt> WorkflowBuilder<TInput, TOutput, TState, 
                 Ok(value)
             })
         });
-        // Fold wraps outermost-first, matching TanStack `composeMiddlewares`
-        // where the first-listed middleware is outermost.
+        // server 链：注册顺序 = 外层先执行（TanStack `composeMiddlewares` 同义）。
+        // 每层把 `MiddlewareServerFnArgs` 交给 middleware 的 server；`next` 闭包推进到内层。
+        let mut engine_handler: WorkflowHandler = innermost;
         for m in middlewares.iter().rev() {
-            if let Some(wrap) = &m.wrap {
-                let wrap = wrap.clone();
-                let inner = Arc::clone(&engine_handler);
-                engine_handler = Arc::new(move |ctx: WorkflowCtx| {
-                    let wrap = wrap.clone();
-                    let inner = inner.clone();
-                    Box::pin(async move {
-                        let next = inner(ctx.clone());
-                        wrap(ctx, next).await
-                    })
-                });
-            }
+            let server = m.server.clone();
+            let inner = std::sync::Arc::clone(&engine_handler);
+            engine_handler = Arc::new(move |ctx: WorkflowCtx| {
+                let server = server.clone();
+                let inner = inner.clone();
+                Box::pin(async move {
+                    let sc = crate::middleware::MiddlewareServerFnArgs {
+                        ctx: ctx.clone(),
+                        erased: ctx.clone(),
+                        pipeline: Some(std::sync::Arc::new(
+                            move |ext: Option<serde_json::Value>| {
+                                let inner = inner.clone();
+                                let ctx = ctx.clone();
+                                // `next(ext)` 一次调用做两件事，位置与上游
+                                // `run-workflow.ts:1502` 一一对应：
+                                //   ① Object.assign(ctx, opts.context)
+                                //   ② compose(index + 1)
+                                if let Some(ext) = ext {
+                                    ctx.engine.merge_ext(ext);
+                                }
+                                Box::pin(async move { inner(ctx).await })
+                            },
+                        )),
+                    };
+                    server(sc).await
+                })
+            });
         }
         WorkflowDefinition {
             id,
@@ -393,7 +400,6 @@ impl<TInput, TOutput, TState, TCtxExt> WorkflowBuilder<TInput, TOutput, TState, 
             _input: PhantomData,
             _output: PhantomData,
             _state: PhantomData,
-            _ext: PhantomData,
         }
     }
 }

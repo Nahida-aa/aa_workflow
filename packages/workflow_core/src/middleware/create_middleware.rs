@@ -1,220 +1,203 @@
-//! Middleware：包在 handler 外面的一层，对齐 TanStack `createMiddleware`
-//! （`middleware/create-middleware.ts`）。
+//! Middleware：对齐 TanStack `createMiddleware`（`middleware/create-middleware.ts`）。
 //!
-//! 两个正交能力：
-//! - [`Middleware::produce`] —— 每 drive 产出一个 `ctx.ext`（typed ctx 扩展）；
-//! - [`Middleware::wrap`] —— 围绕 handler future 的洋葱式包裹，先注册的在最外层。
+//! # 形状
 //!
-//! 与 TanStack 的差异见 [`WorkflowBuilder::middleware`](crate::define::WorkflowBuilder::middleware)：
-//! 他们的多 middleware context 是共享 ctx 上的类型交集；我们仍是单一
-//! `TCtxExt` 字段，多个 `produce` 的输出按注册顺序浅合并进来，但单个
-//! `produce` 看不到彼此的扩展。
+//! TS 只有一个 `server` 函数：`async ({ ctx, next }) => { ...; next({ context }) }`。
+//! Rust 是**同一个形状**：
 //!
-//! 设计取舍（为什么类型层面不追 TS 的交集）：middleware 列表是动态的（存在
-//! [`WorkflowDefinition`](crate::define::WorkflowDefinition) 里、按 drive 应用），
-//! 包裹链只能整体擦除（`Arc<dyn Fn>`）——同 axum `Router::layer<L: Layer<Route>>`
-//! 把内层擦成 `Route` 的选择；数据流的正确性随之只剩运行时校验（serde）。
-//! 这与 Rust 生态同类做法同构：[`Middleware::wrap`] 即 `axum::middleware::from_fn`
-//! 的 `(req, Next) -> Response`（同样可改写输出）；而 axum 向 handler 传 middleware
-//! 注入的数据靠 extensions TypeMap + extractor，取不到在运行时报 `MissingExtension`，
-//! 同样不给静态保证。所以 TS 侧 `UnionToIntersection` 的编译期交集不在移植范围，
-//! 别再加回来。
-
-//! ## 与 TS 的能力差异（有意保留，见 feature-requirements.md「有意扩展」）
+//! ```ignore
+//! let mw = Middleware::new().server(|mut sc: MiddlewareServerFnArgs| {
+//!     Box::pin(async move {
+//!         sc.set_step_interceptor(intercept);                              // ① 拦截 step
+//!         sc.next(Some(DefExt::<AuthNs>::new(auth).into_value())).await    // ② 扩展 + 推进
+//!     })
+//! });
+//! ```
 //!
-//! TS 的中间件可以覆盖 `ctx.step`（它是对象上的函数属性），因此能在每个 step
-//! 边界插入逻辑；Rust 的 `ctx.step` 是方法、不可替换，`wrap` 只能包裹整个
-//! handler future，且 `ctx` 上没有 store/history。
+//! # 类型对照
 //!
-//! 这导致「在 step 边界做策略」的中间件（如临时目标、redo）无法在本仓复刻。
-//! 计划的解法是给 [`Middleware`] 增加**钩子**（`on_step_finished` 一类），
-//! 让它成为**机制**而非某个具体策略——这样公开面不会长出自研的业务参数。
-
+//! | TS | Rust |
+//! | --- | --- |
+//! | `Middleware<TCtxIn, TExtension>` | [`Middleware`]（无泛型） |
+//! | `MiddlewareServerFn<TCtxIn, TExtension>` | [`MiddlewareServerFn`] |
+//! | `({ ctx, next }) => …` | [`MiddlewareServerFnArgs`]（`ctx` 字段 + `next` 方法） |
+//! | `next({ context })` | [`MiddlewareServerFnArgs::next`]（一次调用：合并 + 推进） |
+//! | `ctx.step = wrapped` | [`MiddlewareServerFnArgs::set_step_interceptor`] |
+//! | `AnyMiddleware = Middleware<any, any>` | [`AnyMiddleware`]（别名，可混装） |
+//!
+//! # 为什么没有 `TCtxIn` / `TExtension` 两个泛型
+//!
+//! 上游的两个泛型都服务于**类型交集**：`TCtxIn` 让中间件读到前序扩展，
+//! `TExtension` 让 handler 的 ctx 多出字段。
+//!
+//! Rust 里两者都不需要了：
+//!
+//! - 读扩展走 `ctx.ext.<ns>()`（[`ExtNamespace`](crate::define::ExtNamespace)），
+//!   不需要把 ctx 窄化成「已带前序扩展的 ctx」；
+//! - 写扩展走 `next(Some({ KEY: value }))`，handler 侧按命名空间取，
+//!   **不需要任何合并类型**——使用者不必定义 `Combined`。
+//!
+//! 详细论证见 `docs/decisions/0015`。
 use std::sync::Arc;
+
+use anyhow::Result;
+use serde_json::Value;
 
 use crate::define::{BoxFuture, WorkflowCtx};
 
-/// Runtime middleware (erased): a [`wrap`](Self::wrap) around the handler
-/// future chain plus a [`produce`](Self::produce) hook that builds the typed
-/// ctx extension (`ctx.ext`). Mirrors TanStack's `defineMiddleware`: `wrap`
-/// composes around `next`, and the produced context is what the handler reads
-/// off `ctx` (their `{ ...context }` accumulation, collapsed to a single
-/// extension value — see [`WorkflowBuilder::middleware`](crate::define::WorkflowBuilder::middleware)).
-#[derive(Clone)]
-pub struct Middleware {
-    /// Builds part of the handler's `ctx.ext` from the erased drive ctx. All
-    /// `produce` hooks run on every drive, in registration order, and their
-    /// JSON outputs shallow-merge into one object (later keys win, matching
-    /// TanStack's `Object.assign` accumulation); only object outputs
-    /// participate. The merged object is deserialized into the builder's
-    /// `TCtxExt` type; [`Default`] applies when nothing produced an object.
-    pub produce: Option<CtxProducer>,
-    /// Around-wrapper on the handler future: `next` is the rest of the pipeline
-    /// (inner middlewares, then the typed handler). The first-listed middleware
-    /// is outermost, like TanStack's `composeMiddlewares`.
-    pub wrap: Option<CtxWrapper>,
-    /// **Step-boundary hook** (this crate's deliberate extension — TS gets the
-    /// same reach by overwriting `ctx.step`, which Rust methods don't allow).
-    ///
-    /// Runs **after** a step's `STEP_FINISHED` is appended and its live state is
-    /// set — i.e. the step is durably complete — and **before** control returns
-    /// to the handler. Return [`StepHookOutcome::Park`] to stop the drive right
-    /// there; the engine appends a `SIGNAL_AWAITED` and unwinds.
-    ///
-    /// Runs on **every** drive, including replay: replayed steps short-circuit
-    /// out of `STEP_FINISHED` and never reach this hook (they produce no new
-    /// checkpoint), so a strategy keyed on "did I just finish this step" sees
-    /// only genuinely-executed steps. Strategies that need drive-wide state
-    /// (like "were the goals already done at drive start") should derive it
-    /// from the log, exactly as the engine's own `goals_done_at_drive_start`
-    /// does.
-    pub on_step_finished: Option<StepFinishedHook>,
-    /// **Before-step hook**: runs before the step's closure, can
-    /// [`Skip`](StepHookOutcome::Skip) with a cached result or
-    /// [`Park`](StepHookOutcome::Park) at the boundary.
-    ///
-    /// This is what makes `reseed` (redo) expressible as a middleware: the
-    /// hook answers "this step's result is already known" and the engine
-    /// commits that result without calling the closure.
-    ///
-    /// Not consulted for steps that replay short-circuits — a step with a
-    /// recorded checkpoint never reaches the hook, matching the
-    /// `on_step_finished` convention.
-    pub on_before_step: Option<BeforeStepHook>,
+/// 中间件 `server` 函数的签名（对齐上游 `MiddlewareServerFn`）。
+pub type MiddlewareServerFn =
+    Arc<dyn Fn(MiddlewareServerFnArgs) -> BoxFuture<'static, Result<Value>> + Send + Sync>;
+
+/// 后续管线：吃一个扩展对象、返回 future（对齐上游 `next(opts)`）。
+///
+/// `Some`/`take()` 承载「至多一次」，对齐上游的 `advanced` 标志。
+pub type NextFn = Arc<dyn Fn(Option<Value>) -> BoxFuture<'static, Result<Value>> + Send + Sync>;
+
+/// `MiddlewareServerFn` 的入参对象 —— 上游那个**匿名**的函数参数
+/// （`types.ts:458` 的 `(args: { ctx: TCtxIn; next: ... }) => ...`）。
+///
+/// `ctx` 是字段、`next` 是方法（借 `&mut self` 才能保证「至多一次」）。
+pub struct MiddlewareServerFnArgs {
+    /// 完整的 workflow ctx（`input` / `state` / `ext` / `meta`）。
+    pub ctx: WorkflowCtx,
+    /// 擦除层的完整 ctx（clone 廉价：内部全是 `Arc`）。
+    pub(crate) erased: WorkflowCtx,
+    /// 上游 `next` 参数的**实现**（不是 `next` 本身）。
+    pub(crate) pipeline: Option<NextFn>,
 }
 
-/// What a step hook decides at a step boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StepHookOutcome {
-    /// Continue driving.
-    Continue,
-    /// Stop this drive here: the engine persists a `SIGNAL_AWAITED` on
-    /// `signal_name` (with `meta`) and returns as paused.
+impl MiddlewareServerFnArgs {
+    /// 受控覆盖 `ctx.step`：拦截器对**本次 drive 内每个真实执行的 step** 作出决定。
+    ///
+    /// 对齐 TS 的 `ctx.step = wrapped`——那边是未承诺的实现细节，这边是受控 API。
+    ///
+    /// - [`StepAction::Skip`]：不执行闭包，把给定结果作为 `STEP_FINISHED` 落盘；
+    /// - [`StepAction::Park`]：在本 step 边界泊车（后续 step 不执行）；
+    /// - `None`：正常执行。
+    pub fn set_step_interceptor(&self, f: StepInterceptor) {
+        self.erased.engine.set_step_interceptor(f);
+    }
+
+    /// 推进到内层中间件与 handler —— 对齐上游 `next(opts)`（`run-workflow.ts:1502`）。
+    ///
+    /// 一次调用做两件事：`Object.assign(ctx, ext)` 与 `compose(index + 1)`。
+    ///
+    /// ```ignore
+    /// let out = sc.next(Some(json!({ "user": "u1" }))).await?;   // TS: await next({ context: { user } })
+    /// let out = sc.next(None).await?;                            // 不写扩展，直接推进
+    /// ```
+    ///
+    /// # 为什么参数是 `Option<Value>`
+    ///
+    /// TS 的 `next` 参数必填（只能写 `next({ context: {} })`）。Rust 里 `None`
+    /// 表示「这次不贡献扩展」，等价于传空对象，且不会往 `ext_extra` 塞空袋。
+    ///
+    /// # Errors
+    ///
+    /// 第二次调用报错（对齐 `next() must be called at most once per invocation`）。
+    pub fn next(&mut self, ext: impl Into<Option<Value>>) -> BoxFuture<'static, Result<Value>> {
+        let Some(next) = self.pipeline.take() else {
+            return Box::pin(async move {
+                anyhow::bail!("middleware.next() must be called at most once per invocation")
+            });
+        };
+        next(ext.into())
+    }
+
+    /// 完全接管：跳过后续管线，直接给 output。
+    ///
+    /// Rust 特有（TS 丢弃 `m.server()` 的返回值）——「中间件就是 handler」时用，
+    /// 例如 DAG 中间件。
+    pub fn take_over(&mut self) {
+        self.pipeline = None;
+    }
+
+    /// 擦除层的完整 ctx。
+    pub fn erased(&self) -> &WorkflowCtx {
+        &self.erased
+    }
+}
+
+/// step 拦截器：对每个将要真实执行的 step 作出决定。
+///
+/// 时机：`exec_step` 入口、重放短路**之后**。槽位是**单值**：多个中间件都装时
+/// 后者覆盖前者。
+pub type StepInterceptor = Arc<dyn Fn(&StepEvent<'_>) -> Option<StepAction> + Send + Sync>;
+
+/// 拦截器看到的数据。
+#[derive(Debug)]
+pub struct StepEvent<'a> {
+    pub run_id: &'a str,
+    pub step_id: &'a str,
+    /// Run 级参数（`RunWorkflowOptions.meta`，策略输入）。
+    pub run_meta: Option<&'a Value>,
+}
+
+/// 拦截器的决定。
+#[derive(Debug, Clone)]
+pub enum StepAction {
+    /// 不执行 step 闭包，把给定结果作为本 step 的 `STEP_FINISHED` 落盘（redo 复用）。
+    Skip { result: Value },
+    /// 在本 step 边界泊车：`SIGNAL_AWAITED { name, meta }` 落盘，后续 step 不执行。
     Park {
         signal_name: String,
-        meta: Option<serde_json::Value>,
+        meta: Option<Value>,
     },
-    /// **Before-step only**: don't run the step's closure. Commit `result` as
-    /// the step's own `STEP_FINISHED` instead (a replayed/cached result).
-    /// Ignored by after-step hooks (the step already ran by then).
-    Skip { result: serde_json::Value },
 }
 
-/// Erased step-boundary hook: `(run_id, step_id, result)` → outcome.
+/// 中间件（对齐 TS `Middleware`：一个 server 函数）。
 ///
-/// Takes the run id rather than the whole ctx because the ctx's store is
-/// crate-private; a strategy that needs the log should capture its own store
-/// handle when constructing the middleware.
-pub type StepFinishedHook =
-    Arc<dyn Fn(&StepFinishedEvent<'_>) -> anyhow::Result<StepHookOutcome> + Send + Sync>;
-
-/// Erased **before-step** hook: decides before the step's closure runs.
-/// Can [`Skip`](StepHookOutcome::Skip) with a cached result, or
-/// [`Park`](StepHookOutcome::Park) at the boundary.
-pub type BeforeStepHook =
-    Arc<dyn Fn(&BeforeStepEvent<'_>) -> anyhow::Result<StepHookOutcome> + Send + Sync>;
-
-/// The data a [`BeforeStepHook`] sees.
-#[derive(Debug)]
-pub struct BeforeStepEvent<'a> {
-    pub run_id: &'a str,
-    pub step_id: &'a str,
-    /// The step's declared `meta`, if any (free-form, caller-provided).
-    pub meta: Option<&'a serde_json::Value>,
-    /// Run-level params from `RunWorkflowOptions.meta` (strategy input).
-    pub run_meta: Option<&'a serde_json::Value>,
+/// 不含泛型：扩展走 `next(Some({ KEY: value }))` 写入、`ctx.ext.<ns>()` 读取，
+/// 所以「中间件类型 → handler ctx 类型」这条编译期通道在 Rust 里不需要
+/// （见模块文档「为什么没有两个泛型」）。
+pub struct Middleware {
+    pub server: MiddlewareServerFn,
 }
 
-/// The data a [`StepFinishedHook`] sees.
-#[derive(Debug)]
-pub struct StepFinishedEvent<'a> {
-    pub run_id: &'a str,
-    pub step_id: &'a str,
-    pub result: &'a serde_json::Value,
-    /// Attempts consumed by this step (1 for a plain success).
-    pub attempts: usize,
-    /// Run-level params from `RunWorkflowOptions.meta` (strategy input).
-    pub run_meta: Option<&'a serde_json::Value>,
-}
-
-/// Erased ctx-extension producer: `&WorkflowCtx` → JSON ext value.
-pub type CtxProducer = Arc<dyn Fn(&WorkflowCtx) -> anyhow::Result<serde_json::Value> + Send + Sync>;
-
-/// Erased around-wrapper: `(ctx, next)` → wrapped handler future.
-pub type CtxWrapper = Arc<
-    dyn Fn(
-            WorkflowCtx,
-            BoxFuture<'static, anyhow::Result<serde_json::Value>>,
-        ) -> BoxFuture<'static, anyhow::Result<serde_json::Value>>
-        + Send
-        + Sync,
->;
-
-impl Middleware {
-    pub fn new() -> Self {
+impl Clone for Middleware {
+    fn clone(&self) -> Self {
         Self {
-            produce: None,
-            wrap: None,
-            on_step_finished: None,
-            on_before_step: None,
+            server: self.server.clone(),
         }
-    }
-
-    /// Set the ctx-extension producer.
-    pub fn produce<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&WorkflowCtx) -> anyhow::Result<serde_json::Value> + Send + Sync + 'static,
-    {
-        self.produce = Some(Arc::new(f));
-        self
-    }
-
-    /// Set the around-wrapper.
-    pub fn wrap<F>(mut self, f: F) -> Self
-    where
-        F: Fn(
-                WorkflowCtx,
-                BoxFuture<'static, anyhow::Result<serde_json::Value>>,
-            ) -> BoxFuture<'static, anyhow::Result<serde_json::Value>>
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.wrap = Some(Arc::new(f));
-        self
-    }
-
-    /// Set the **step-boundary hook** — runs after each step durably commits,
-    /// before control returns to the handler. Return [`StepHookOutcome::Park`]
-    /// to stop the drive at this step.
-    ///
-    /// This is this crate's deliberate extension over TanStack (see the field
-    /// docs on [`Middleware::on_step_finished`]). Use it for strategies that
-    /// need "did this specific step just finish" — temporary goals, selective
-    /// invalidation, progress gates. Keep the concrete policy in a middlewares
-    /// package, not in `RunWorkflowOptions`.
-    pub fn on_step_finished<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&StepFinishedEvent<'_>) -> anyhow::Result<StepHookOutcome> + Send + Sync + 'static,
-    {
-        self.on_step_finished = Some(Arc::new(f));
-        self
-    }
-
-    /// Set the **before-step hook** — runs before the step's closure.
-    /// Return [`StepHookOutcome::Skip`] to commit a cached result instead of
-    /// running the closure (this is how `reseed` / redo is expressed).
-    pub fn on_before_step<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&BeforeStepEvent<'_>) -> anyhow::Result<StepHookOutcome> + Send + Sync + 'static,
-    {
-        self.on_before_step = Some(Arc::new(f));
-        self
     }
 }
 
 impl Default for Middleware {
+    /// 空中间件：**直接透传**（对齐 TS「不设 server 则什么也不做」）。
     fn default() -> Self {
-        Self::new()
+        Self {
+            server: Arc::new(|mut sc: MiddlewareServerFnArgs| {
+                Box::pin(async move { sc.next(None).await })
+            }),
+        }
     }
 }
+
+impl Middleware {
+    /// 空中间件：**直接透传**。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the server function（对齐 TS 的 `createMiddleware().server(fn)`）。
+    ///
+    /// ```ignore
+    /// let mw = Middleware::new().server(|mut sc: MiddlewareServerFnArgs| {
+    ///     Box::pin(async move { sc.next(None).await })
+    /// });
+    /// ```
+    pub fn server<F>(mut self, f: F) -> Self
+    where
+        F: Fn(MiddlewareServerFnArgs) -> BoxFuture<'static, Result<Value>> + Send + Sync + 'static,
+    {
+        self.server = Arc::new(f);
+        self
+    }
+}
+
+/// 类型已擦除的中间件 —— 对齐上游 `AnyMiddleware = Middleware<any, any>`。
+///
+/// 因为 [`Middleware`] 已经没有类型参数，这就是它本身；保留别名是为了让
+/// `Vec<AnyMiddleware>` / `[AnyMiddleware; N]` 的调用点读起来与上游一致。
+pub type AnyMiddleware = Middleware;

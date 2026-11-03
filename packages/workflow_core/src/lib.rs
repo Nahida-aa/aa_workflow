@@ -60,9 +60,10 @@ pub use event::{
     ImportedFrom, RunStatus, StepAttempt, StepMeta, StepState, StepStatus, WorkflowEvent,
     fold_step_states,
 };
+pub use define::ext::{DefExt, ExtBag, ExtNamespace};
 pub use middleware::{
-    BeforeStepEvent, BeforeStepHook, CtxProducer, CtxWrapper, Middleware, StepFinishedEvent,
-    StepFinishedHook, StepHookOutcome,
+    AnyMiddleware, Middleware, MiddlewareServerFn, MiddlewareServerFnArgs, StepAction, StepEvent,
+    StepInterceptor,
 };
 pub use resource::{Gate, GateGuard, ResourceKey};
 pub use run_store::{DeleteReason, InMemoryStore, PendingApproval, RunAwaitable, RunState, RunStore, WaitForState};

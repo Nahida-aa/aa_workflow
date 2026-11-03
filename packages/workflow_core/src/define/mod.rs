@@ -20,8 +20,10 @@ use crate::event::WorkflowEvent;
 use crate::middleware::Middleware;
 
 mod define_workflow;
+pub mod ext;
 mod state_handle;
 pub use define_workflow::{CreateWorkflowConfig, WorkflowBuilder, create_workflow};
+pub use ext::{DefExt, ExtBag, ExtNamespace, merge_ext_value};
 pub use state_handle::StateHandle;
 
 /// Boxed async step-returning future. Steps are spawned inside the engine's
@@ -110,7 +112,7 @@ impl StepCtx {
 /// durable primitive. `ctx.input` / `ctx.state` are plain owned fields —
 /// clone (or move) values as needed across `await` points.
 #[derive(Clone)]
-pub struct BaseCtx<TInput = serde_json::Value, TState = serde_json::Value, TCtxExt = ()> {
+pub struct BaseCtx<TInput = serde_json::Value, TState = serde_json::Value> {
     /// **Run 级参数**（`RunWorkflowOptions.meta`，本仓有意扩展）——中间件的
     /// wrap 前置与策略钩子读取；handler 不消费、不落 `RunState`。与 `input`
     /// 的分工：input 是业务数据（不可变、handler 消费），meta 是策略参数
@@ -122,12 +124,11 @@ pub struct BaseCtx<TInput = serde_json::Value, TState = serde_json::Value, TCtxE
     /// `state: TState` — 共享可变的 typed state（对齐 TS 的
     /// `ctx.state === engine.state`）；见 `state_handle` 模块文档。
     pub state: StateHandle<TState>,
-    /// `TExtensions` — ctx extension bundle, the `{...context}` accumulated by
-    /// middleware (all `produce` hooks run and shallow-merge in registration
-    /// order). `()` (the default) when no middleware declares one. Built by
-    /// the middleware's `produce` and re-deserialized on every drive, so it is
-    /// deterministic across resume.
-    pub ext: TCtxExt,
+    /// `TExtensions` — 中间件写进 ctx 的扩展袋。
+    ///
+    /// 上游是类型交集（`ctx.user` 是字段）；Rust 里是**按命名空间存取**
+    /// （`ctx.ext.user()`）——使用者不需要定义任何合并类型。见 [`ExtBag`]。
+    pub ext: ExtBag,
     /// **Run 级参数**（`RunWorkflowOptions.meta`，本仓有意扩展）——中间件的
     /// wrap 前置与策略钩子读取；handler 不消费、不落 `RunState`。与 `input`
     /// 的分工：input 是业务数据（不可变、handler 消费），meta 是策略参数
@@ -140,15 +141,17 @@ pub struct BaseCtx<TInput = serde_json::Value, TState = serde_json::Value, TCtxE
     pub(crate) engine: Arc<EngineRuntime>,
 }
 
-/// The full ctx type. Generic `TCtxExt` matches TS's `Ctx<TInput, TState, TCtxExt>`,
-/// where `TCtxExt` defaults to `{}` (our `()`).
-pub type Ctx<TInput = serde_json::Value, TState = serde_json::Value, TCtxExt = ()> =
-    BaseCtx<TInput, TState, TCtxExt>;
+/// The full ctx type —— 对齐上游 `Ctx<TInput, TState>`。
+///
+/// 上游的第三个泛型 `TExtensions` 在这里不存在：扩展走 [`ExtBag`] 的命名空间获取，
+/// 不做类型交集（见 `docs/decisions/0015`）。
+pub type Ctx<TInput = serde_json::Value, TState = serde_json::Value> =
+    BaseCtx<TInput, TState>;
 
-/// Default (untyped) ctx: `Ctx<Value, Value, ()>`.
-pub type WorkflowCtx = Ctx<serde_json::Value, serde_json::Value, ()>;
+/// Default (untyped) ctx: `Ctx<Value, Value>`.
+pub type WorkflowCtx = Ctx<serde_json::Value, serde_json::Value>;
 
-impl BaseCtx<serde_json::Value, serde_json::Value, ()> {
+impl BaseCtx<serde_json::Value, serde_json::Value> {
     /// Engine-facing drive-start construction: freeze the run input and
     /// snapshot the current state image.
     pub(crate) fn untyped(engine: Arc<EngineRuntime>) -> Self {
@@ -164,13 +167,16 @@ impl BaseCtx<serde_json::Value, serde_json::Value, ()> {
             input: engine.input.clone(),
             meta: engine.meta.clone(),
             state,
-            ext: (),
+            ext: {
+                let raw = engine.ext_extra.lock().expect("ext lock").clone();
+                ExtBag::from_value(raw)
+            },
             engine,
         }
     }
 }
 
-impl<TInput, TState, TCtxExt> BaseCtx<TInput, TState, TCtxExt> {
+impl<TInput, TState> BaseCtx<TInput, TState> {
     /// Write the handler's state changes into the engine's mirror and emit a
     /// `STATE_DELTA` if anything changed. Called at every durable boundary.
     pub(crate) fn flush_state(&self) -> anyhow::Result<()>
@@ -638,7 +644,6 @@ pub struct WorkflowDefinition<
     TInput = serde_json::Value,
     TOutput = serde_json::Value,
     TState = serde_json::Value,
-    TCtxExt = (),
 > {
     pub id: String,
     pub version: Option<String>,
@@ -667,16 +672,13 @@ pub struct WorkflowDefinition<
     _input: PhantomData<TInput>,
     _output: PhantomData<TOutput>,
     _state: PhantomData<TState>,
-    _ext: PhantomData<TCtxExt>,
 }
 
 // `#[derive(Clone)]` would demand `TInput: Clone + TOutput: Clone + …` for what
 // is only `PhantomData`. The type parameters carry no data, so `Clone` holds
 // unconditionally — a definition stays cloneable whatever the authoring site
 // declared.
-impl<TInput, TOutput, TState, TCtxExt> Clone
-    for WorkflowDefinition<TInput, TOutput, TState, TCtxExt>
-{
+impl<TInput, TOutput, TState> Clone for WorkflowDefinition<TInput, TOutput, TState> {
     fn clone(&self) -> Self {
         WorkflowDefinition {
             id: self.id.clone(),
@@ -693,7 +695,6 @@ impl<TInput, TOutput, TState, TCtxExt> Clone
             _input: PhantomData,
             _output: PhantomData,
             _state: PhantomData,
-            _ext: PhantomData,
         }
     }
 }
@@ -750,18 +751,18 @@ impl std::ops::Deref for AnyWorkflowDefinition {
     }
 }
 
-impl<TInput, TOutput, TState, TCtxExt> From<WorkflowDefinition<TInput, TOutput, TState, TCtxExt>>
+impl<TInput, TOutput, TState> From<WorkflowDefinition<TInput, TOutput, TState>>
     for AnyWorkflowDefinition
 {
-    fn from(w: WorkflowDefinition<TInput, TOutput, TState, TCtxExt>) -> Self {
+    fn from(w: WorkflowDefinition<TInput, TOutput, TState>) -> Self {
         Self(Arc::new(w.erase()))
     }
 }
 
-impl<TInput, TOutput, TState, TCtxExt> From<Arc<WorkflowDefinition<TInput, TOutput, TState, TCtxExt>>>
+impl<TInput, TOutput, TState> From<Arc<WorkflowDefinition<TInput, TOutput, TState>>>
     for AnyWorkflowDefinition
 {
-    fn from(w: Arc<WorkflowDefinition<TInput, TOutput, TState, TCtxExt>>) -> Self {
+    fn from(w: Arc<WorkflowDefinition<TInput, TOutput, TState>>) -> Self {
         // Unique refcount → move the fields out, no clone at all. Shared →
         // fall back to a clone (only PhantomData actually differs).
         let inner = Arc::try_unwrap(w).unwrap_or_else(|shared| (*shared).clone());
@@ -775,7 +776,7 @@ impl From<Arc<AnyWorkflowDefinition>> for AnyWorkflowDefinition {
     }
 }
 
-impl<TInput, TOutput, TState, TCtxExt> WorkflowDefinition<TInput, TOutput, TState, TCtxExt> {
+impl<TInput, TOutput, TState> WorkflowDefinition<TInput, TOutput, TState> {
     /// Drop the type parameters, keeping every real field. The parameters are
     /// `PhantomData` only — the handler, validator and middleware types are
     /// already erased (`WorkflowHandler` etc.) — so this is a field move, and
@@ -796,7 +797,6 @@ impl<TInput, TOutput, TState, TCtxExt> WorkflowDefinition<TInput, TOutput, TStat
             _input: PhantomData,
             _output: PhantomData,
             _state: PhantomData,
-            _ext: PhantomData,
         }
     }
 }
@@ -824,7 +824,6 @@ impl WorkflowDefinition {
             _input: PhantomData,
             _output: PhantomData,
             _state: PhantomData,
-            _ext: PhantomData,
         }
     }
 
@@ -898,159 +897,178 @@ mod tests {
     use super::*;
     use crate::engine::{RunWorkflowOptions, run_workflow};
     use crate::event::RunStatus;
-    use crate::run_store::InMemoryStore;
+    use crate::middleware::{
+        Middleware, MiddlewareServerFn, MiddlewareServerFnArgs, StepAction, StepEvent,
+        StepInterceptor,
+    };
+    use crate::run_store::{InMemoryStore, RunStore};
+    use serde_json::Value;
     use std::sync::{Arc, Mutex};
 
-    #[derive(serde::Deserialize, serde::Serialize, Default, Debug, PartialEq, Eq)]
-    struct UserExt {
+    // ── 两个「外部开发者」定义的扩展命名空间 ──────────────────
+
+    #[derive(serde::Deserialize, serde::Serialize, Debug, PartialEq, Clone)]
+    pub struct UserExt {
         user: String,
     }
+    pub struct UserNs;
+    impl ExtNamespace for UserNs {
+        const KEY: &'static str = "user";
+        type Value = UserExt;
+    }
+    crate::impl_ext_accessors!(UserNs => UserAccess, user, try_user);
+    #[allow(dead_code)]
+    fn _uses_try_user(b: &ExtBag) { let _ = b.try_user(); }
 
-    /// `middleware.produce` 的输出 deserialize 进 handler 的 `ctx.ext`
-    /// （`WorkflowBuilder::middleware::<PExt>` 决定 `TCtxExt` 类型）；无 produce 时
-    /// 用 [`Default`]。对齐 TanStack `defineMiddleware` 的 context 注入。
+    /// 单独命名的 `MiddlewareServerFn` 能直接交给 `server()`（不必再套一层闭包），
+    /// 并且扩展按命名空间被 handler 读到。
     #[tokio::test]
-    async fn middleware_produce_builds_typed_ext() {
+    async fn middleware_accepts_a_named_server_fn() {
         let store = Arc::new(InMemoryStore::new());
-        let wf = create_workflow(CreateWorkflowConfig::new("mw-ext").input::<serde_json::Value>())
-            .middleware::<UserExt>(
-                Middleware::new()
-                    .produce(|_ctx| Ok(serde_json::json!({ "user": "alice", "ignored": true }))),
-            )
-            .handler(
-                |ctx: BaseCtx<serde_json::Value, serde_json::Value, UserExt>| async move {
-                    Ok(serde_json::json!({ "user": ctx.ext.user }))
-                },
-            );
+        let ext: MiddlewareServerFn = Arc::new(|mut sc: MiddlewareServerFnArgs| {
+            Box::pin(async move { sc.next(Some(DefExt::<UserNs>::new(UserExt { user: "bob".into() }).into_value())).await })
+        });
+        let wf = create_workflow(CreateWorkflowConfig::new("mw-fn").input::<Value>())
+            .middleware([Middleware { server: ext }])
+            .handler(|ctx: WorkflowCtx| async move {
+                Ok(serde_json::json!({ "user": ctx.ext.user().user }))
+            });
         let out = run_workflow(
-            RunWorkflowOptions::new(Arc::new(wf.clone()), store.clone())
-                .input(serde_json::json!({})),
+            RunWorkflowOptions::new(Arc::new(wf), store).input(serde_json::json!({})),
         )
-        .outcome().await
+        .outcome()
+        .await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
-        assert_eq!(
-            out.output,
-            Some(serde_json::json!({ "user": "alice" })),
-            "middleware produce 注入 ctx.ext"
-        );
-
-        // 无 produce → TCtxExt 取 Default()。
-        let store2 = Arc::new(InMemoryStore::new());
-        let wf2 = create_workflow(
-            CreateWorkflowConfig::new("mw-ext-default").input::<serde_json::Value>(),
-        )
-        .middleware::<UserExt>(Middleware::new())
-        .handler(
-            |ctx: BaseCtx<serde_json::Value, serde_json::Value, UserExt>| async move {
-                Ok(serde_json::json!({ "user": ctx.ext.user }))
-            },
-        );
-        let out2 = run_workflow(
-            RunWorkflowOptions::new(Arc::new(wf2.clone()), store2)
-                .input(serde_json::json!({})),
-        )
-        .outcome().await
-        .unwrap();
-        assert_eq!(out2.output, Some(serde_json::json!({ "user": "" })));
+        assert_eq!(out.output, Some(serde_json::json!({ "user": "bob" })));
     }
 
-    /// 多个 `produce` 全部执行并按注册顺序浅合并，后者覆盖同名键 —— 对齐上游
-    /// composeMiddlewares 的 Object.assign 累加，而非最后一个独占（旧实现只跑
-    /// 最后一个 produce，先注册的输出会缺失导致反序列化失败）。
+    /// `next(ext)` 写入的扩展被 handler 读到 —— 对齐 TS 的 `next({ context })`。
+    /// 没写扩展时 `ctx.ext` 是空袋（`is_empty()`），读取会 panic（与 TS 里
+    /// 「声明了 ctx.user 却没挂中间件」一致）。
     #[tokio::test]
-    async fn middleware_produce_hooks_merge_in_registration_order() {
-        #[derive(serde::Deserialize, serde::Serialize, Default, Debug, PartialEq, Eq)]
-        struct BundleExt {
+    async fn middleware_next_ext_is_readable_by_handler() {
+        let store = Arc::new(InMemoryStore::new());
+        let wf = create_workflow(CreateWorkflowConfig::new("mw-ext").input::<Value>())
+            .middleware([Middleware::new().server(|mut sc: MiddlewareServerFnArgs| {
+                Box::pin(async move {
+                    sc.next(Some(
+                        DefExt::<UserNs>::new(UserExt { user: "alice".into() }).into_value(),
+                    ))
+                    .await
+                })
+            })])
+            .handler(|ctx: WorkflowCtx| async move {
+                // 第二个中间件不写扩展 → 空袋
+                Ok(serde_json::json!({ "user": ctx.ext.user().user }))
+            });
+        let out = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf), store).input(serde_json::json!({})),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        assert_eq!(out.output, Some(serde_json::json!({ "user": "alice" })));
+    }
+
+    /// 多个 server 的 `next(ext)` 全部合并、后者覆盖同名键 —— 对齐上游
+    /// composeMiddlewares 的 Object.assign 累加。
+    #[tokio::test]
+    async fn middleware_next_ext_merges_in_registration_order() {
+        #[derive(serde::Deserialize, serde::Serialize, Debug, PartialEq, Clone)]
+        struct Bundle {
             user: String,
             trace: String,
             shared: String,
         }
+        struct BundleNs;
+        impl ExtNamespace for BundleNs {
+            const KEY: &'static str = "bundle";
+            type Value = Bundle;
+        }
 
-        let m_user = Middleware::new()
-            .produce(|_ctx| Ok(serde_json::json!({ "user": "alice", "shared": "from-user" })));
-        let m_trace = Middleware::new().produce(|_ctx| {
-            Ok(serde_json::json!({ "trace": "t-1", "shared": "from-trace" }))
+        let m_user = Middleware::new().server(|mut sc: MiddlewareServerFnArgs| {
+            Box::pin(async move {
+                sc.next(Some(
+                    DefExt::<BundleNs>::new(Bundle {
+                        user: "alice".into(),
+                        trace: String::new(),
+                        shared: "from-user".into(),
+                    })
+                    .into_value(),
+                ))
+                .await
+            })
         });
-        let wf = create_workflow(
-            CreateWorkflowConfig::new("mw-merge").input::<serde_json::Value>(),
-        )
-        .middleware::<BundleExt>(m_user)
-        .middleware::<BundleExt>(m_trace)
-        .handler(
-            |ctx: BaseCtx<serde_json::Value, serde_json::Value, BundleExt>| async move {
-                Ok(serde_json::json!({
-                    "user": ctx.ext.user,
-                    "trace": ctx.ext.trace,
-                    "shared": ctx.ext.shared,
-                }))
-            },
-        );
+        let m_trace = Middleware::new().server(|mut sc: MiddlewareServerFnArgs| {
+            Box::pin(async move {
+                sc.next(Some(
+                    DefExt::<BundleNs>::new(Bundle {
+                        user: String::new(),
+                        trace: "t-1".into(),
+                        shared: "from-trace".into(),
+                    })
+                    .into_value(),
+                ))
+                .await
+            })
+        });
+        let wf = create_workflow(CreateWorkflowConfig::new("mw-merge").input::<Value>())
+            .middleware([m_user, m_trace])
+            .handler(|ctx: WorkflowCtx| async move {
+                let b = ctx.ext.get::<BundleNs>();
+                Ok(serde_json::json!({ "shared": b.shared }))
+            });
         let store = Arc::new(InMemoryStore::new());
         let out = run_workflow(
-            RunWorkflowOptions::new(Arc::new(wf.clone()), store)
-                .input(serde_json::json!({})),
+            RunWorkflowOptions::new(Arc::new(wf), store).input(serde_json::json!({})),
         )
-        .outcome().await
+        .outcome()
+        .await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(
             out.output,
-            Some(serde_json::json!({
-                "user": "alice",
-                "trace": "t-1",
-                "shared": "from-trace",
-            })),
-            "先注册的 produce 也执行；shared 被后注册的覆盖"
+            Some(serde_json::json!({ "shared": "from-trace" })),
+            "后注册的 next(ext) 覆盖同名键"
         );
     }
 
-    /// `wrap` 按注册序最外层包裹（TanStack `composeMiddlewares` 语义：先注册的
-    /// 在最外）：before-in → before-out → handler → after-out → after-in。
+    /// server 洋葱包裹按注册序最外层：before-in → before-out → handler →
+    /// after-out → after-in（TanStack `composeMiddlewares` 同义）。
     #[tokio::test]
-    async fn middleware_wrap_composes_in_registration_order() {
-        fn make_wrap(
-            name: &'static str,
-            order: &Arc<Mutex<Vec<String>>>,
-        ) -> impl Fn(
-            WorkflowCtx,
-            BoxFuture<'static, anyhow::Result<serde_json::Value>>,
-        ) -> BoxFuture<'static, anyhow::Result<serde_json::Value>>
-        + Send
-        + Sync
-        + 'static {
+    async fn middleware_server_composes_in_registration_order() {
+        fn make_server(name: &'static str, order: &Arc<Mutex<Vec<String>>>) -> Middleware {
             let order = order.clone();
-            move |_ctx, next| {
+            Middleware::new().server(move |mut sc: MiddlewareServerFnArgs| {
                 let order = order.clone();
-                let name = name;
                 Box::pin(async move {
                     order.lock().unwrap().push(format!("before-{name}"));
-                    let r = next.await;
+                    let r = sc.next(None).await;
                     order.lock().unwrap().push(format!("after-{name}"));
                     r
                 })
-            }
+            })
         }
 
         let order = Arc::new(Mutex::new(Vec::new()));
-        let m_in = Middleware::new().wrap(make_wrap("in", &order));
-        let m_out = Middleware::new().wrap(make_wrap("out", &order));
-        let wf =
-            create_workflow(CreateWorkflowConfig::new("mw-order").input::<serde_json::Value>())
-                .middleware::<()>(m_in)
-                .middleware::<()>(m_out)
-                .handler(|ctx: BaseCtx<serde_json::Value>| async move {
-                    ctx.step("inner", |_sc: StepCtx| async move {
-                        Ok(serde_json::json!({ "ok": true }))
-                    })
-                    .await
-                });
+        let m_in = make_server("in", &order);
+        let m_out = make_server("out", &order);
+        let wf = create_workflow(CreateWorkflowConfig::new("mw-order").input::<Value>())
+            .middleware([m_in, m_out])
+            .handler(|ctx: BaseCtx<Value>| async move {
+                ctx.step("inner", |_sc: StepCtx| async move {
+                    Ok(serde_json::json!({ "ok": true }))
+                })
+                .await
+            });
         let store = Arc::new(InMemoryStore::new());
         let out = run_workflow(
-            RunWorkflowOptions::new(wf.clone(), store)
-                .input(serde_json::json!({})),
+            RunWorkflowOptions::new(Arc::new(wf), store).input(serde_json::json!({})),
         )
-        .outcome().await
+        .outcome()
+        .await
         .unwrap();
         assert_eq!(out.status, RunStatus::Finished);
         assert_eq!(
@@ -1062,6 +1080,165 @@ mod tests {
                 "after-in".to_string(),
             ],
             "先注册的 middleware 在最外"
+        );
+    }
+
+    /// **step 拦截器**（本仓有意扩展）：server 里 `set_step_interceptor`，
+    /// 对真实执行的 step 作出 Skip/Park/透传决定。
+    #[tokio::test]
+    async fn step_interceptor_can_skip_and_park() {
+        let store = Arc::new(InMemoryStore::new());
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let ran_mw = ran.clone();
+
+        let wf = create_workflow(CreateWorkflowConfig::new("mw-interceptor").input::<Value>())
+            .middleware([Middleware::new().server(move |mut sc: MiddlewareServerFnArgs| {
+                let intercept: StepInterceptor = Arc::new(|ev: &StepEvent<'_>| {
+                    match ev.step_id {
+                        "b" => Some(StepAction::Skip {
+                            result: serde_json::json!("B-CACHED"),
+                        }),
+                        "c" => Some(StepAction::Park {
+                            signal_name: "__test-park".into(),
+                            meta: None,
+                        }),
+                        _ => None,
+                    }
+                });
+                sc.set_step_interceptor(intercept);
+                Box::pin(async move { sc.next(None).await })
+            })])
+            .handler({
+                let ran = ran_mw.clone();
+                move |ctx: WorkflowCtx| {
+                    let ran = ran.clone();
+                    async move {
+                        for id in ["a", "b", "c", "d"] {
+                            let ran = ran.clone();
+                            let sid = id.to_string();
+                            ctx.step(id, move |_sc: StepCtx| {
+                                let ran = ran.clone();
+                                let sid = sid.clone();
+                                async move {
+                                    ran.lock().unwrap().push(sid.clone());
+                                    Ok(serde_json::json!(sid))
+                                }
+                            })
+                            .await?;
+                        }
+                        Ok(serde_json::json!({ "ok": true }))
+                    }
+                }
+            });
+
+        let out = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf), store.clone())
+                .input(serde_json::json!({}))
+                .run_id("mi:1"),
+        )
+        .outcome()
+        .await
+        .unwrap();
+
+        assert_eq!(
+            ran.lock().unwrap().clone(),
+            vec!["a".to_string()],
+            "b skip 不执行；c 在入口 Park，c/d 都不执行"
+        );
+        assert_ne!(format!("{:?}", out.status), "Finished");
+
+        let events = store.get_events("mi:1").unwrap();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                crate::event::WorkflowEvent::StepFinished { step_id, result: Some(r), .. }
+                    if step_id == "b" && r == &serde_json::json!("B-CACHED")
+            )),
+            "Skip 的结果应作为 b 的 checkpoint 落盘"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                crate::event::WorkflowEvent::SignalAwaited { name, .. } if name == "__test-park"
+            )),
+            "Park 应落一条 __test-park 的 SignalAwaited"
+        );
+    }
+
+    /// `next` 对齐上游 `next(opts)`：第二次调用报错（上游用 `advanced` 标志，
+    /// 这里用 `Option::take`），见 `run-workflow.ts:1502-1513`。
+    #[tokio::test]
+    async fn middleware_next_is_at_most_once() {
+        let store = Arc::new(InMemoryStore::new());
+        let wf = create_workflow(CreateWorkflowConfig::new("mw-next-once").input::<Value>())
+            .middleware([Middleware::new().server(|mut sc: MiddlewareServerFnArgs| {
+                Box::pin(async move {
+                    let first = sc.next(None).await?;
+                    assert!(sc.next(None).await.is_err(), "第二次 next 必须报错");
+                    Ok(first)
+                })
+            })])
+            .handler(|_ctx: WorkflowCtx| async move { Ok(serde_json::json!({ "ok": true })) });
+
+        let out = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf), store).input(serde_json::json!({})),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+    }
+
+    /// 对齐上游 `ReadonlyArray<AnyMiddleware>`：不同来源的中间件放进同一个数组，
+    /// 各自的扩展**互不干扰**（不需要合并类型）。
+    #[tokio::test]
+    async fn any_middleware_array_mixes_distinct_sources() {
+        #[derive(serde::Deserialize, serde::Serialize, Debug, PartialEq, Clone)]
+        struct TraceExt {
+            trace: String,
+        }
+        struct TraceNs;
+        impl ExtNamespace for TraceNs {
+            const KEY: &'static str = "trace";
+            type Value = TraceExt;
+        }
+
+        let user_mw = Middleware::new().server(|mut sc: MiddlewareServerFnArgs| {
+            Box::pin(async move {
+                sc.next(Some(
+                    DefExt::<UserNs>::new(UserExt { user: "alice".into() }).into_value(),
+                ))
+                .await
+            })
+        });
+        let trace_mw = Middleware::new().server(|mut sc: MiddlewareServerFnArgs| {
+            Box::pin(async move {
+                sc.next(Some(
+                    DefExt::<TraceNs>::new(TraceExt { trace: "t-1".into() }).into_value(),
+                ))
+                .await
+            })
+        });
+
+        let wf = create_workflow(CreateWorkflowConfig::new("mw-mixed").input::<Value>())
+            .middleware(vec![user_mw, trace_mw])
+            .handler(|ctx: WorkflowCtx| async move {
+                Ok(serde_json::json!({
+                    "user": ctx.ext.user().user,
+                    "trace": ctx.ext.get::<TraceNs>().trace,
+                }))
+            });
+        let out = run_workflow(
+            RunWorkflowOptions::new(Arc::new(wf), Arc::new(InMemoryStore::new()))
+                .input(serde_json::json!({})),
+        )
+        .outcome()
+        .await
+        .unwrap();
+        assert_eq!(out.status, RunStatus::Finished);
+        assert_eq!(
+            out.output,
+            Some(serde_json::json!({ "user": "alice", "trace": "t-1" }))
         );
     }
 }

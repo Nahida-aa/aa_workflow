@@ -2,7 +2,7 @@
 //!
 //! 输入用 `create_workflow(CreateWorkflowConfig::new(id).input::<T>())` 声明
 //! （Rust 版 zod `inputSchema`：serde Deserialize 即运行时校验，缺字段/错类型
-//! 在首次恢复时报 schema 错误）；handler 收到 `BaseCtx<TInput, TState, TCtxExt>`，
+//! 在首次恢复时报 schema 错误）；handler 收到 `BaseCtx<TInput, TState>`，
 //! `ctx.input` 字段直接是 `TInput`（借用即 `&TInput`）。
 //! 输出类型从 handler 返回值自动推断（对齐 TanStack 的返回值推断，无 output 声明）。
 //!
@@ -703,9 +703,9 @@ mod tests {
     /// `opts` 是构造引擎入参的闭包——每个 drive 都要新建一份（deadline /
     /// yield_resume_at 是 per-drive 字段）。闭包收 `(workflow, store)`，因为
     /// [`RunWorkflowOptions`] 把这两项做成了**必填项**（对齐上游）。
-    async fn drive_to_pause<TInput, TOutput, TState, TCtxExt>(
+    async fn drive_to_pause<TInput, TOutput, TState>(
         store: &Arc<dyn RunStore>,
-        wf: &WorkflowDefinition<TInput, TOutput, TState, TCtxExt>,
+        wf: &WorkflowDefinition<TInput, TOutput, TState>,
         opts: impl Fn(AnyWorkflowDefinition, Arc<dyn RunStore>) -> RunWorkflowOptions,
     ) -> RunStatus {
         run_workflow(opts(wf.clone().into(), store.clone()))
@@ -715,9 +715,9 @@ mod tests {
     }
 
     /// 投递外部 signal 后再驱动一次，返回最终结果。
-    async fn drive_after_signal<TInput, TOutput, TState, TCtxExt>(
+    async fn drive_after_signal<TInput, TOutput, TState>(
         store: &Arc<dyn RunStore>,
-        wf: &WorkflowDefinition<TInput, TOutput, TState, TCtxExt>,
+        wf: &WorkflowDefinition<TInput, TOutput, TState>,
         opts: impl Fn(AnyWorkflowDefinition, Arc<dyn RunStore>) -> RunWorkflowOptions,
         step_id: &str,
         payload: serde_json::Value,
@@ -763,9 +763,9 @@ mod tests {
     /// 是为了让示例测试不必手写「等 sleep → 投递 → 再 drive」的循环。
     ///
     /// 非 timer 的挂起（approve / wait_for_event）原样返回，由调用方投递。
-    async fn drive_through_timers<TInput, TOutput, TState, TCtxExt>(
+    async fn drive_through_timers<TInput, TOutput, TState>(
         store: &Arc<dyn RunStore>,
-        wf: &WorkflowDefinition<TInput, TOutput, TState, TCtxExt>,
+        wf: &WorkflowDefinition<TInput, TOutput, TState>,
         opts: impl Fn(AnyWorkflowDefinition, Arc<dyn RunStore>) -> RunWorkflowOptions,
     ) -> aa_workflow_core::RunOutcome {
         loop {

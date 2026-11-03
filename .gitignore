@@ -3,3 +3,7 @@ packages/tmp/
 tmp/
 
 *.local.md
+.skill/
+.cursor/rules/skill-context.md
+.windsurf/rules/skill-context.md
+.claude/commands/

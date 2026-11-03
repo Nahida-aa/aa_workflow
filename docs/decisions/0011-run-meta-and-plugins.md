@@ -25,13 +25,13 @@
 | | `input` | `meta` |
 | --- | --- | --- |
 | 语义 | 业务数据 | 策略/扩展参数 |
-| 消费者 | handler | 中间件（wrap 前置、钩子） |
+| 消费者 | handler | 中间件（server 前置、step 拦截器） |
 | 落 `RunState` | 是 | 否 |
 | resume 可变 | 否 | 是（每次 drive 可换） |
 
 ### 插件挂载：构建期
 
-钩子（`on_before_step` / `on_step_finished`）随 `Middleware` 在
+中间件（及其经 `set_step_interceptor` 装的拦截器）随 `Middleware` 在
 `createWorkflow(...).middleware([...])` 时挂载。**不挂在 `RunWorkflowOptions`**——
 保持 [0009](0009-no-implicit-new-run.md) 的分层纪律：引擎 options 不出现策略形态
 的字段；插件列表若上游将来出（`feature/_09` §3.4 预测「定义期+运行期都支持」），
@@ -41,7 +41,7 @@
 
 | 选项 | 否决理由 |
 | --- | --- |
-| 继续用 `input.__dagPlan` 信封 | input 被迫混入策略参数；且 Rust 中间件读 input 需要它在 `BeforeStepEvent` 里透传，通道绕 |
+| 继续用 `input.__dagPlan` 信封 | input 被迫混入策略参数；且 Rust 中间件读 input 要额外透传，通道绕 |
 | meta 加进 `StepOptions`（per-step） | 策略是 run 级的，per-step 通道粒度错 |
 | 环境变量 / 全局注册表 | 隐式依赖、测试不可隔离 |
 

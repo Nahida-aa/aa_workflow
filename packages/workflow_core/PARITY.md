@@ -28,7 +28,7 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunWorkflowOptions.r
 | `runId: string` | `run_id: String`（字段） | ✅ | 公开字段，与 TS `runId` 同名同构 |
 | `input: TInput` | `input: In`（字段；未声明 schema 时 `Value`） | ✅ | 与 TS 同名同构；借用即 `&In` |
 | `state: TState` | `state: St`（字段；`St` 由 config `.state::<St>()` 限定） | ◐ | **实现细节不同**：TS 是 engine 共享对象的 in-place 引用（`baseCtx.state === engine.state`），Rust 是 per-drive 工作副本字段，durable 边界（step/approve/sleep/wait_for_event/yield）flush 回引擎镜像。镜像本身 per-invocation、每次 initialize 重建，故 flush 不参与持久性（与 TS 一致）；差异见差异清单 #7 |
-| `TExtensions`（middleware 积累的 context） | `ext: Ext`（字段；`Ext` 由 `builder.middleware::<PExt>()` 限定，无 middleware 时 `()`） | ◐ | TS 是 `BaseCtx<TInput,TState> & TExtensions` 交集；Rust 拍平成**单一** Ext 字段（差异 #9）。`produce` 产出 → 每 drive 反序列化进 `ctx.ext` |
+| `TExtensions`（middleware 积累的 context） | `ext: Ext`（字段；`Ext` 由 `builder.middleware::<PExt>([...])` 限定，无 middleware 时 `()`） | ◐ | TS 是 `BaseCtx<TInput,TState> & TExtensions` 交集；Rust 拍平成**单一** Ext 字段（差异 #9）。`produce` 产出 → 每 drive 反序列化进 `ctx.ext` |
 | `signal: AbortSignal`（run 级） | `is_cancelled()` | ◐ | 语义等价：取消信号可被动查询。差异：(1) 无法注册 `signal.addEventListener`（Rust 无该机制，需轮询）；(2) 引擎在 step 边界才检查——**step 闭包内的 `await` 无法被中断**，与 JS AbortSignal 同粒度但 Rust 侧无法「中止 promise」，闭包必须协作式自检（见下） |
 | `runtime: WorkflowRuntimeContext` | `deadline() / time_remaining() / should_yield() / yield_()` | ◐ | TS 是嵌套对象；Rust **拍平为 ctx 顶层方法**。`yield` 是 Rust 保留字 → 命名 `yield_` |
 | `runtime.deadline?: number` | `deadline() -> Option<i64>` | ✅ | 无 deadline 时 TS 为 `undefined`，Rust 为 `None` |
@@ -100,7 +100,7 @@ StepContext / StepRuntimeContext / WorkflowRuntimeContext / RunWorkflowOptions.r
    方法），句柄如 TS 一样只在闭包作用域（此处为字段私有）持有。
 9. **middleware Ext 交集 → 单一字段**：TS 支持多 middleware 的类型交集
    `{...ctx, ...m1Ext, ...m2Ext}`；Rust `ctx.ext: Ext` 为单一类型，
-   最后一个 `.middleware::<PExt>()` 决定 `Ext`；多个 ext 的 host 负责在
+   最后一个 `.middleware::<PExt>([...])` 决定 `Ext`；多个 ext 的 host 负责在
    PExt 结构体内组合。差异见
    `define/define_workflow.rs` `WorkflowBuilder::middleware`。
 10. **schema 即 serde 类型**：TS 的 `inputSchema`/`stateSchema`/`outputSchema`
@@ -171,7 +171,7 @@ L198）+ `types.ts`（`Ctx<TIn, TState, TExt>` L386）。
 | `config.version` | `.version()` | ✅ | |
 | `config.initialize` | `.initialize()` | ✅ | |
 | `config.defaultStepRetry` | `.default_step_retry(RetryPolicy::new(...))` | ✅ | |
-| `builder.middleware(md)` | `.middleware::<PExt>(Middleware { produce, wrap })` | ◐ | Ext 为单一字段（差异 #9） |
+| `builder.middleware([m1, m2])` | `.middleware::<PExt>([m1, m2])` | ◐ | 收数组（同上游）；Ext 仍是单一字段（差异 #9），无 `UnionToIntersection` |
 | `builder.previousVersions(v)` | `.previous_versions(Vec<Workflow>)` | ✅ | TS 传 `Array<{..., workflow}>`; Rust 传已构建的 `Workflow` 或 `WorkflowDefinition.into_workflow()` |
 | `attach` | `.attach()` | ◐ | 只读回放（合成 `RUN_STARTED` 头 + 整份日志重放 + status-only 时补终态事件）；**只认显式**，不抄上游 `startRun` 的隐式 redirect（见 #12） |
 | `builder.handler(\|ctx\| ...)` | `.handler(\|ctx: BaseCtx<In, St, Ext>\| async move { ... })` | ✅ | AOut 从返回值推断；输出用 `output_validator` 校验 |

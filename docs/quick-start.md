@@ -205,24 +205,37 @@ if ctx.input.expedited {            // 分支 = 普通 if
 ## Recipe: middleware 扩展 ctx
 
 ```rust
-#[derive(serde::Deserialize, serde::Serialize, Default)]
+// ① 中间件作者：声明扩展的命名空间（键名 + 类型只写一次）
+#[derive(serde::Deserialize, serde::Serialize)]
 struct UserExt { user: String }
+struct UserNs;
+impl ExtNamespace for UserNs {
+    const KEY: &'static str = "user";
+    type Value = UserExt;
+}
+impl_ext_accessors!(UserNs => UserAccess, user, try_user);   // ctx.ext.user()
 
+// ② 中间件：写扩展并对齐 TS 的 next({ context: { user } })
+let require_user = Middleware::new().server(|mut sc: MiddlewareServerFnArgs| {
+    Box::pin(async move {
+        sc.next(Some(DefExt::<UserNs>::new(UserExt { user: "alice".into() }).into_value())).await
+    })
+});
+
+// ③ 使用者：不写任何类型
 let wf = create_workflow(CreateWorkflowConfig::new("send-receipt").input::<serde_json::Value>())
-    .middleware::<UserExt>(
-        Middleware::new().produce(|_ctx| Ok(serde_json::json!({ "user": "alice" }))),
-    )
+    .middleware([require_user])                  // 同上游 .middleware([m])
     .handler(|ctx| async move {
-        // ctx.ext.user 现在是 typed 的
+        let user = ctx.ext.user();               // 对齐 TS 的 ctx.user
         ctx.step("email", |_sc| async move {
-            Ok(serde_json::json!({ "to": ctx.ext.user }))
+            Ok(serde_json::json!({ "to": user.user }))
         }).await?;
         Ok(serde_json::Value::Null)
     });
 ```
 
-与上游的差异：`Ext` 是**单一字段**（最后一个 `.middleware::<PExt>()` 决定），
-不是 TS 的类型交集。
+与上游的差异：扩展是**按命名空间存取**（`ctx.ext.user()`）而不是 ctx 上的字段
+（`ctx.user`）——Rust 的 struct 字段必须编译期固定。读取前要 `use` 那个访问器 trait。
 
 ## Recipe: 跨版本 resume
 

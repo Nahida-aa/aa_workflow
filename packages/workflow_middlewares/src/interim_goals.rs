@@ -1,96 +1,118 @@
-//! 临时目标的中间件版——基于 **step 边界钩子**（`Middleware::on_step_finished`）。
+//! 临时目标的中间件版——**对齐 TS `server` 形状**。
 //!
-//! 语义与 TS 版（`@wf-demo/workflow-middlewares` 的 `interimGoals`）**等价**：
-//! 目标全部 checkpoint 后，在**目标所在的那个 step 边界**停下，后面的 step 不跑。
+//! TS 版包装 `ctx.step`（它是可覆盖的函数属性）来「每个 step 完成后」检查目标；
+//! Rust 对齐为 [`MiddlewareServerFnArgs::set_step_interceptor`]——受控的一等 API，语义同构。
 //!
-//! # 为什么需要钩子
+//! # 行为
 //!
-//! TS 能做到是因为 `ctx.step` 是可覆盖的函数属性；Rust 的 `ctx.step` 是方法，
-//! 中间件原本只有 `wrap`（包裹整个 handler），只能「跑完再停」。step 边界钩子
-//! 补上了这个能力，且它是**机制**（任何策略都能用），不绑定「临时目标」这一个用法。
+//! 目标全部 checkpoint 后，在**目标之后的 step 入口**泊车，后面的 step 不跑。
+//!
+//! 注意时机：拦截器在 step **入口**调用，所以「goals 全部达成」是在
+//! `goals` 里最后一个 step 完成**之后**、下一个 step 入口处判定并泊车。
 //!
 //! # 转移检查
 //!
-//! 与引擎内建版一致：若本 drive 启动时目标**已全部达成**（续驱、或 reseed 导入），
-//! 则不泊车。这需要读日志——钩子只拿到 `run_id`，所以要**构造时注入
-//! `get_events`**（与 TS 版 `reseed({ getEvents })` 的做法一致）。
-
+//! 拦截器只在**真实执行**的 step 入口被调用——重放短路的 step 不会到达它。
+//! 所以续驱时已完成的 step 不会被重复计入 → 不会重复泊车。
+//! 开局即已达成（续驱 / reseed 导入）的情况由 `goals_done_at_start` 显式挡掉。
+//!
+//! # 需要 store
+//!
+//! 判断「开局目标是否已达成」要读日志，构造时注入 `get_events`。
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use aa_workflow_core::middleware::{Middleware, StepFinishedEvent, StepHookOutcome};
+use aa_workflow_core::middleware::{Middleware, MiddlewareServerFnArgs, StepAction, StepEvent, StepInterceptor};
 
 /// 保留信号名（与 `__timer` 同族）。
 pub const INTERIM_GOAL_SIGNAL: &str = "__interim-goal";
 
-/// input 里的字段名（宿主约定，供调用方在自己的 input 里放目标）。
+/// `RunWorkflowOptions.meta` 里的目标字段。
 pub const INTERIM_GOALS_FIELD: &str = "__interimGoals";
 
-/// 目标全部 checkpoint 后，在目标所在的 step 边界泊车。
+/// 读某个 run 的日志（引擎事件数组）。
+pub type GetEvents =
+    dyn Fn(&str) -> anyhow::Result<Vec<aa_workflow_core::event::WorkflowEvent>> + Send + Sync;
+
+/// 目标全部 checkpoint 后在下一个 step 入口泊车（后续 step 不执行）。
 ///
-/// # 行为
-///
-/// 1. 每个 step 的 `STEP_FINISHED` 落盘后，钩子被调用；
-/// 2. 把该 step 记入「本 drive 已达成」；
-/// 3. 若目标全部达成 → 返回 `Park`，引擎在该 step 边界停下，后续 step 不跑；
-/// 4. 宿主投 `__interim-goal` 信号续驱；重放时已完成的 step 短路，
-///    不会再触发钩子（它们不产生新的 checkpoint），也就不会重复泊车。
-///
-/// # 例
-///
-/// ```ignore
-/// let mw = interim_goals(
-///     vec!["merge".into()],
-///     |run_id| {
-///         // 从 store 读日志，收集 STEP_FINISHED 的 step_id
-///         Ok(vec![])
-///     },
-/// );
-/// ```
+/// `goals` 由调用方在构造时给出；若 `meta[INTERIM_GOALS_FIELD]` 存在则**以
+/// meta 为准**（每次 drive 可换，对齐 TS 的 per-drive 参数）。
 pub fn interim_goals<F>(goals: Vec<String>, get_events: F) -> Middleware
 where
-    F: Fn(&str) -> anyhow::Result<Vec<String>> + Send + Sync + 'static,
+    F: Fn(&str) -> anyhow::Result<Vec<aa_workflow_core::event::WorkflowEvent>>
+        + Send
+        + Sync
+        + 'static,
 {
-    let goals = std::sync::Arc::new(goals);
-    let get_events = std::sync::Arc::new(get_events);
-    let done: std::sync::Arc<Mutex<HashSet<String>>> =
-        std::sync::Arc::new(Mutex::new(HashSet::new()));
-    // 每个 run 只在第一次达成时泊一次；同 run 多次 drive 由转移检查兜住。
-    let parked: std::sync::Arc<Mutex<HashSet<String>>> =
-        std::sync::Arc::new(Mutex::new(HashSet::new()));
+    let base_goals = Arc::new(goals);
+    let get_events: Arc<GetEvents> = Arc::new(get_events);
 
-    Middleware::new().on_step_finished(move |ev: &StepFinishedEvent<'_>| {
-        if goals.is_empty() {
-            return Ok(StepHookOutcome::Continue);
-        }
+    Middleware::new().server(move |mut sc: MiddlewareServerFnArgs| {
+        let base_goals = base_goals.clone();
+        let get_events = get_events.clone();
 
-        // 转移检查：目标是否在本 step **之前**就已全部完成？
-        // 是 → 续驱 / reseed 导入的旧 checkpoint，不该为它再泊（否则重复泊车）。
-        // 本次刚完成的 step 也在日志里，所以判断时要把它本身排除。
-        let finished_before: HashSet<String> = get_events(ev.run_id)?
-            .into_iter()
-            .filter(|id| id != ev.step_id)
-            .collect();
-        if goals.iter().all(|g| finished_before.contains(g)) {
-            return Ok(StepHookOutcome::Continue);
-        }
+        Box::pin(async move {
+            // meta 优先（每次 drive 可换目标）；否则用构造时给的。
+            let goals: Vec<String> = sc
+                .ctx
+                .meta
+                .as_ref()
+                .and_then(|m| m.get(INTERIM_GOALS_FIELD))
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_else(|| (*base_goals).clone());
 
-        // 本 drive 内累积
-        let mut d = done.lock().expect("interim goals lock");
-        d.insert(ev.step_id.to_string());
-        if !goals.iter().all(|g| d.contains(g)) {
-            return Ok(StepHookOutcome::Continue);
-        }
+            if !goals.is_empty() {
+                // 开局已完成的目标（续驱 / reseed 导入）——不该为它们泊车。
+                let finished_at_start: HashSet<String> = get_events(&sc.ctx.run_id)?
+                    .iter()
+                    .filter_map(|e| match e {
+                        aa_workflow_core::event::WorkflowEvent::StepFinished { step_id, .. } => {
+                            Some(step_id.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let goals_done_at_start = goals.iter().all(|g| finished_at_start.contains(g));
 
-        // 已经为这个 run 泊过就不再泊（防御：正常由转移检查兜住）
-        let mut p = parked.lock().expect("interim park lock");
-        if !p.insert(ev.run_id.to_string()) {
-            return Ok(StepHookOutcome::Continue);
-        }
+                // 本 drive 已完成的 step（真跑完成；被 reseed 复用的由
+                // Skip 分支通过 meta 传不进来，所以这里只看真跑）。
+                let done: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+                let parked = Arc::new(Mutex::new(false));
 
-        Ok(StepHookOutcome::Park {
-            signal_name: INTERIM_GOAL_SIGNAL.to_string(),
-            meta: Some(serde_json::json!({ INTERIM_GOALS_FIELD: *goals })),
+                let intercept: StepInterceptor = Arc::new(move |ev: &StepEvent<'_>| {
+                    if goals_done_at_start {
+                        return None;
+                    }
+                    let mut d = done.lock().expect("interim goals lock");
+                    // 入口判定：上一个 step 完成后，goals 是否已全齐。
+                    // 当前 step 尚未执行，所以先判定再记录它「即将执行」。
+                    if !d.is_empty() && goals.iter().all(|g| d.contains(g)) {
+                        let mut p = parked.lock().expect("interim park lock");
+                        if *p {
+                            return None;
+                        }
+                        *p = true;
+                        d.clear();
+                        return Some(StepAction::Park {
+                            signal_name: INTERIM_GOAL_SIGNAL.to_string(),
+                            meta: Some(serde_json::json!({ INTERIM_GOALS_FIELD: goals })),
+                        });
+                    }
+                    if goals.contains(&ev.step_id.to_string()) {
+                        d.insert(ev.step_id.to_string());
+                    }
+                    None
+                });
+                sc.set_step_interceptor(intercept);
+            }
+
+            sc.next(None).await
         })
     })
 }

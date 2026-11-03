@@ -8,10 +8,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::define::{AnyWorkflowDefinition, RetryPolicy, StepCtx, StepOptions};
+use crate::define::{RetryPolicy, StepCtx, StepOptions};
+#[cfg(test)]
+use crate::define::AnyWorkflowDefinition;
 use crate::error::{RunError, StoreError, WorkflowError};
 use crate::event::{RunStatus, StepAttempt, StepState, StepStatus, WorkflowEvent};
 use crate::resource::Gate;
@@ -265,16 +267,17 @@ pub struct EngineRuntime {
     /// wrap 前置与 step 钩子经此读取策略参数；不参与 handler、不落 \`RunState\`。
     pub meta: Option<serde_json::Value>,
     pub pending_retries: Mutex<std::collections::HashMap<String, PendingRetry>>,
-    /// **Step-boundary hooks**，按中间件注册顺序收集（本仓有意扩展：TS 靠覆盖
-    /// `ctx.step` 达到同样能力，Rust 的 `ctx.step` 是方法、不可替换）。
+    /// **Step 拦截器**（本仓有意扩展：TS 靠覆盖 `ctx.step` 达到同样能力，
+    /// Rust 的 `ctx.step` 是方法、不可替换——由 [`Middleware::server`] 经
+    /// `MiddlewareServerFnArgs::set_step_interceptor` 设置）。
     ///
-    /// `exec_step` 在每个 step 的 `STEP_FINISHED` append 之后调用它们；任一返回
-    /// `Park` 即在该 step 边界停下。策略（临时目标、选择性作废等）放在
+    /// `exec_step` 入口调用；返回 `Skip`（不执行闭包、直接提交结果）、
+    /// `Park`（边界泊车）或透传。策略（临时目标、redo 复用等）放在
     /// middlewares 包里，引擎只提供这一层机制。
-    pub step_finished_hooks: Vec<crate::middleware::StepFinishedHook>,
-    /// **Before-step hooks**：在 step 闭包执行前调用，可 `Skip { result }`
-    /// 直接提交缓存结果（redo 用），或在边界 `Park`。
-    pub before_step_hooks: Vec<crate::middleware::BeforeStepHook>,
+    pub step_interceptor: Mutex<Option<crate::middleware::StepInterceptor>>,
+    /// 中间件在 server 里经 `MiddlewareServerFnArgs::next(ext)` 合并进来的 ctx 扩展
+    /// （擦除层 Value；驱动收尾反序列化进 handler 的 `TCtxExt`）。
+    pub ext_extra: Mutex<serde_json::Value>,
     /// F2-lite 临时目标（INTERIM_GOAL）：名单内步骤全部 checkpoint 后经保留
     /// 信号 `__interim-goal` 泊车（run → paused，宿主以 recover 续驱扩展边界）。
     /// 转移检查防重挂；未到达的 goal 永不触发（best-effort fence）。
@@ -439,6 +442,26 @@ impl EngineRuntime {
     /// F2-lite interim goal：goal 步骤 checkpoint 时记入 done 集合；全齐且
     /// 本 drive 启动时尚未全齐 → 返回 true（调用者经保留信号 `__interim-goal`
     /// 泊车）。转移检查防重挂；未到达的 goal 永不触发。
+    /// 设置 step 拦截器（中间件经 `MiddlewareServerFnArgs::set_step_interceptor` 调用）。
+    pub fn set_step_interceptor(&self, f: crate::middleware::StepInterceptor) {
+        *self
+            .step_interceptor
+            .lock()
+            .expect("step interceptor lock") = Some(f);
+    }
+
+    /// 合并中间件 `next(ext)` 传入的 ctx 扩展（Object.assign 同义）。
+    pub fn merge_ext(&self, value: serde_json::Value) {
+        let mut slot = self.ext_extra.lock().expect("ext extra lock");
+        if let (Some(a), Some(b)) = (slot.as_object_mut(), value.as_object()) {
+            for (k, v) in b {
+                a.insert(k.clone(), v.clone());
+            }
+        } else {
+            *slot = value;
+        }
+    }
+
     fn goal_boundary_reached(&self, step_id: &str) -> bool {
         let Some(goals) = &self.interim_goals else {
             return false;
@@ -485,82 +508,77 @@ where
     if is_cancelled(&inner.store, &inner.run_id) {
         return Err(WorkflowCancelled.into());
     }
-
-    // **Before-step hooks**（本仓有意扩展，与 on_step_finished 对称）。
-    //
-    // 在**执行闭包之前**调用，因此可以 `Skip { result }`：不跑 `run`，直接把这个
-    // 结果当作本 step 的结果落 `STEP_FINISHED`（redo / 缓存复用需要的正是这个）。
-    // 重放路径（下面的 live 短路）**先于**这里，所以已 checkpoint 的 step 不会
-    // 再问钩子——与 on_step_finished 的约定一致：钩子只作用于「本来要真跑」的 step。
-    if !inner.before_step_hooks.is_empty() {
-        let mut skipped: Option<serde_json::Value> = None;
-        for hook in &inner.before_step_hooks {
-            match hook(&crate::middleware::BeforeStepEvent {
+    // **Step 拦截器**（本仓有意扩展：TS 靠覆盖 ctx.step 达到同样能力）。
+    // 时机在重放短路之后——已 checkpoint 的 step 不会到达拦截器。
+    // 先取决定并释放锁（Park 路径含 await，不能持锁跨 await），再执行决定：
+    // Skip → 不执行闭包、直接提交结果；Park → 在本 step 边界停下；None → 正常。
+    let action = inner
+        .step_interceptor
+        .lock()
+        .expect("step interceptor lock")
+        .as_ref()
+        .and_then(|f| {
+            f(&crate::middleware::StepEvent {
                 run_id: &inner.run_id,
                 step_id,
-                meta: None,
                 run_meta: inner.meta.as_ref(),
-            })? {
-                crate::middleware::StepHookOutcome::Continue => {}
-                crate::middleware::StepHookOutcome::Skip { result } => {
-                    skipped = Some(result);
-                    break;
-                }
-                crate::middleware::StepHookOutcome::Park { signal_name, meta } => {
-                    let _ = crate::engine::exec_pause_with(
-                        inner,
-                        step_id,
-                        &signal_name,
-                        "parked before a middleware step boundary",
-                        None,
-                        meta,
-                        None,
+            })
+        });
+    if let Some(action) = action {
+        match action {
+            crate::middleware::StepAction::Skip { result } => {
+                // 与正常完成同样落账：STEP_FINISHED + live 状态 + publish。
+                let ts = now_ms();
+                let ev = WorkflowEvent::StepFinished {
+                    ts,
+                    run_id: inner.run_id.clone(),
+                    step_id: step_id.to_string(),
+                    result: Some(result.clone()),
+                    attempts: vec![StepAttempt {
+                        attempt: 1,
+                        started_at: ts,
+                        finished_at: ts,
+                        result: Some(result.clone()),
+                        error: None,
+                    }],
+                    meta: None,
+                };
+                inner.append(&ev)?;
+                inner.set_live(
+                    step_id,
+                    StepState {
+                        status: StepStatus::Success,
+                        result: Some(result.clone()),
+                        error: None,
+                        started_at: Some(ts),
+                        finished_at: Some(ts),
+                    },
+                );
+                inner.publish(&ev);
+                return serde_json::from_value(result).map_err(|e| {
+                    anyhow::anyhow!(
+                        "step `{step_id}`: a middleware Skip result does not deserialize into \
+                         `{}`: {e}",
+                        std::any::type_name::<T>()
                     )
-                    .await;
-                    return Err(WorkflowParked.into());
-                }
+                });
             }
-        }
-        if let Some(result) = skipped {
-            // 与正常完成同样落账：STEP_FINISHED + live 状态 + publish。
-            let ts = now_ms();
-            let ev = WorkflowEvent::StepFinished {
-                ts,
-                run_id: inner.run_id.clone(),
-                step_id: step_id.to_string(),
-                result: Some(result.clone()),
-                attempts: vec![StepAttempt {
-                    attempt: 1,
-                    started_at: ts,
-                    finished_at: ts,
-                    result: Some(result.clone()),
-                    error: None,
-                }],
-                meta: None,
-            };
-            inner.append(&ev)?;
-            inner.set_live(
-                step_id,
-                StepState {
-                    status: StepStatus::Success,
-                    result: Some(result.clone()),
-                    error: None,
-                    started_at: Some(ts),
-                    finished_at: Some(ts),
-                },
-            );
-            inner.publish(&ev);
-            return serde_json::from_value(result).map_err(|e| {
-                anyhow::anyhow!(
-                    "step `{step_id}`: a middleware Skip result does not deserialize into \
-                     `{}`: {e}",
-                    std::any::type_name::<T>()
+            crate::middleware::StepAction::Park { signal_name, meta } => {
+                let _ = crate::engine::exec_pause_with(
+                    inner,
+                    step_id,
+                    &signal_name,
+                    "parked at a middleware step boundary",
+                    None,
+                    meta,
+                    None,
                 )
-            });
+                .await;
+                return Err(WorkflowParked.into());
+            }
         }
     }
 
-    // F2-lite 耐久重试：上次驱动留下的待重试状态——未到期则泊车（__timer +
     // deadline，自轮询驱动循环到期后重驱），到期则以携带的 attempts 续跑。
     // 跨重启等价：pending 状态从日志折叠（StepRetryScheduled），驱动启动时
     // 重建（见 run_workflow 的 pending_retries 折叠）。
@@ -734,36 +752,6 @@ where
                     },
                 );
                 inner.publish(&step_finished_event);
-                // **Step-boundary hook**（本仓有意扩展；TS 靠覆盖 ctx.step
-                // 达到同样能力，Rust 方法不可替换）。
-                // 在 STEP_FINISHED 已 append、live 状态已更新之后调用——
-                // 此刻该 step 已持久完成，返回 Park 即在本 step 边界停下。
-                if !inner.step_finished_hooks.is_empty() {
-                    for hook in &inner.step_finished_hooks {
-                        let outcome = hook(&crate::middleware::StepFinishedEvent {
-                            run_id: &inner.run_id,
-                            step_id,
-                            result: &recorded,
-                            attempts: attempts.len(),
-                            run_meta: inner.meta.as_ref(),
-                        })?;
-                        if let crate::middleware::StepHookOutcome::Park { signal_name, meta } =
-                            outcome
-                        {
-                            let _ = crate::engine::exec_pause_with(
-                                inner,
-                                step_id,
-                                &signal_name,
-                                "parked at a middleware step boundary",
-                                None,
-                                meta,
-                                None,
-                            )
-                            .await;
-                            return Err(WorkflowParked.into());
-                        }
-                    }
-                }
                 // F2-lite interim goal：goal 全 checkpoint 且本 drive 启动时
                 // 尚未全齐 → 经保留信号 __interim-goal 泊车（宿主以 recover
                 // 续驱扩展边界；转移检查防重挂）。

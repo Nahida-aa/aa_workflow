@@ -37,14 +37,14 @@ fn loader(store: Arc<InMemoryStore>) -> impl Fn(&str) -> anyhow::Result<HashMap<
 fn make_wf(
     exec: Arc<Mutex<Vec<String>>>,
     mw: Option<aa_workflow_core::middleware::Middleware>,
-) -> impl Fn() -> aa_workflow_core::define::WorkflowDefinition<serde_json::Value, serde_json::Value, serde_json::Value, ()>
+) -> impl Fn() -> aa_workflow_core::define::WorkflowDefinition<serde_json::Value, serde_json::Value, serde_json::Value>
 + Clone {
     move || {
         let exec = exec.clone();
         let mut builder =
             create_workflow(CreateWorkflowConfig::new("redo").input::<serde_json::Value>());
         if let Some(m) = mw.clone() {
-            builder = builder.middleware::<()>(m);
+            builder = builder.middleware([m]);
         }
         builder.handler(
             move |ctx: WorkflowCtx| {
@@ -183,13 +183,13 @@ async fn redo_with_missing_source_runs_everything() {
     let ran_in = ran.clone();
 
     let wf = create_workflow(CreateWorkflowConfig::new("redo2").input::<serde_json::Value>())
-        .middleware::<()>(reseed(
+        .middleware([reseed(
             ReseedPlan {
                 source_run_id: "ghost".into(),
                 redo_set: vec![],
             },
             loader(store.clone()),
-        ))
+        )])
         .handler(move |ctx: WorkflowCtx| {
             let ran = ran_in.clone();
             async move {

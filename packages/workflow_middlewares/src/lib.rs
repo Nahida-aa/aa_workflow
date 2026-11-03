@@ -4,50 +4,65 @@
 //! 实现（机制在 [`aa_workflow_core::middleware`]），而是在它之上提供几个
 //! **现成的策略中间件**。
 //!
-//! # ⚠️ Rust 侧的能力边界（与 TS 不同，必须先读）
+//! # 能力边界（与 TS 的差异只剩两处，均已论证）
 //!
-//! TS 的中间件能**替换 `ctx.step`**——它只是 `ctx` 对象上的一个函数属性，
-//! `ctx.step = wrapped` 即可。这就是 TS 版 `interimGoals` / `reseed` 能做到
-//! 「逐 step 拦截」的原因。
+//! 中间件形状已经**与 TS 对齐**：一个 `server` 函数，最内层是 handler，外层
+//! 靠 `next()` 推进（洋葱）。TS 的 `server` 能做三件事，Rust 一一对应：
 //!
-//! **Rust 做不到**：
+//! | TS `server` 里做的事 | Rust 对应 |
+//! | --- | --- |
+//! | `next({ context: {...} })` 扩展 ctx | [`MiddlewareServerFnArgs::next`]`(ext)`（一次调用，同构） |
+//! | 在 `next` 前后加行为（计时 / 日志） | `server` 闭包里 `sc.next(..).await` 前后 |
+//! | `ctx.step = wrapped` 拦截 step | [`MiddlewareServerFnArgs::set_step_interceptor`] |
 //!
-//! | | TS | Rust |
-//! | --- | --- | --- |
-//! | `ctx.step` | 对象上的函数属性，可赋值覆盖 | `&self` 上的**方法**，不可替换 |
-//! | 中间件能碰的 | 整个 `ctx` 对象引用 | [`Middleware::produce`]（`ctx.ext`）+ [`Middleware::wrap`]（整体包裹） |
-//! | 引擎内部 | JS 闭包，中间件够不着 | `pub(crate) engine`，**外部 crate 访问不到** |
-//! | 拦截「第 N 次 step 调用」 | ✅ | ❌ |
+//! 剩下的差异是**语言必然**，不是设计取舍：
 //!
-//! 因此本包提供的是 **Rust 能表达的等价形态**，语义与 TS 版**不完全相同**
-//! （见每个中间件的文档）。
+//! 1. `TCtxExt` 的类型交集：TS 编译期 `UnionToIntersection`，Rust 运行期
+//!    serde 反序列化（同 axum extensions）。
+//! 2. `ctx.step` 是方法不是字段，所以「拦截」被收成显式 API
+//!    （`set_step_interceptor`），而不是赋值覆盖。
 //!
-//! # 计划中的解法（有意扩展）
+//! Rust 侧还**多**一项能力：拦截器能返回 `Park`（在 step 边界停下整条
+//! drive），`server` 也能 `take_over`（跳过 handler 直接出结果）。见
+//! `docs/decisions/0002-rust-step-hooks.md`。
 //!
-//! 给 [`aa_workflow_core::middleware::Middleware`] 增加**钩子**，而不是往
-//! `RunWorkflowOptions` 里加策略参数。判据：
+//! # 使用者不用写 `<Ext>`（内置中间件固定 `Middleware<(), ()>`）
 //!
-//! - `interim_goals` / `reseed_run` 是**策略**（只有一种用法、上游也没有）——
-//!   **不放进引擎**（已计划删除）；
-//! - 钩子是**机制**（任何策略都能用）——引擎只该长出机制，策略放本包。
+//! 三个内置中间件都是**不写扩展**的策略（只读 `meta` / `input`），所以它们的构造函数
+//! 返回 `Middleware<(), ()>` 而不是泛型未知的 `Middleware`。好处是调用点
+//! **完全不用写类型参数**：
 //!
-//! 记录见 `docs/feature-requirements.md`「有意扩展：Rust 中间件的能力钩子」。
+//! ```rust,ignore
+//! .middleware([interim_goals(vec!["b".into()], get_events)])
+//! .middleware([reseed(plan, load_results)])
+//! .middleware([dag_policies(shape, get_events)])
+//! ```
 //!
-//! # 更推荐的路径
+//! **给中间件作者的建议**：如果你的中间件不写 `ctx.ext`，函数返回值就写成
+//! `Middleware<(), ()>`，使用者就能省掉 `.middleware::<Ext>(..)`。
+//! 只有「确实要写扩展」的中间件才需要使用者手写 `<Ext>`——`Ext` 是 handler 侧
+//! `ctx.ext` 的类型，Rust 没有 TS 的 `UnionToIntersection`（见 `docs/decisions/0013`）。
 //!
-//! Rust 侧**引擎本身就有** `interim_goals` / `reseed_run`（`RunWorkflowOptions`
-//! 字段）。它们比中间件更直接、语义更完整。中间件的价值只在：
+//! # 策略参数走 `RunWorkflowOptions.meta`
 //!
-//! - 想在**不改引擎**的前提下表达同样策略；
-//! - 或者只想在 handler 前后加行为（`wrap` 擅长这个）。
-//!
-//! [`Middleware::produce`]: aa_workflow_core::middleware::Middleware::produce
-//! [`Middleware::wrap`]: aa_workflow_core::middleware::Middleware::wrap
-
+//! 三个中间件都从 [`ctx.meta`](aa_workflow_core::define::BaseCtx) 读策略参数
+//! （`__interimGoals` / `__dagPlan`），而不是往引擎加字段——`interim_goals` /
+//! `reseed_run` 这类**策略**不该长在引擎上（见 `docs/decisions/0001`）。
 mod dag;
 mod interim_goals;
 mod reseed;
 
-pub use dag::{dag_policies, GetEvents, DAG_PLAN_FIELD, INTERIM_GOAL_SIGNAL};
-pub use interim_goals::{interim_goals, INTERIM_GOALS_FIELD};
-pub use reseed::{reseed, LoadResults, ReseedPlan};
+pub use dag::{DAG_PLAN_FIELD, GetEvents, INTERIM_GOAL_SIGNAL, dag_policies};
+pub use interim_goals::{INTERIM_GOALS_FIELD, interim_goals};
+pub use reseed::{LoadResults, ReseedPlan, reseed};
+
+/// 供文档链接用：把常用名字提上来，避免调用方再导一遍 core。
+///
+/// ```ignore
+/// use aa_workflow_middlewares::prelude::*;
+/// ```
+pub mod prelude {
+    pub use aa_workflow_core::middleware::{
+        Middleware, MiddlewareServerFn, MiddlewareServerFnArgs, StepAction, StepEvent, StepInterceptor,
+    };
+}

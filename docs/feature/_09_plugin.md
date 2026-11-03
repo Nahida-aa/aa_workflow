@@ -7,8 +7,14 @@
 ## 0. 一句话
 
 上游**现在没做插件**，但它的结构已经把自己逼向那条路：**中间件能力不够 → 横切能力写死
-→ 写死的东西一多，迟早抽象成插件列表**。本仓的 `Middleware::on_step_finished` 是朝那个
-方向的一小步，**归属暂定在 `Middleware` 上**，等上游真出 `plugins` 再考虑搬家。
+→ 写死的东西一多，迟早抽象成插件列表**。本仓的 `Middleware`（单 `server` +
+`set_step_interceptor`）是朝那个方向的一小步，**归属暂定在 `Middleware` 上**，等上游真出
+`plugins` 再考虑搬家。
+
+> 2026-11-02 订正：本节早期版本把「在 step 边界做策略」写成「中间件 ❌」——那是按
+> **TS 中间件的公开契约**判断的（§2 的评判标准不变）。**Rust 侧现已能用中间件做到**
+> （拦截器返回 `Skip` / `Park`，有测试），`take_over` 还能整条接管 handler。所以
+> §2 的表格对 Rust 不成立，差异见 [0002](../decisions/0002-rust-step-hooks.md)。
 
 ---
 
@@ -39,23 +45,28 @@ export interface WorkflowTelemetryOptions {
 
 **「写死」说的就是最后两行**：能力（tracing）内建、形态固定、用户只能在给定参数里调。
 
-## 2. 中间件为什么不够（本仓实测，同样适用于上游）
+## 2. 中间件为什么不够（**针对 TS**，不适用于本仓 Rust）
 
-中间件能做的和做不到的（`docs/tanstack/middleware.md` §3）：
+本节判断的是**上游 TS 中间件的公开契约**。中间件能做的和做不到的
+（`docs/tanstack/middleware.md` §3）：
 
-| 需求 | 中间件 |
-| --- | --- |
-| 扩展 ctx（`ctx.ai`） | ✅ |
-| 包裹整个 handler（计时、日志） | ✅ |
-| **在 step 边界做策略** | ❌（`wrap` 看不到 handler 内部；`ctx` 上没有 store） |
-| **改变执行**（跳过某步、在边界停） | ❌ |
+| 需求 | TS 中间件 | 本仓 Rust 中间件 |
+| --- | --- | --- |
+| 扩展 ctx（`ctx.ai`） | ✅ | ✅ `next(ext)` |
+| 包裹整个 handler（计时、日志） | ✅ | ✅ `sc.next(..).await` 前后 |
+| **在 step 边界做策略** | ❌（`next` 只能整体 await；`ctx` 上没有 store） | ✅ `set_step_interceptor` |
+| **改变执行**（跳过某步、在边界停） | ❌（只能靠未承诺的 `ctx.step` 覆盖） | ✅ `Skip` / `Park` / `take_over` |
 
-上游之所以把 telemetry 写死，正是因为这类需求**中间件接不住**：span 必须开在
-「每个 step 开始/结束」上，而那是 handler 内部的事。
+**上游**之所以把 telemetry 写死，正是因为这类需求在**它的**中间件契约下接不住：
+span 必须开在「每个 step 开始/结束」上，而那是 handler 内部的事。
 
 > 佐证：TS 里 `ctx.step` 是可覆盖的函数属性，所以**有人可以**用直接赋值做到；
 > 但那是**未承诺的实现细节**（`reservedCtxFields` 明说不能遮蔽）。用它做产品级扩展
 > 等于赌上游不加固。
+
+对本仓的含义：「中间件接不住 → 只能等插件」这个推论**不能用**。Rust 侧已经用
+中间件实现了逐 step 策略（临时目标 / redo / DAG），只是**写法与 TS 不同**——
+这是要付的维护代价，见 [0002](../decisions/0002-rust-step-hooks.md)。
 
 ## 3. 预测：上游的演进路径
 
@@ -128,48 +139,65 @@ runWorkflow({ workflow, runStore, plugins: [debugTrace()] })
 
 ## 4. 本仓的现状与定位
 
-### 4.1 已做：`Middleware::on_step_finished`
+### 4.1 已做：单 `server` 中间件（对齐 TS）
 
 ```rust
-pub enum StepHookOutcome {
-    Continue,
-    Park { signal_name: String, meta: Option<serde_json::Value> },
+// packages/workflow_core/src/middleware/create_middleware.rs
+pub struct Middleware {
+    pub server: Arc<dyn Fn(MiddlewareServerFnArgs) -> BoxFuture<'static, anyhow::Result<Value>> + Send + Sync>,
 }
-pub type StepFinishedHook =
-    Arc<dyn Fn(&StepFinishedEvent<'_>) -> anyhow::Result<StepHookOutcome> + Send + Sync>;
+
+impl MiddlewareServerFnArgs {
+    pub fn next(&mut self, ext: impl Into<Option<Value>>) -> BoxFuture<Result<Value>>; // 对齐 next({ context })
+    pub fn set_step_interceptor(&self, f: StepInterceptor);    // 对齐 ctx.step = wrapped
+
+    pub fn take_over(&mut self);                               // Rust 特有：不跑 handler
+}
+
+pub enum StepAction {
+    Skip { result: Value },                       // 不跑闭包，直接落 STEP_FINISHED
+    Park { signal_name: String, meta: Option<Value> },  // 边界泊车
+}
 ```
 
-- 调用时机：`STEP_FINISHED` 已 append、live 状态已更新之后；
-- **能改变执行**（`Park` 在 step 边界停下）——这一点比上游现有扩展点宽，见 §4.3。
+**这是「插件能力」的核心**：中间件能按 step 做决定（复用结果、在边界停），
+也能整条接管 handler。所以之前「中间件接不住 telemetry 那种逐 step 需求」的
+判断，在 Rust 侧已经不成立——telemetry 完全可以写成中间件。
 
-为什么要有它：Rust 的 `ctx.step` 是方法、不可替换，`wrap` 只能包整个 handler，
-没有钩子就只能做「跑完再停」。钩子补上这个能力，且它是**机制**——
-不绑定任何具体策略。
+测试：`packages/workflow_middlewares/tests/{interim_goals,reseed,dag_policies}.rs`
+（7 个用例全绿）。
+
+> 早期版本这里是两个钩子（`Middleware::on_step_finished` /
+> `on_before_step` + `StepHookOutcome`）。**已删除**，原因是对齐 TS 形状、
+> 不做两套写法，见 [0002](../decisions/0002-rust-step-hooks.md)。
 
 ### 4.2 归属是**暂时的**
 
-钩子当前挂在 `Middleware` 上。理由与风险：
+中间件当前由 `createWorkflow(...).middleware(mw)` 挂载（构建期）。理由与风险：
 
 | 理由 | 风险 |
 | --- | --- |
 | 不凭空造新概念（上游连插件雏形都没有） | 若上游将来把「插件」与「中间件」分成两个概念，我们要搬家 |
-| 与既有 API 连续（`.middleware(mw)` 已存在） | — |
+| 与既有 API 连续（`.middleware(...)` 已存在） | — |
 
-**搬家成本低**：`StepFinishedEvent` / `StepHookOutcome` 的类型签名**独立于挂载点**。
-本仓的收集点只有一处（`run_workflow.rs` 构造 `EngineRuntime` 时从
-`definition.middlewares` 取），无论上游最终选「定义期 / 运行期 / 两者」，都只是
-换个来源再合并，不涉及类型与语义改动。
+**搬家成本低**：`StepEvent` / `StepAction` / `StepInterceptor` 的类型签名**独立于
+挂载点**。收集点是 `define_workflow.rs` 的折叠循环（唯一一处），无论上游最终选
+「定义期 / 运行期 / 两者」，都只是换个来源再合并。
+
+策略参数不挂在中间件上，而是走 `RunWorkflowOptions.meta`（每次 drive 可换），
+见 [0011](../decisions/0011-run-meta-and-plugins.md)。
 
 ### 4.3 一个自觉的越界
 
-上游的 `mapStepMeta` 是**纯观察**（只返回 attributes）。我们的钩子返回 `Park`，
-**能中断执行**。
+上游的 `mapStepMeta` 是**纯观察**（只返回 attributes）。我们的拦截器返回
+`Skip` / `Park`，**能改变执行**。
 
-这是必要的——没有它做不出「目标达成即停」。而且从 TS 侧看，「插件能影响执行」在
-语义上并非禁忌：那边用户可以覆盖 `ctx.step` 来改变执行，只是上游没把它写成契约。
+这是必要的——没有它做不出「目标达成即停」和「redo 复用」。而且从 TS 侧看，
+「能影响执行」在语义上并非禁忌：那边用户可以覆盖 `ctx.step`，只是上游没把它
+写成契约。
 
-**但这条要在文档里承认**：我们的钩子在能力上比上游现有扩展点更宽。如果上游最终
-决定插件只读，本仓会**保留这个更宽的版本**（因为临时目标等功能依赖它），并在
+**但这条要在文档里承认**：我们的能力比上游现有扩展点更宽。如果上游最终决定
+插件只读，本仓会**保留这个更宽的版本**（临时目标等功能依赖它），并在
 `docs/tanstack-alignment.md` 记档为有意差异。
 
 ---
@@ -178,29 +206,18 @@ pub type StepFinishedHook =
 
 | 问题 | 现状 | 何时需要定 |
 | --- | --- | --- |
-| 钩子是否也要 `on_before_step` | 暂无需求 | 出现「进入某步前拦截」的场景时 |
-| 钩子能否**跳过**某步（返回缓存） | 暂无（`Park` 只能停） | 做 `reseed` 中间件时**必须**（见 §6） |
-| 钩子顺序与中间件注册顺序 | 按声明顺序 | 已定 |
-| 与 `recover` / 重放的关系 | 重放的 step 短路、不触发钩子 | 已定（有测试） |
+| 拦截器能否**跳过**某步 | ✅ 已实现（`StepAction::Skip`） | — |
+| 拦截器执行顺序（多个中间件都装拦截器） | **后者覆盖前者**——`set_step_interceptor` 是单槽，后装的赢 | 出现「两个策略都要按 step 判断」时改成链 |
+| 拦截器与中途取消的先后 | 先查取消，再问拦截器 | 已定 |
+| 与 `recover` / 重放的关系 | 重放的 step 短路、不触发拦截器 | 已定（有测试） |
 
-## 6. 下一步：`reseed` 中间件需要第二种钩子能力
+---
 
-`reseed`（redo）需要「这个 step 不执行，直接用一个现成结果落 checkpoint」。
-现有钩子只能 `Park`，不能**替换结果**。缺的能力：
+## 6. 已解决：redo 需要「跳过」能力
 
-```rust
-enum StepHookOutcome {
-    Continue,
-    Park { signal_name, meta },
-    Skip { result: Value },     // ← 需要新增：跳过闭包、直接落 STEP_FINISHED(result)
-}
-```
-
-但这与「钩子在 step **完成之后**调用」冲突——要跳过就得在**执行之前**介入。
-所以真正需要的是 **`on_before_step` 钩子**（可返回 `Skip { result }`），
-而不是给 `on_step_finished` 加变体。
-
-**这印证了 §4.2 的判断**：钩子的形状还在演进，现在定死归属不划算。
+早期记录的问题是「`reseed` 需要不执行闭包、直接落一个现成结果」。现在由
+`StepAction::Skip { result }` 提供，`reseed` / `dag_policies` 都基于它实现，
+测试见 `tests/reseed.rs`（`redo_reuses_steps_outside_redo_set`）。
 
 ---
 
@@ -208,9 +225,9 @@ enum StepHookOutcome {
 
 1. **上游迟早会做插件**——证据是「telemetry 写死 + 运维面缺口 + primitive 清单里没有
    横切扩展点」；置信度中高。
-2. **本仓现在可以有自己的钩子**，但**归属暂定**在 `Middleware`，类型设计保持可与
-   挂载点解耦。
+2. **本仓现在有自己的中间件能力**，形状与 TS 对齐；**归属暂定**在 `Middleware`，
+   类型设计与挂载点解耦。
 3. **不加业务参数**（`interim_goals` / `reseed_run` 计划删除）——那是策略，不是机制；
-   上游三轮规划文档零提及，留着就是维护一份永不合并的 fork。
-4. **承认越界**：我们的钩子能改变执行，比上游现有扩展点宽。这是功能需要，记档为
+   上游三轮规划文档零提及，留着就是维护一份永不合并的 fork。策略参数走 `meta`。
+4. **承认越界**：我们的拦截器能改变执行，比上游现有扩展点宽。这是功能需要，记档为
    有意差异。

@@ -31,9 +31,9 @@ pub struct DriveOpts<'a> {
 impl DriveOpts<'_> {
     /// 组装引擎入参。`workflow` / `store` 由调用方传入——它们是
     /// [`RunWorkflowOptions`] 的**必填项**（对齐上游 `RunWorkflowOptions`）。
-    fn into_run_options<TInput, TOutput, TState, TCtxExt>(
+    fn into_run_options<TInput, TOutput, TState>(
         &self,
-        workflow: Arc<WorkflowDefinition<TInput, TOutput, TState, TCtxExt>>,
+        workflow: Arc<WorkflowDefinition<TInput, TOutput, TState>>,
         store: Arc<dyn RunStore>,
         input: serde_json::Value,
     ) -> RunWorkflowOptions {
@@ -49,8 +49,8 @@ impl DriveOpts<'_> {
 }
 
 /// 跑/续跑一条 workflow，返回引擎的 [`RunOutcome`]。
-pub async fn drive<TInput, TOutput, TState, TCtxExt>(
-    workflow: &WorkflowDefinition<TInput, TOutput, TState, TCtxExt>,
+pub async fn drive<TInput, TOutput, TState>(
+    workflow: &WorkflowDefinition<TInput, TOutput, TState>,
     store: Arc<dyn RunStore>,
     input: serde_json::Value,
     opts: DriveOpts<'_>,
